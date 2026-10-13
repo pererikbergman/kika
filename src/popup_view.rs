@@ -520,6 +520,7 @@ mod tests {
     use crate::op::GitOp;
     use crate::popup::PromptKind;
     use crate::popup::{ConfirmKind, DeleteBranchConfirm, DiscardConfirm, DiscardWhat};
+    use crate::test_support::load_list;
     use crate::view::{buffer_rows, render};
 
     fn draw(state: &AppState, width: u16, height: u16) -> (Buffer, Vec<String>) {
@@ -1198,15 +1199,18 @@ mod tests {
     fn each_pull_request_popup(width: u16, height: u16) -> Vec<(&'static str, Vec<String>)> {
         use crate::pick_list::{PickList, PickPurpose};
         let mut state = workspace(&["a.rs"]);
-        state.branches.loaded(Ok(vec![crate::git::branches::Branch {
-            name: format!("feature/{}-日本語", "x".repeat(120))
-                .as_str()
-                .into(),
-            head: false,
-            upstream: Some("origin/x".into()),
-            track: crate::git::branches::Track::None,
-            merged: false,
-        }]));
+        load_list(
+            &mut state.branches.list,
+            Ok(vec![crate::git::branches::Branch {
+                name: format!("feature/{}-日本語", "x".repeat(120))
+                    .as_str()
+                    .into(),
+                head: false,
+                upstream: Some("origin/x".into()),
+                track: crate::git::branches::Track::None,
+                merged: false,
+            }]),
+        );
         state.pr_draft = Some(long_draft());
         let popups = [
             (

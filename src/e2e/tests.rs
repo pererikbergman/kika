@@ -1740,7 +1740,7 @@ async fn t_and_shift_t_tag_a_commit_and_the_tags_tab_lists_and_deletes_them() {
     show_tags(&mut app).await;
     app.assert_screen_contains("◆ heavy");
     app.assert_screen_contains(&format!("  light  {}", &first[..7]));
-    if app.state().branches.tags.selected_tag().unwrap().name != "light".into() {
+    if app.state().branches.tags.selected_row().unwrap().name != "light".into() {
         app.press(KeyCode::Char('j')).await;
     }
     app.assert_screen_contains("Commits · light");

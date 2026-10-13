@@ -69,7 +69,12 @@ pub struct PrCreating {
 /// else the only remote, on a host the global config lists.
 fn forge_link(state: &AppState) -> Option<(ForgeKind, ForgeRepo)> {
     forge_for(
-        &state.branches.remotes.remotes,
+        &state
+            .branches
+            .remotes
+            .remotes()
+            .cloned()
+            .collect::<Vec<_>>(),
         &state.forge.hosts,
         &state.forge_gitlab_hosts,
     )
@@ -285,8 +290,7 @@ impl AppState {
             .ok_or("The upstream is not a listed remote branch; fetch first")?;
         let not_github = "The upstream's remote is not on a GitHub host in the global config";
         let head_remote = remotes
-            .remotes
-            .iter()
+            .remotes()
             .find(|r| r.configured && r.name == pushed.remote)
             .ok_or(not_github)?;
         let (_, head_repo) = repo_of(head_remote, &self.forge.hosts, &[]).ok_or(not_github)?;
@@ -294,8 +298,7 @@ impl AppState {
             .map_err(|_| "The upstream's name is not UTF-8, which GitHub needs")?
             .to_string();
         let targets = remotes
-            .remotes
-            .iter()
+            .remotes()
             .filter(|r| r.configured)
             .filter_map(|r| Some((r.name.clone(), repo_of(r, &self.forge.hosts, &[])?.1)))
             .filter(|(_, repo)| repo.host.eq_ignore_ascii_case(&head_repo.host))
@@ -354,8 +357,7 @@ impl AppState {
         let bases: Vec<String> = self
             .branches
             .remotes
-            .remotes
-            .iter()
+            .remotes()
             .filter(|r| r.name == target.0)
             .flat_map(|r| &r.branches)
             .filter_map(|b| std::str::from_utf8(&b.short).ok())
@@ -544,6 +546,7 @@ mod tests {
     use crate::layout::SidePanel;
     use crate::menu::{self, MenuId};
     use crate::model::Focus;
+    use crate::test_support::{load_list, load_remotes};
 
     const OID: &str = "0123456789abcdef0123456789abcdef01234567";
 
@@ -596,12 +599,15 @@ mod tests {
         let mut state = AppState::new(Context::Workspace)
             .with_forge_hosts(vec![host("github.com")])
             .with_forge_links(vec![host("gitlab.example.com")], Some(browser()));
-        state.branches.loaded(Ok(vec![
-            branch("topic", Some("origin/topic")),
-            branch("main", Some("origin/main")),
-            branch("local", None),
-        ]));
-        state.branches.remotes.loaded(Ok(remotes));
+        load_list(
+            &mut state.branches.list,
+            Ok(vec![
+                branch("topic", Some("origin/topic")),
+                branch("main", Some("origin/main")),
+                branch("local", None),
+            ]),
+        );
+        load_remotes(&mut state.branches.remotes.list, Ok(remotes));
         state.forge.repo = Some(repo("acme", "widgets"));
         state.focus = Focus::Branches;
         state.expanded = SidePanel::Branches;
@@ -620,10 +626,11 @@ mod tests {
     fn select(state: &mut AppState, name: &str) {
         let at = state
             .branches
-            .branches
+            .list
+            .rows
             .iter()
             .position(|b| b.name == name.into());
-        state.branches.selected = at;
+        state.branches.list.selected = at.unwrap();
     }
 
     fn badge(number: u64) -> PrBadge {
@@ -766,7 +773,7 @@ mod tests {
             state.notice_text
         );
 
-        state.branches.remotes.remotes.clear();
+        state.branches.remotes.list.rows.clear();
         assert_eq!(reason(&state, "Forge URL").as_deref(), Some(NO_FORGE));
         assert_eq!(
             state.update(AppIntent::CopyCommitText(CopyWhat::ForgeUrl)),
@@ -834,7 +841,10 @@ mod tests {
         );
 
         // No remote on a listed host: nothing at all.
-        state.branches.remotes.remotes = vec![remote("origin", "https://example.org/a/b", &[])];
+        load_remotes(
+            &mut state.branches.remotes.list,
+            Ok(vec![remote("origin", "https://example.org/a/b", &[])]),
+        );
         for label in ["Open in browser", "Copy URL", "Create pull request…"] {
             let want = if label == "Open in browser" {
                 NO_BROWSER

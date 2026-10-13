@@ -26,7 +26,7 @@ pub fn list_body(list: &TagsList, rows: usize, width: usize) -> Paragraph<'stati
     if !list.loaded {
         return Paragraph::new("Loading tags…");
     }
-    if list.tags.is_empty() {
+    if list.rows.is_empty() {
         return Paragraph::new(NO_TAGS);
     }
     let shown = list.visible();
@@ -34,11 +34,12 @@ pub fn list_body(list: &TagsList, rows: usize, width: usize) -> Paragraph<'stati
         return Paragraph::new(no_matches());
     }
     let range = list.range();
-    let lines = scrolled(&shown, list.selected, rows)
+    let selected = Some(list.selected);
+    let lines = scrolled(&shown, selected, rows)
         .iter()
         .map(|&i| {
-            let line = Line::from(tag_row(&list.tags[i], width));
-            range_row(line, i, list.selected, &range, width)
+            let line = Line::from(tag_row(&list.rows[i], width));
+            range_row(line, i, selected, &range, width)
         })
         .collect::<Vec<_>>();
     Paragraph::new(lines)
@@ -70,6 +71,7 @@ mod tests {
     use crate::git::commit_files::CommitId;
     use crate::layout::SidePanel;
     use crate::model::{AppState, Context, Focus};
+    use crate::test_support::load_list;
     use crate::view::{buffer_rows, render};
 
     fn tag(name: &[u8], annotated: bool, oid: char, subject: &str) -> TagRef {
@@ -91,9 +93,9 @@ mod tests {
         state.files_loaded = true;
         state.focus = Focus::Branches;
         state.expanded = SidePanel::Branches;
-        state.branches.loaded(Ok(vec![]));
+        load_list(&mut state.branches.list, Ok(vec![]));
         state.branches.tab = BranchesTab::Tags;
-        state.branches.tags.loaded(tags);
+        load_list(&mut state.branches.tags, tags);
         state
     }
 

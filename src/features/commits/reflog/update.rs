@@ -112,7 +112,7 @@ impl AppState {
             .map(String::from_utf8_lossy);
         let ctx = undo::Context {
             branch: branch.as_deref(),
-            branches: &self.branches.branches,
+            branches: &self.branches.list.rows,
             dirty: self.files.iter().any(|f| f.kind != EntryKind::Untracked),
         };
         match undo::plan(direction, reflog, &ctx) {

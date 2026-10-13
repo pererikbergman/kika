@@ -34,13 +34,13 @@ impl AppState {
             return vec![];
         }
         let seq = self.take_seq();
-        self.branches.list_seq = Some(seq);
+        self.branches.list.begin(seq);
         let branches = self.start_branch_load(seq, user);
         let remotes = self.take_seq();
-        self.branches.remotes.list_seq = Some(remotes);
+        self.branches.remotes.list.begin(remotes);
         let remotes = self.effect_tag(remotes, user);
         let tags = self.take_seq();
-        self.branches.tags.list_seq = Some(tags);
+        self.branches.tags.begin(tags);
         let tags = self.effect_tag(tags, user);
         vec![
             Effect::LoadBranches { tag: branches },
@@ -73,15 +73,14 @@ impl AppState {
         result: Result<Vec<Branch>, String>,
     ) -> Vec<Effect> {
         self.end_branch_load(tag);
-        if tag.generation != self.generation || self.branches.list_seq != Some(tag.seq) {
+        let listed = result.is_ok();
+        if !self.branches.list.loaded(tag, self.generation, result) {
             return vec![];
         }
-        self.branches.list_seq = None;
-        if let Ok(branches) = &result {
-            self.forge.set_branches(branches.iter().map(|b| &b.name));
+        if listed {
+            self.forge
+                .set_branches(self.branches.list.rows.iter().map(|b| &b.name));
         }
-        let listed = result.is_ok();
-        self.branches.loaded(result);
         let mut effects = if self.branches.tab == BranchesTab::Local {
             self.load_branch_log(tag.user)
         } else {
@@ -107,7 +106,7 @@ impl AppState {
             BranchesTab::Tags => self
                 .branches
                 .tags
-                .selected_tag()
+                .selected_row()
                 .map(|t| t.name.ref_bytes()),
         };
         let Some(refname) = refname else {
@@ -148,7 +147,7 @@ impl AppState {
     }
 
     pub(crate) fn move_branch(&mut self, delta: isize) -> Vec<Effect> {
-        if self.branches.move_by(delta) {
+        if self.branches.list.move_by(delta) {
             self.load_branch_log(true)
         } else {
             vec![]
@@ -262,13 +261,7 @@ impl AppState {
             .selected_branch()
             .and_then(|b| b.upstream.clone());
         let text = upstream.unwrap_or_else(|| {
-            let configured = || {
-                self.branches
-                    .remotes
-                    .remotes
-                    .iter()
-                    .filter(|r| r.configured)
-            };
+            let configured = || self.branches.remotes.remotes().filter(|r| r.configured);
             let remote = configured()
                 .find(|r| r.name.0 == b"origin")
                 .or_else(|| configured().next());
@@ -351,7 +344,42 @@ mod tests {
         state.update(branches_loaded(tag, moved));
 
         assert_eq!(selected_name(&state), "topic");
-        assert_eq!(state.branches.selected, Some(2));
+        assert_eq!(state.branches.list.selected, 2);
+    }
+
+    #[test]
+    fn the_forge_sees_the_names_of_an_applied_load_only() {
+        use crate::git::branches::BranchName;
+        let mut state = with_branches();
+        let names = |state: &AppState| state.forge.branches.clone();
+        let listed: Vec<BranchName> = ["main", "topic", "wip"].map(Into::into).into();
+        assert_eq!(names(&state), listed);
+
+        // An applied load: its UTF-8 names, in list order.
+        let tag = branches_tag(&state.update(AppIntent::RefreshStatus));
+        let mut branches = vec![
+            git_branch("new", false, true),
+            git_branch("main", true, true),
+        ];
+        branches.push(git_branch("x", false, true));
+        branches[2].name = BranchName::from_bytes(b"x\xff");
+        state.update(branches_loaded(tag, branches));
+        let applied: Vec<BranchName> = ["new", "main"].map(Into::into).into();
+        assert_eq!(names(&state), applied);
+
+        // Neither a failed load, nor a stale one, nor one from another
+        // repository changes what the forge sees.
+        let tag = branches_tag(&state.update(AppIntent::RefreshStatus));
+        state.update(AppIntent::BranchesLoaded {
+            tag,
+            result: Err("broken".into()),
+        });
+        let old = branches_tag(&state.update(AppIntent::RefreshStatus));
+        let mut other_repo = branches_tag(&state.update(AppIntent::RefreshStatus));
+        state.update(branches_loaded(old, three_branches()));
+        other_repo.generation += 1;
+        state.update(branches_loaded(other_repo, three_branches()));
+        assert_eq!(names(&state), applied);
     }
 
     #[test]
@@ -360,12 +388,12 @@ mod tests {
         let old = branches_tag(&state.update(AppIntent::RefreshStatus));
         let new = branches_tag(&state.update(AppIntent::RefreshStatus));
         state.update(branches_loaded(old, vec![git_branch("stale", true, true)]));
-        assert_eq!(state.branches.branches, three_branches());
+        assert_eq!(state.branches.list.rows, three_branches());
 
         let mut other_repo = new;
         other_repo.generation += 1;
         state.update(branches_loaded(other_repo, vec![]));
-        assert_eq!(state.branches.branches, three_branches());
+        assert_eq!(state.branches.list.rows, three_branches());
 
         let (first, refname) = log_load(&state.update(AppIntent::BranchNext)).unwrap();
         let (second, _) = log_load(&state.update(AppIntent::BranchNext)).unwrap();
@@ -625,11 +653,11 @@ mod tests {
         let mut state = with_branches().with_location(Some("/r/a".into()), "/r/a".into());
         state.branches.tab = BranchesTab::Remotes;
         let effects = state.update(AppIntent::OpenRepo("/r/b".into()));
-        assert!(!state.branches.loaded);
-        assert_eq!(state.branches.branches, []);
+        assert!(!state.branches.list.loaded);
+        assert_eq!(state.branches.list.rows, []);
         assert_eq!(state.branches.log, Default::default());
         assert_eq!(state.branches.tab, BranchesTab::Local);
-        assert!(!state.branches.remotes.loaded);
+        assert!(!state.branches.remotes.list.loaded);
         assert!(
             effects.iter().any(
                 |e| matches!(e, Effect::LoadRemotes { tag } if tag.generation == state.generation)
@@ -679,7 +707,7 @@ mod tests {
 
         // An upstream already set is where the prompt starts.
         let mut state = with_remotes();
-        state.branches.branches[0].upstream = Some("fork/x".into());
+        state.branches.list.rows[0].upstream = Some("fork/x".into());
         press_char(&mut state, 'u');
         assert!(matches!(
             state.popups.as_slice(),
@@ -692,7 +720,7 @@ mod tests {
         let mut state = with_remotes();
         assert_eq!(shift(&mut state, 'U'), vec![]);
         assert_eq!(state.notice, Some("No upstream to unset".into()));
-        state.branches.branches[0].upstream = Some("origin/main".into());
+        state.branches.list.rows[0].upstream = Some("origin/main".into());
         let (_, op) = op_of(&shift(&mut state, 'U'));
         assert_eq!(op, GitOp::UnsetUpstream("main".into()));
     }

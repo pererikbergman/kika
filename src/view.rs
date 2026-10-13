@@ -818,11 +818,12 @@ fn list_hints(state: &AppState, focus: KeyScope) -> (Vec<&'static str>, Vec<&'st
             let panel = &state.branches;
             let (clears, ids) = match focus {
                 KeyScope::Branches => (
-                    panel.range_anchor.is_some() || !panel.filter.is_empty(),
+                    panel.list.range_anchor.is_some() || !panel.list.filter.is_empty(),
                     ["branches.escape", "branches.filter", "branches.range"],
                 ),
                 KeyScope::Remotes => (
-                    panel.remotes.range_anchor.is_some() || !panel.remotes.filter.is_empty(),
+                    panel.remotes.list.range_anchor.is_some()
+                        || !panel.remotes.list.filter.is_empty(),
                     ["remotes.escape", "remotes.filter", "remotes.range"],
                 ),
                 _ => (

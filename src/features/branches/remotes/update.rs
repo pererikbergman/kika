@@ -4,6 +4,7 @@
 
 use super::RemotePending;
 use super::keys;
+use super::lines;
 use crate::effect::{Effect, Tag};
 use crate::features::branches::BranchesTab;
 use crate::git::remotes::{Remote, validate_remote_name, validate_remote_url};
@@ -22,12 +23,10 @@ impl AppState {
         result: Result<Vec<Remote>, String>,
     ) -> Vec<Effect> {
         self.user_done(tag);
-        let remotes = &mut self.branches.remotes;
-        if tag.generation != self.generation || remotes.list_seq != Some(tag.seq) {
+        let list = &mut self.branches.remotes.list;
+        if !list.loaded(tag, self.generation, result.map(lines)) {
             return vec![];
         }
-        remotes.list_seq = None;
-        remotes.loaded(result);
         if self.branches.tab == BranchesTab::Remotes {
             self.load_branch_log(tag.user)
         } else {
@@ -36,7 +35,7 @@ impl AppState {
     }
 
     pub(crate) fn move_remote(&mut self, delta: isize) -> Vec<Effect> {
-        if self.branches.remotes.move_by(delta) {
+        if self.branches.remotes.list.move_by(delta) {
             self.load_branch_log(true)
         } else {
             vec![]
@@ -216,7 +215,7 @@ impl AppState {
 mod tests {
     use crate::effect::Effect;
     use crate::features::branches::BranchesTab;
-    use crate::features::branches::remotes::RemoteRow;
+    use crate::features::branches::remotes::RemoteLine;
     use crate::intent::AppIntent;
     use crate::keymap::{self, KeyScope};
     use crate::op::GitOp;
@@ -229,6 +228,25 @@ mod tests {
     use crossterm::event::KeyCode;
 
     #[test]
+    fn a_stale_or_other_repository_remotes_load_is_dropped() {
+        let mut state = with_branches();
+        let old = remotes_tag(&state.update(AppIntent::RefreshStatus));
+        let newer = remotes_tag(&state.update(AppIntent::RefreshStatus));
+        state.update(AppIntent::RemotesLoaded {
+            tag: old,
+            result: Ok(three_remotes()),
+        });
+        assert!(!state.branches.remotes.list.loaded);
+        state.generation += 1;
+        state.update(AppIntent::RemotesLoaded {
+            tag: newer,
+            result: Ok(three_remotes()),
+        });
+        assert!(!state.branches.remotes.list.loaded);
+        assert_eq!(state.branches.remotes.remotes().count(), 0);
+    }
+
+    #[test]
     fn brackets_switch_the_tab_and_j_and_k_move_over_remotes_and_branches() {
         let mut state = with_remotes();
         assert_eq!(
@@ -239,25 +257,25 @@ mod tests {
         assert_eq!(state.branches.tab, BranchesTab::Remotes);
         assert_eq!(state.key_focus(), KeyScope::Remotes);
         assert_eq!(state.branches.log, Default::default());
-        assert_eq!(
-            state.branches.remotes.selected_row(),
-            Some(RemoteRow::Remote(0))
-        );
+        assert!(matches!(
+            state.branches.remotes.list.selected_row(),
+            Some(RemoteLine::Remote(r)) if r.name == "fork".into()
+        ));
 
         assert_eq!(press_char(&mut state, 'j'), vec![], "origin's header");
-        assert_eq!(
-            state.branches.remotes.selected_row(),
-            Some(RemoteRow::Remote(1))
-        );
+        assert!(matches!(
+            state.branches.remotes.list.selected_row(),
+            Some(RemoteLine::Remote(r)) if r.name == "origin".into()
+        ));
         let (tag, refname) = log_load(&press_char(&mut state, 'j')).unwrap();
         assert_eq!(refname, b"refs/remotes/origin/main");
         assert!(tag.user);
         press(&mut state, KeyCode::Down);
         press(&mut state, KeyCode::Down);
-        assert_eq!(
-            state.branches.remotes.selected_row(),
-            Some(RemoteRow::Remote(2))
-        );
+        assert!(matches!(
+            state.branches.remotes.list.selected_row(),
+            Some(RemoteLine::Remote(r)) if r.name == "stray".into()
+        ));
         press_char(&mut state, 'k');
         press(&mut state, KeyCode::Up);
         assert_eq!(
@@ -289,7 +307,7 @@ mod tests {
         assert_eq!(state.notice, Some("Select a remote branch".into()));
         assert_eq!(state.popups, []);
 
-        state.branches.remotes.move_by(3);
+        state.branches.remotes.list.move_by(3);
         press_char(&mut state, ' ');
         match state.popups.as_slice() {
             [Popup::Prompt { kind, input }] => {
@@ -442,7 +460,7 @@ mod tests {
         let mut state = with_branches();
         reload_remotes(&mut state, vec![git_remote("-f", true, &["x"])]);
         press_char(&mut state, ']');
-        state.branches.remotes.move_by(1);
+        state.branches.remotes.list.move_by(1);
         for intent in [AppIntent::RemoveRemote, AppIntent::RenameRemote] {
             state.notice = None;
             assert_eq!(state.update(intent), vec![]);

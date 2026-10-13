@@ -7,7 +7,8 @@
 //! its four ops (`git.rs`).
 //!
 //! Its `pub(crate)` API:
-//! - the types [`RemotesList`], [`RemoteRow`] and [`RemotePending`];
+//! - the types [`RemotesList`], [`RemoteLine`] and [`RemotePending`], and
+//!   `lines`, which flattens a load's remotes into the tab's rows;
 //! - the handlers in `update.rs`: `remotes_loaded`, `move_remote`,
 //!   `ask_track_name`, `track_named`, `ask_remote_name`, `remote_named`,
 //!   `remote_url`, `ask_remote_rename`, `rename_remote_to`,
@@ -44,4 +45,4 @@ mod list;
 mod update;
 pub(crate) mod view;
 
-pub(crate) use list::{RemotePending, RemoteRow, RemotesList};
+pub(crate) use list::{RemoteLine, RemotePending, RemotesList, lines};

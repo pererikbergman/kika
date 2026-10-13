@@ -33,7 +33,7 @@ pub(crate) fn checkout_branch_disabled(state: &AppState) -> Option<Reason> {
 /// branch itself; only the one-at-a-time rule is left to check.
 pub(crate) fn delete_branch_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, true).or_else(|| {
-        if state.branches.range_anchor.is_some() {
+        if state.branches.list.range_anchor.is_some() {
             return op_running(state);
         }
         branch_selected_disabled(state).or_else(|| {

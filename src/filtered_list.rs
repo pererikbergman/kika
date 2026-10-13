@@ -3,23 +3,27 @@
 //! which rows show, which a range covers and whether a load still counts.
 //! The matching rules themselves are `list_filter`'s.
 //!
-//! The Stash panel is the first list on it. The other panel lists still
-//! carry their own copies, which differ in small ways; each is absorbed
-//! as follows when it moves here, without a change in behaviour:
+//! The Stash panel and the Branches panel's Local, Remotes and Tags tabs
+//! are on it. Where those lists used to differ, a per-row policy on
+//! [`Row`] keeps each one's behaviour:
+//! - On a failed load the stash list clears its rows, and the branch,
+//!   remote and tag lists keep their last ones, which may be out of date:
+//!   [`Row::KEEP_ROWS_ON_ERROR`].
+//! - A remote's header row shows when any of its branches does, not only
+//!   when its own name matches: [`Row::visible`].
+//!
+//! The other panel lists still carry their own copies, which differ in
+//! small ways; each is absorbed as follows when it moves here, without a
+//! change in behaviour:
 //! - `move_by` returns `()` on some lists and `bool` on others. Here it
 //!   says whether the cursor moved; callers that ignored it write
 //!   `{ list.move_by(1); }`.
-//! - A list whose selection is an `Option<usize>` (tags) is `None` exactly
-//!   when it is empty: `selected_row()` answers that, and an adapter can
-//!   expose `rows.is_empty().then_some(selected)`.
+//! - A list whose selection is an `Option<usize>` is `None` exactly when
+//!   it is empty: `selected_row()` answers that.
 //! - Some lists check their load's seq themselves and some only the
 //!   generation, in `update.rs`. `loaded(tag, generation, ..)` checks
 //!   both, so those outside checks move in here. A list that truly has no
 //!   tag would get an `apply(result)` that skips the check.
-//! - On a failed load some lists keep their last rows (tags) and others
-//!   clear them (stash, worktrees). Here they are cleared; keeping them
-//!   would be a per-row-type policy such as a `KEEP_ROWS_ON_ERROR` const
-//!   on [`Row`].
 //! - A list that keeps its cursor by place only, never following a row
 //!   (worktrees), would use a variant, or `Key = ()`.
 //! - A list whose rows live outside it (the command log, drawn from the
@@ -36,6 +40,20 @@ pub(crate) trait Row {
     fn key(&self) -> Self::Key;
     /// The text the filter matches: the row as drawn.
     fn filter_text(&self) -> String;
+    /// Whether a failed load keeps the rows already shown, rather than
+    /// clearing them.
+    const KEEP_ROWS_ON_ERROR: bool = false;
+
+    /// The indexes of `rows` a non-empty `filter` shows, in list order. By
+    /// default each row shows when its own text matches; rows that show
+    /// because of others (a header with its children) override it.
+    fn visible(filter: &str, rows: &[Self]) -> Vec<usize>
+    where
+        Self: Sized,
+    {
+        let texts: Vec<String> = rows.iter().map(Row::filter_text).collect();
+        list_filter::visible(filter, texts.iter().map(String::as_str))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,7 +111,9 @@ impl<R: Row> FilteredList<R> {
                 self.error = None;
             }
             Err(message) => {
-                self.rows.clear();
+                if !R::KEEP_ROWS_ON_ERROR {
+                    self.rows.clear();
+                }
                 self.error = Some(message);
             }
         }
@@ -122,17 +142,15 @@ impl<R: Row> FilteredList<R> {
         if self.filter.is_empty() {
             return (0..self.rows.len()).collect();
         }
-        let texts: Vec<String> = self.rows.iter().map(Row::filter_text).collect();
-        list_filter::visible(&self.filter, texts.iter().map(String::as_str))
+        R::visible(&self.filter, &self.rows)
     }
 
     /// The filter hides the cursor's row, which happens only when it hides
     /// every row.
     pub fn selected_hidden(&self) -> bool {
         !self.filter.is_empty()
-            && self
-                .selected_row()
-                .is_some_and(|row| !list_filter::matches(&self.filter, &row.filter_text()))
+            && self.selected_row().is_some()
+            && !self.visible().contains(&self.selected)
     }
 
     /// The rows the range covers, in list order; empty without one, or
@@ -306,6 +324,95 @@ mod tests {
         assert!(list.rows.is_empty());
         reload(&mut list, 3, ids(&[1]));
         assert_eq!(list.error, None, "a good load clears it");
+    }
+
+    /// A row that keeps the last rows when a load fails.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Kept(u32);
+
+    impl Row for Kept {
+        type Key = u32;
+        const KEEP_ROWS_ON_ERROR: bool = true;
+        fn key(&self) -> u32 {
+            self.0
+        }
+        fn filter_text(&self) -> String {
+            self.0.to_string()
+        }
+    }
+
+    #[test]
+    fn a_failed_load_keeps_the_rows_when_the_row_type_asks() {
+        let mut list = FilteredList::default();
+        list.begin(1);
+        assert!(list.loaded(tag(1), GENERATION, Ok(vec![Kept(1), Kept(2)])));
+        list.move_by(1);
+        list.begin(2);
+        assert!(list.loaded(tag(2), GENERATION, Err("bad".into())));
+        assert_eq!(list.rows, [Kept(1), Kept(2)]);
+        assert_eq!((list.loaded, list.error.as_deref()), (true, Some("bad")));
+        assert_eq!((list.seq, list.selected), (None, 1), "the cursor stays");
+    }
+
+    /// A row in groups: a header shows when any row under it does.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Grouped {
+        header: bool,
+        text: &'static str,
+    }
+
+    impl Row for Grouped {
+        type Key = &'static str;
+        fn key(&self) -> &'static str {
+            self.text
+        }
+        fn filter_text(&self) -> String {
+            self.text.into()
+        }
+        fn visible(filter: &str, rows: &[Self]) -> Vec<usize> {
+            let mut shown = Vec::new();
+            let mut below = false;
+            for (at, row) in rows.iter().enumerate().rev() {
+                let matched = list_filter::matches(filter, row.text);
+                if row.header {
+                    if matched || below {
+                        shown.push(at);
+                    }
+                    below = false;
+                } else if matched {
+                    below = true;
+                    shown.push(at);
+                }
+            }
+            shown.reverse();
+            shown
+        }
+    }
+
+    #[test]
+    fn an_overridden_visible_hook_drives_the_cursor_the_range_and_reconcile() {
+        let row = |header, text| Grouped { header, text };
+        let mut list = FilteredList::default();
+        list.begin(1);
+        let rows = vec![
+            row(true, "a"),
+            row(false, "a1 x"),
+            row(false, "a2"),
+            row(true, "b"),
+            row(false, "b1 x"),
+        ];
+        assert!(list.loaded(tag(1), GENERATION, Ok(rows)));
+        list.move_by(2);
+        list.set_filter("x".into());
+        assert_eq!(list.visible(), [0, 1, 3, 4], "headers show with a row");
+        assert_eq!(list.selected, 0, "the hidden cursor moved to the first");
+        assert!(!list.selected_hidden(), "a header shown by its row");
+        list.toggle_range();
+        assert!(list.move_by(2));
+        assert_eq!(list.selected, 3);
+        assert_eq!(list.range(), [0, 1, 3]);
+        list.set_filter("zzz".into());
+        assert!(list.selected_hidden());
     }
 
     #[test]

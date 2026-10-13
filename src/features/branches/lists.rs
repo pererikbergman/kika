@@ -4,7 +4,7 @@
 //! range covers. Core `range_delete.rs` asks it and runs the answer. Every
 //! name an op carries comes from the loaded list, never from the filter.
 
-use super::remotes::RemoteRow;
+use super::remotes::RemoteLine;
 use crate::effect::Effect;
 use crate::list_filter::InputTarget;
 use crate::list_input::SELECTION_CLEARED;
@@ -23,11 +23,12 @@ impl AppState {
         let panel = &mut self.branches;
         let (before, cleared, after) = match target {
             InputTarget::BranchesFilter => {
-                let before = panel.selected;
-                (before, panel.set_filter(text), panel.selected)
+                let list = &mut panel.list;
+                let before = list.selected;
+                (before, list.set_filter(text), list.selected)
             }
             InputTarget::RemotesFilter => {
-                let list = &mut panel.remotes;
+                let list = &mut panel.remotes.list;
                 let before = list.selected;
                 (before, list.set_filter(text), list.selected)
             }
@@ -54,8 +55,8 @@ impl AppState {
     pub(crate) fn branches_range_confirm(&self) -> DeleteRangeConfirm {
         let (mut unmerged, mut current) = (0, 0);
         let mut names = Vec::new();
-        for i in self.branches.range() {
-            let branch = &self.branches.branches[i];
+        for i in self.branches.list.range() {
+            let branch = &self.branches.list.rows[i];
             if branch.head {
                 current += 1;
             } else if !branch.merged {
@@ -82,7 +83,7 @@ impl AppState {
             .tags
             .range()
             .into_iter()
-            .map(|i| &self.branches.tags.tags[i])
+            .map(|i| &self.branches.tags.rows[i])
             .collect();
         DeleteRangeConfirm {
             kind: RangeKind::Tags,
@@ -101,15 +102,13 @@ impl AppState {
     /// group no configured remote owns, or a name like an option, is
     /// never passed to `remote remove`.
     pub(crate) fn remotes_range_confirm(&self) -> DeleteRangeConfirm {
-        let list = &self.branches.remotes;
-        let rows = list.rows();
+        let list = &self.branches.remotes.list;
         let (mut unconfigured, mut option_like) = (0, 0);
         let mut names = Vec::new();
         for i in list.range() {
-            let RemoteRow::Remote(r) = rows[i] else {
+            let RemoteLine::Remote(remote) = &list.rows[i] else {
                 continue;
             };
-            let remote = &list.remotes[r];
             if !remote.configured {
                 unconfigured += 1;
             } else if remote.name.0.starts_with(b"-") {
@@ -147,6 +146,7 @@ mod tests {
     use crate::model::Context;
     use crate::op::{op_command, op_steps};
     use crate::popup::Popup;
+    use crate::test_support::{load_list, load_remotes};
 
     fn press(state: &mut AppState, code: KeyCode) -> Vec<Effect> {
         let mods = match code {
@@ -218,9 +218,9 @@ mod tests {
         tags: Vec<TagRef>,
     ) -> AppState {
         let mut state = AppState::new(Context::Workspace);
-        state.branches.loaded(Ok(branches));
-        state.branches.remotes.loaded(Ok(remotes));
-        state.branches.tags.loaded(Ok(tags));
+        load_list(&mut state.branches.list, Ok(branches));
+        load_remotes(&mut state.branches.remotes.list, Ok(remotes));
+        load_list(&mut state.branches.tags, Ok(tags));
         state.update(AppIntent::FocusPanel(Panel::Side(SidePanel::Branches)));
         state.branches.tab = tab;
         state
@@ -269,9 +269,12 @@ mod tests {
     fn shown(state: &AppState) -> (String, Vec<usize>, Vec<usize>) {
         let panel = &state.branches;
         match panel.tab {
-            BranchesTab::Local => (panel.filter.clone(), panel.visible(), panel.range()),
+            BranchesTab::Local => {
+                let list = &panel.list;
+                (list.filter.clone(), list.visible(), list.range())
+            }
             BranchesTab::Remotes => {
-                let list = &panel.remotes;
+                let list = &panel.remotes.list;
                 (list.filter.clone(), list.visible(), list.range())
             }
             BranchesTab::Tags => {
@@ -284,8 +287,8 @@ mod tests {
     fn has_range(state: &AppState) -> bool {
         let panel = &state.branches;
         match panel.tab {
-            BranchesTab::Local => panel.range_anchor.is_some(),
-            BranchesTab::Remotes => panel.remotes.range_anchor.is_some(),
+            BranchesTab::Local => panel.list.range_anchor.is_some(),
+            BranchesTab::Remotes => panel.remotes.list.range_anchor.is_some(),
             BranchesTab::Tags => panel.tags.range_anchor.is_some(),
         }
     }
@@ -391,20 +394,20 @@ mod tests {
     #[test]
     fn switching_tabs_clears_the_range_left_behind_and_keeps_each_filter() {
         let mut state = local();
-        state
-            .branches
-            .remotes
-            .loaded(Ok(vec![remote("o", true, &[])]));
+        load_remotes(
+            &mut state.branches.remotes.list,
+            Ok(vec![remote("o", true, &[])]),
+        );
         type_text(&mut state, "/a\n");
         key(&mut state, 'V');
         key(&mut state, ']');
         assert_eq!(state.branches.tab, BranchesTab::Remotes);
-        assert_eq!(state.branches.range_anchor, None);
-        assert_eq!(state.branches.filter, "a");
+        assert_eq!(state.branches.list.range_anchor, None);
+        assert_eq!(state.branches.list.filter, "a");
         type_text(&mut state, "/o\nV");
         key(&mut state, '[');
-        assert_eq!(state.branches.remotes.range_anchor, None);
-        assert_eq!(state.branches.remotes.filter, "o");
+        assert_eq!(state.branches.remotes.list.range_anchor, None);
+        assert_eq!(state.branches.remotes.list.filter, "o");
         assert_eq!(shown(&state).0, "a", "Local's filter is still there");
     }
 
@@ -438,14 +441,17 @@ mod tests {
         assert_eq!(argvs(&op), [["branch", "-d", "--", "a", "b"]]);
         assert!(!argvs(&op)[0].contains(&"-D".to_string()));
         assert_eq!(state.popups, []);
-        assert_eq!(state.branches.range_anchor, None, "the range is done");
+        assert_eq!(state.branches.list.range_anchor, None, "the range is done");
 
         for code in [KeyCode::Char('n'), KeyCode::Esc] {
             let mut state = local();
             type_text(&mut state, "Vjd");
             assert_eq!(press(&mut state, code), vec![], "{code:?}");
             assert_eq!(state.popups, [], "{code:?}");
-            assert!(state.branches.range_anchor.is_some(), "{code:?} keeps it");
+            assert!(
+                state.branches.list.range_anchor.is_some(),
+                "{code:?} keeps it"
+            );
             assert_eq!(state.update(AppIntent::ConfirmDeleteRange), vec![]);
         }
     }
@@ -518,7 +524,7 @@ mod tests {
         assert_eq!(state.popups, []);
 
         let mut state = tags();
-        state.branches.tags.loaded(Ok(vec![]));
+        load_list(&mut state.branches.tags, Ok(vec![]));
         state.branches.tags.range_anchor = Some("gone".into());
         state.update(AppIntent::DeleteTag);
         assert_eq!(state.notice, Some("No tag in the selection".into()));
