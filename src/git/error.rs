@@ -5,7 +5,7 @@ use std::fmt;
 use std::io;
 
 use super::runner::{GitCommand, GitOutput};
-use super::safe_text::git_message as safe;
+use super::safe_text::git_message;
 
 /// Why a checked git run did not succeed. Every message is already safe to
 /// draw and has the user part of any URL removed.
@@ -19,14 +19,14 @@ pub enum GitError {
 
 impl GitError {
     pub fn io(error: &io::Error) -> Self {
-        Self::Io(safe(error.to_string().as_bytes()))
+        Self::Io(git_message(error.to_string().as_bytes()))
     }
 
     /// From git's stderr, the same way an op's failure is reported.
     pub fn failed(cmd: &GitCommand, output: &GitOutput) -> Self {
         Self::Failed {
             subcommand: subcommand(cmd),
-            message: safe(&output.stderr),
+            message: git_message(&output.stderr),
         }
     }
 
@@ -34,7 +34,7 @@ impl GitError {
     /// their outcome on stdout, such as a merge naming each conflict.
     pub fn failed_with_stdout(cmd: &GitCommand, output: &GitOutput) -> Self {
         let message = [&output.stderr, &output.stdout]
-            .map(|bytes| safe(bytes))
+            .map(|bytes| git_message(bytes))
             .into_iter()
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
@@ -56,7 +56,7 @@ impl GitError {
 }
 
 fn subcommand(cmd: &GitCommand) -> String {
-    safe(cmd.subcommand().to_string_lossy().as_bytes())
+    git_message(cmd.subcommand().to_string_lossy().as_bytes())
 }
 
 impl fmt::Display for GitError {

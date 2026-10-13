@@ -154,7 +154,7 @@ pub fn log_page(
 
 /// The `git log` behind [`log_page`]. Typed text never stands alone in
 /// argv: the author is glued to `--author=`, and the path comes after
-/// `--`, read literally under the profile [`run`] gives it.
+/// `--`, read literally.
 fn log_command(tip: Option<&str>, skip: usize, limit: usize, query: &LogQuery) -> GitCommand {
     let mut cmd = GitCommand::new("log")
         .arg("--no-show-signature")
@@ -177,7 +177,7 @@ fn log_command(tip: Option<&str>, skip: usize, limit: usize, query: &LogQuery) -
     if let Some(path) = &query.path {
         cmd = cmd.arg(path.as_os_str());
     }
-    cmd
+    cmd.standard_env()
 }
 
 /// The commit local branch `name` points at. The argument starts with
@@ -809,6 +809,11 @@ mod tests {
         let follow = args.iter().position(|a| a == "--follow").unwrap();
         let tip = args.iter().position(|a| a == "abc").unwrap();
         assert!(follow < tip && tip < sep);
+        // The builder names its profile itself, literal pathspecs included.
+        assert_eq!(
+            cmd.process_env(),
+            crate::test_support::env_list(&crate::test_support::STANDARD_ENV)
+        );
     }
 
     #[test]
