@@ -2,14 +2,15 @@
 //! the global config names the hosts Kika may contact: with none, no
 //! effect is ever asked for, so nothing reaches the network.
 //!
-//! GitHub is reached through the `gh` CLI, never an HTTP client of Kika's
-//! own, so the user's login, proxy and TLS settings apply and Kika never
-//! holds a token.
+//! GitHub is reached through the `gh` CLI and GitLab through `glab`, never
+//! an HTTP client of Kika's own, so the user's login, proxy and TLS
+//! settings apply and Kika never holds a token.
 
 pub mod allow;
 pub mod cache;
 pub mod client;
 pub mod github;
+pub mod gitlab;
 pub mod head;
 pub mod merge;
 pub mod remote;
@@ -21,16 +22,19 @@ use std::collections::HashMap;
 
 use allow::AllowRule;
 use kika_git::branches::BranchName;
+use url::ForgeKind;
 
 /// A host the user lets Kika contact, checked when the config is read:
 /// lower-case ASCII DNS labels joined by dots, nothing else. It carries
 /// its `[forge.allow]` list, so every path that may call `gh` for a
-/// repository on it can ask [`ForgeHost::allows`].
+/// repository on it can ask [`ForgeHost::allows`], and its kind, so only
+/// the matching forge's CLI is ever asked about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForgeHost {
     name: String,
     /// `None` allows every repository on the host; an empty list none.
     allow: Option<Vec<AllowRule>>,
+    kind: ForgeKind,
 }
 
 impl ForgeHost {
@@ -62,7 +66,18 @@ impl ForgeHost {
         Ok(Self {
             name: text.to_string(),
             allow: None,
+            kind: ForgeKind::GitHub,
         })
+    }
+
+    /// The host as a `kind` forge; [`Self::parse`] makes a GitHub one.
+    pub fn with_kind(self, kind: ForgeKind) -> Self {
+        Self { kind, ..self }
+    }
+
+    /// Which forge the host is, so which CLI may be asked about it.
+    pub fn kind(&self) -> ForgeKind {
+        self.kind
     }
 
     /// The host limited to the repositories `rules` allow.
@@ -132,6 +147,7 @@ pub enum CiState {
 /// forge or `gh` says is ever kept or drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForgeStatus {
+    /// The forge's CLI (`gh` or `glab`) is missing.
     NoGh,
     NotLoggedIn,
     Offline,
@@ -281,6 +297,12 @@ impl ForgeState {
 
     pub fn enabled(&self) -> bool {
         !self.hosts.is_empty()
+    }
+
+    /// The kind of the host [`Self::repo`] is on, once a load found it:
+    /// how its badges and status line are worded.
+    pub fn kind(&self) -> Option<ForgeKind> {
+        remote::matches(self.repo.as_ref()?, &self.hosts).map(ForgeHost::kind)
     }
 
     /// Back to nothing known, for another repository. The hosts and
@@ -520,6 +542,29 @@ pub(crate) mod tests {
         assert!(offline.merge_message().contains("refresh with r"));
         let refused = CreateError::Refused("Head branch was modified".into());
         assert_eq!(refused.merge_message(), "Head branch was modified");
+    }
+
+    #[test]
+    fn the_kind_is_the_matched_hosts_once_a_repository_is_found() {
+        let gitlab = ForgeHost::parse("gitlab.example.com")
+            .unwrap()
+            .with_kind(ForgeKind::GitLab);
+        assert_eq!(gitlab.kind(), ForgeKind::GitLab);
+        assert_eq!(github()[0].kind(), ForgeKind::GitHub);
+        let mut forge = ForgeState::new(vec![github()[0].clone(), gitlab]);
+        assert_eq!(forge.kind(), None);
+        forge.repo = Some(widgets());
+        assert_eq!(forge.kind(), Some(ForgeKind::GitHub));
+        forge.repo = Some(ForgeRepo {
+            host: "GitLab.example.com".into(),
+            ..widgets()
+        });
+        assert_eq!(forge.kind(), Some(ForgeKind::GitLab));
+        forge.repo = Some(ForgeRepo {
+            host: "elsewhere.example".into(),
+            ..widgets()
+        });
+        assert_eq!(forge.kind(), None);
     }
 
     #[test]
