@@ -2454,7 +2454,7 @@ async fn a_staged_rename_with_a_file_back_at_its_old_path_stashes_nothing() {
     choose_stash_selected(&mut app).await;
     assert_eq!(
         app.state().notice.as_deref(),
-        Some(crate::features::stash::keys::STASH_RENAME_TAKEN)
+        Some("A file now sits at the renamed file's old path: a.txt")
     );
     assert_eq!(stash_count(&repo), 0);
     let after = String::from_utf8(repo.git(["status", "--porcelain"])).unwrap();

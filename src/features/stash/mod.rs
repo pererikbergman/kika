@@ -16,7 +16,8 @@
 //! - `keys::{STASH_KEYS, STASH_FROM_FILES, STASH_DROP_CONFIRM}` and the
 //!   guards `stash_action_disabled`, `drop_stash_disabled`,
 //!   `stash_files_disabled`, the Stash menu's `stash_*_disabled`, and
-//!   `STASH_APART`, `STASH_RENAME_TAKEN` and `STASH_DELETED_TAKEN`;
+//!   `STASH_APART`, `stash_rename_taken`, `STASH_RENAME_CASE` and
+//!   `STASH_DELETED_TAKEN`;
 //! - the handlers in `update.rs`, `reload_stashes` among them (core
 //!   reload in `reload.rs`, `refs_loaded` and `test_support` call it), and
 //!   `files_open`;
