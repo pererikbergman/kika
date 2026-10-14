@@ -1,0 +1,4 @@
+HTTP/2.0 502 Bad Gateway
+Content-Type: text/html
+
+<html><body><h1>502</h1></body></html>

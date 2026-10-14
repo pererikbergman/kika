@@ -95,6 +95,7 @@ impl Harness {
     ) -> Self {
         let forge = ForgeContext {
             gh,
+            glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
             sink: CommandSink::new(),
             cache_dir: None,
         };

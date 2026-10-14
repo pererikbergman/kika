@@ -1,0 +1,10 @@
+HTTP/2.0 429 Too Many Requests
+Content-Type: text/plain
+Ratelimit-Limit: 2000
+Ratelimit-Observed: 2001
+Ratelimit-Remaining: 0
+Ratelimit-Reset: 1700001200
+Ratelimit-Name: throttle_authenticated_api
+Retry-After: 1200
+
+Retry later
