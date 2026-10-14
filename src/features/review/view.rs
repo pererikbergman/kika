@@ -11,6 +11,7 @@ use ratatui::widgets::{Block, Paragraph};
 use super::files::{FilesFocus, FilesStage, PrFile, PrFiles, ReviewView};
 use super::git::FileCounts;
 use super::markdown;
+use super::pending_view::{comment_marks, has_comment_marks, no_discussion};
 use super::state::{NO_FORGE, ReviewProblem, ReviewScreen, ReviewState};
 use super::threads::{ThreadScope, thread_note};
 use super::threads_view::thread_diff_body;
@@ -260,7 +261,13 @@ pub fn files_diff_rows(main: Rect) -> usize {
 /// as the workspace frames its focused panel.
 fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rect) {
     let [list, diff] = files_areas(inner);
-    let title = files_title(files, usize::from(list.width));
+    let pending = state
+        .review
+        .pending
+        .as_ref()
+        .and_then(|slot| slot.review())
+        .map_or(0, |review| review.comments.len());
+    let title = files_title(files, pending, usize::from(list.width));
     let block = view::panel_block(title, files.focus == FilesFocus::List);
     let list_inner = block.inner(list);
     frame.render_widget(block, list);
@@ -286,14 +293,23 @@ fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rec
     let title = diff_title(path, &tail, usize::from(diff.width));
     let block = view::panel_block(title, files.focus == FilesFocus::Diff);
     let diff_inner = block.inner(diff);
+    let commenting = has_comment_marks(state, files);
+    let no_threads;
     let body = match &files.stage {
-        FilesStage::Ready => match (&state.review.discussion, files.selected()) {
-            (Some(discussion), Some(row)) => {
+        FilesStage::Ready => match files.selected() {
+            Some(row) if state.review.discussion.is_some() || commenting => {
+                let discussion = match &state.review.discussion {
+                    Some(discussion) => discussion,
+                    None => {
+                        no_threads = no_discussion();
+                        &no_threads
+                    }
+                };
                 let scope = ThreadScope::of(files, discussion);
                 let mut threads = scope.file_threads(&row.file.path, None);
                 // Numbered once a frame, for the shown file only, and only
-                // when it has a thread on a line.
-                let numbers = if threads.lines.is_empty() {
+                // when it has a thread on a line or a comment to mark.
+                let numbers = if threads.lines.is_empty() && !commenting {
                     Vec::new()
                 } else {
                     row_numbers(&stream.lines)
@@ -301,7 +317,16 @@ fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rec
                 if stream.done && !threads.lines.is_empty() {
                     threads = scope.file_threads(&row.file.path, Some(&numbers));
                 }
-                thread_diff_body(stream, &numbers, &threads, &scope, files.thread, diff_inner)
+                let marks = comment_marks(state, files, &numbers);
+                thread_diff_body(
+                    stream,
+                    &numbers,
+                    &threads,
+                    &scope,
+                    files.thread,
+                    &marks,
+                    diff_inner,
+                )
             }
             _ => diff_pane_body(&state.diff, diff_inner),
         },
@@ -316,6 +341,7 @@ fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rec
         let discussion = state.review.discussion.as_ref();
         super::reader_view::render_reader(files, discussion, reader, frame, inner);
     }
+    super::pending_view::render_pending(&state.review, frame, inner);
 }
 
 /// What the list shows, long and short: `whole pull request` or
@@ -337,17 +363,25 @@ fn view_labels(files: &PrFiles) -> (String, String) {
     }
 }
 
-/// ` PR #N · files (viewed/listed) · <view> ` for a list `width` wide:
-/// the number goes first, then the view's long label, so which commit is
-/// shown stays as long as it can.
-fn files_title(files: &PrFiles, width: usize) -> String {
+/// ` PR #N · files (viewed/listed) · K pending · <view> ` for a list
+/// `width` wide, the pending count only when there is one: the number
+/// goes first, then the view's long label, so which commit is shown
+/// stays as long as it can.
+fn files_title(files: &PrFiles, pending: usize, width: usize) -> String {
     let count = format!("files ({}/{})", files.viewed_count(), files.rows.len());
+    // The pending review's count gives way only to the view's short label.
+    let pending = if pending > 0 {
+        format!(" · {pending} pending")
+    } else {
+        String::new()
+    };
     let (long, short) = view_labels(files);
     let room = width.saturating_sub(2);
     let candidates = [
-        format!(" PR #{} · {count} · {long} ", files.number),
-        format!(" {count} · {long} "),
-        format!(" {count} · {short} "),
+        format!(" PR #{} · {count}{pending} · {long} ", files.number),
+        format!(" {count}{pending} · {long} "),
+        format!(" {count}{pending} · {short} "),
+        format!(" {short}{pending} "),
         format!(" {short} "),
     ];
     candidates
@@ -1056,6 +1090,7 @@ mod tests {
             thread: None,
             jump: None,
             reader: None,
+            pick: None,
         });
         state
     }
@@ -1241,13 +1276,19 @@ mod tests {
     #[test]
     fn the_file_list_title_never_overflows_its_border() {
         let mut state = in_commit_view();
-        for width in 0..70 {
-            let title = files_title(state.review.files.as_ref().unwrap(), width);
-            assert!(
-                width_of(&title) <= width.saturating_sub(2) || width < 4,
-                "{width}: {title:?}"
-            );
+        for pending in [0, 1, 500] {
+            for width in 0..70 {
+                let title = files_title(state.review.files.as_ref().unwrap(), pending, width);
+                assert!(
+                    width_of(&title) <= width.saturating_sub(2) || width < 4,
+                    "{pending} {width}: {title:?}"
+                );
+            }
         }
+        // The count gives way only to the short view label.
+        let files = state.review.files.as_ref().unwrap();
+        assert!(files_title(files, 3, 70).contains("· 3 pending"));
+        assert!(files_title(files, 3, 30).contains("3 pending"));
         for (width, height) in [(80, 24), (40, 10), (20, 5), (10, 3), (3, 2), (1, 1)] {
             state.size = (width, height);
             draw(&state, width, height);

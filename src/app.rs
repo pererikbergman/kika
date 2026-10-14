@@ -57,6 +57,9 @@ pub async fn run(
     });
     let runtime = Runtime::new(Arc::clone(&runner), tx.clone())
         .with_recent_store(recent_store)
+        .with_pending_store(kika_forge::pending::default_dir(|key| {
+            std::env::var_os(key)
+        }))
         .with_global_config(global_config)
         .with_diff_pager(config.diff_pager.clone())
         .with_diff_tool(config.diff_tool.clone())

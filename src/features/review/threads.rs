@@ -617,7 +617,11 @@ pub(crate) mod tests {
         let (mut state, tag) = detail_then_load();
         answer(&mut state, tag, Ok(Some(discussion)));
         let effects = type_char(&mut state, 'f');
-        let [Effect::CheckReviewCommits { tag, .. }] = effects.as_slice() else {
+        let [
+            Effect::CheckReviewCommits { tag, .. },
+            Effect::LoadPendingReview { .. },
+        ] = effects.as_slice()
+        else {
             panic!("{effects:?}");
         };
         let tag = *tag;

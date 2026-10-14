@@ -208,7 +208,11 @@ mod tests {
         let mut state = in_detail(Vec::new());
         state.review.detail.as_mut().unwrap().number = 12;
         let effects = type_char(&mut state, 'f');
-        let [Effect::CheckReviewCommits { tag, .. }] = effects.as_slice() else {
+        let [
+            Effect::CheckReviewCommits { tag, .. },
+            Effect::LoadPendingReview { .. },
+        ] = effects.as_slice()
+        else {
             panic!("{effects:?}");
         };
         let tag = *tag;
