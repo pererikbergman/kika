@@ -8,7 +8,7 @@
 use serde::Deserialize;
 use serde_json::json;
 
-use super::github::{Answer, Gh, GhCall, MAX_URL, Refusal, classify, split_include};
+use super::github::{Answer, Gh, GhCall, GhOutput, MAX_URL, Refusal, classify, split_include};
 use super::remote::{allowed, matches, parse_remote, segment_ok};
 use super::task::ForgeContext;
 use super::{ForgeHost, ForgeRepo, ForgeStatus, PrState};
@@ -326,23 +326,7 @@ impl Gh<'_> {
         let now = self.now;
         let first = self.run_logged(
             kind,
-            |output| {
-                let stdout = output
-                    .as_ref()
-                    .map(|o| o.stdout.clone())
-                    .unwrap_or_default();
-                let (status, _, body) = split_include(&stdout);
-                match classify(output, now) {
-                    // GitHub says NOT_FOUND beside `pullRequest: null`; that
-                    // is an answer, not a lack of access.
-                    Answer::Failed(ForgeStatus::NoAccess)
-                        if status == Some(200) && pull_request_null(body) =>
-                    {
-                        Ok(None)
-                    }
-                    answer => read_with(answer, read_detail),
-                }
-            },
+            |output| pull_request_answer(output, now, read_detail),
             outcome,
         )?;
         let Some((mut detail, end)) = first else {
@@ -353,7 +337,28 @@ impl Gh<'_> {
     }
 }
 
-fn outcome<T>(result: &Result<T, Refusal>) -> CommandOutcome {
+/// `read` a GraphQL answer about one pull request. GitHub says NOT_FOUND
+/// beside `pullRequest: null`; that is an answer, `None`, not a lack of
+/// access.
+pub(crate) fn pull_request_answer<T>(
+    output: std::io::Result<GhOutput>,
+    now: i64,
+    read: impl FnOnce(&[u8]) -> Result<Option<T>, ForgeStatus>,
+) -> Result<Option<T>, Refusal> {
+    let stdout = output
+        .as_ref()
+        .map(|o| o.stdout.clone())
+        .unwrap_or_default();
+    let (status, _, body) = split_include(&stdout);
+    match classify(output, now) {
+        Answer::Failed(ForgeStatus::NoAccess) if status == Some(200) && pull_request_null(body) => {
+            Ok(None)
+        }
+        answer => read_with(answer, read),
+    }
+}
+
+pub(crate) fn outcome<T>(result: &Result<T, Refusal>) -> CommandOutcome {
     match result {
         Ok(_) => CommandOutcome::Ok,
         Err(Refusal::Status(ForgeStatus::NoGh)) => CommandOutcome::NotStarted,
@@ -362,7 +367,7 @@ fn outcome<T>(result: &Result<T, Refusal>) -> CommandOutcome {
 }
 
 /// `read` the body of a 2xx answer; anything else is why not.
-fn read_with<T>(
+pub(crate) fn read_with<T>(
     answer: Answer,
     read: impl FnOnce(&[u8]) -> Result<T, ForgeStatus>,
 ) -> Result<T, Refusal> {
@@ -435,7 +440,7 @@ struct Response<T> {
 }
 
 /// The data of a GraphQL answer with no errors.
-fn data_of<T: for<'de> Deserialize<'de>>(body: &[u8]) -> Result<T, ForgeStatus> {
+pub(crate) fn data_of<T: for<'de> Deserialize<'de>>(body: &[u8]) -> Result<T, ForgeStatus> {
     let response: Response<T> = serde_json::from_slice(body).map_err(|_| ForgeStatus::Failed)?;
     if response.errors.is_some_and(|e| !e.is_empty()) {
         return Err(ForgeStatus::Failed);
@@ -476,7 +481,7 @@ struct SearchNode {
 }
 
 #[derive(Deserialize)]
-struct Login {
+pub(crate) struct Login {
     login: Option<String>,
 }
 
@@ -702,14 +707,7 @@ fn read_detail(body: &[u8]) -> Result<Option<(PrDetail, PageEnd)>, ForgeStatus> 
         .into_iter()
         .flat_map(Nodes::items)
         .filter_map(|r| {
-            let verdict = match r.state.as_deref()? {
-                "APPROVED" => ReviewVerdict::Approved,
-                "CHANGES_REQUESTED" => ReviewVerdict::ChangesRequested,
-                "COMMENTED" => ReviewVerdict::Commented,
-                "DISMISSED" => ReviewVerdict::Dismissed,
-                "PENDING" => ReviewVerdict::Pending,
-                _ => return None,
-            };
+            let verdict = verdict_of(r.state.as_deref()?)?;
             Some((author_of(r.author), verdict))
         })
         .take(MAX_REVIEWERS)
@@ -726,12 +724,7 @@ fn read_detail(body: &[u8]) -> Result<Option<(PrDetail, PageEnd)>, ForgeStatus> 
     let files_total = pr.files.as_ref().and_then(|f| f.total_count).unwrap_or(0);
     let mut viewed = Vec::new();
     let end = add_viewed(&mut viewed, pr.files);
-    // A full SHA-1 or SHA-256 id; nothing shorter can name one commit.
-    let oid = |text: Option<String>| {
-        text.filter(|t| matches!(t.len(), 40 | 64))
-            .as_deref()
-            .and_then(CommitId::parse)
-    };
+    let oid = full_oid;
     let detail = PrDetail {
         node_id: pr.id.filter(|id| node_id_ok(id)),
         number: pr.number,
@@ -918,6 +911,25 @@ impl Gh<'_> {
     }
 }
 
+/// A review's state as a verdict; `None` for one Kika does not know.
+pub(crate) fn verdict_of(state: &str) -> Option<ReviewVerdict> {
+    Some(match state {
+        "APPROVED" => ReviewVerdict::Approved,
+        "CHANGES_REQUESTED" => ReviewVerdict::ChangesRequested,
+        "COMMENTED" => ReviewVerdict::Commented,
+        "DISMISSED" => ReviewVerdict::Dismissed,
+        "PENDING" => ReviewVerdict::Pending,
+        _ => return None,
+    })
+}
+
+/// A full SHA-1 or SHA-256 id; nothing shorter can name one commit.
+pub(crate) fn full_oid(text: Option<String>) -> Option<CommitId> {
+    text.filter(|t| matches!(t.len(), 40 | 64))
+        .as_deref()
+        .and_then(CommitId::parse)
+}
+
 /// Whether `id` is fit to send back as a GraphQL node id: 1 to 128 ASCII
 /// letters, digits, `_`, `=` or `-`. Anything else is not one GitHub makes.
 pub fn node_id_ok(id: &str) -> bool {
@@ -971,14 +983,14 @@ pub fn safe_url(url: &str) -> Option<String> {
     ok.then(|| url.to_string())
 }
 
-fn author_of(author: Option<Login>) -> String {
+pub(crate) fn author_of(author: Option<Login>) -> String {
     // A deleted account has no author; GitHub shows it as ghost.
     let login = author.and_then(|a| a.login);
     line(login.as_deref().unwrap_or("ghost"))
 }
 
 /// A one-line field: terminal-safe, line breaks included, and cut short.
-fn line(text: &str) -> String {
+pub(crate) fn line(text: &str) -> String {
     let cut = match text.char_indices().nth(MAX_FIELD) {
         Some((at, _)) => &text[..at],
         None => text,
@@ -989,7 +1001,13 @@ fn line(text: &str) -> String {
 /// The description, cut to [`MAX_BODY`] and made terminal-safe a line at
 /// a time, so only `\n` separates its lines.
 fn body_text(text: &str) -> String {
-    let mut end = text.len().min(MAX_BODY);
+    capped_body(text, MAX_BODY)
+}
+
+/// `text` cut to `max` bytes on a character boundary, then made
+/// terminal-safe a line at a time, so only `\n` separates its lines.
+pub(crate) fn capped_body(text: &str, max: usize) -> String {
+    let mut end = text.len().min(max);
     while !text.is_char_boundary(end) {
         end -= 1;
     }
