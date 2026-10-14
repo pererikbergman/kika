@@ -331,8 +331,8 @@ mod tests {
 
     #[test]
     fn shift_n_in_commits_runs_only_on_a_free_detached_head() {
-        use crate::git::repo_state::Operation;
-        use crate::git::status::Head;
+        use kika_git::repo_state::Operation;
+        use kika_git::status::Head;
         let shift_n = key(KeyCode::Char('N'), KeyModifiers::SHIFT);
         let resolve_n = |state: &AppState| {
             resolve(

@@ -1,8 +1,8 @@
 use crate::diff_search::{DiffSearch, reveal};
-use crate::git::blame::BlameLine;
-use crate::git::diff::DiffLine;
-use crate::git::path::RepoPath;
 use crate::intent::Scroll;
+use kika_git::blame::BlameLine;
+use kika_git::diff::DiffLine;
+use kika_git::path::RepoPath;
 
 /// A blame of one file, shown in the Diff pane's place: each line with the
 /// commit that last changed it, and a cursor to pick one. Pure state; the
@@ -199,7 +199,7 @@ impl CommitView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::diff::LineKind;
+    use kika_git::diff::LineKind;
 
     fn blame_line(text: &str) -> BlameLine {
         BlameLine {

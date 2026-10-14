@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::ops::Deref;
 
-use crate::git::safe_text::sanitize;
+use kika_git::safe_text::sanitize;
 
 /// The most chars run-time text keeps. The bar elides to its width anyway;
 /// this only bounds what is stored.

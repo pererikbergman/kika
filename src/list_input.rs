@@ -14,14 +14,14 @@ use crate::features::commits::CommitsIntent;
 use crate::features::commits::compare::MARK_CLEARED;
 use crate::features::review;
 use crate::features::stash::StashIntent;
-use crate::git::FileEntry;
-use crate::git::log::LogQuery;
-use crate::git::path::RepoPath;
 use crate::intent::AppIntent;
 use crate::keymap::KeyScope;
 use crate::list_filter::{InputTarget, ListInput};
 use crate::model::{AppState, Focus};
 use crate::popup::{LineInput, Popup};
+use kika_git::FileEntry;
+use kika_git::log::LogQuery;
+use kika_git::path::RepoPath;
 
 /// Said when a changed filter drops the range made over the old rows.
 pub(crate) const SELECTION_CLEARED: &str = "Selection cleared";
@@ -460,10 +460,10 @@ mod tests {
     use super::*;
     use crate::effect::Tag;
     use crate::features::diff::DiffIntent;
-    use crate::git::diff::DiffChunk;
     use crate::layout::SidePanel;
     use crate::test_support::*;
     use crossterm::event::KeyCode;
+    use kika_git::diff::DiffChunk;
 
     fn has_run_op(effects: &[Effect]) -> bool {
         effects.iter().any(|e| matches!(e, Effect::RunOp { .. }))
@@ -869,7 +869,7 @@ mod tests {
         let lines = ["fn a", "foo", "x", "foo bar", "y"]
             .iter()
             .enumerate()
-            .map(|(i, text)| crate::git::blame::BlameLine {
+            .map(|(i, text)| kika_git::blame::BlameLine {
                 text: text.to_string(),
                 ..blame_line(OID, i + 1)
             })

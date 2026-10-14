@@ -19,8 +19,8 @@
 //! | From | May import | Must not import |
 //! |---|---|---|
 //! | core (`src/*.rs`) | anything: it is the composition root | none |
-//! | a feature | core; `src/git`; `src/forge`; its own subtree; its parent features | a sibling feature, or anything inside one |
-//! | `src/git`, `src/forge` | the core files they already use | any feature |
+//! | a feature | core; `kika_git`; `kika_forge`; its own subtree; its parent features | a sibling feature, or anything inside one |
+//! | `kika_git`, `kika_forge` | each other only as ADR-0003 says (`kika_forge` may use `kika_git`) | the `kika` crate (Cargo enforces it) |
 //! | `src/e2e` | anything | none |
 //!
 //! 1. Something two features both need goes in their nearest common parent

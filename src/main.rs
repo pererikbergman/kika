@@ -18,8 +18,6 @@ mod effect;
 mod env_guard;
 mod features;
 mod filtered_list;
-mod forge;
-mod git;
 mod handoff;
 mod hunk_view;
 mod intent;
@@ -60,10 +58,10 @@ use crossterm::execute;
 
 use crate::cli::Cli;
 use crate::config::ConfigPaths;
-use crate::git::recording::{CommandSink, RecordingRunner};
-use crate::git::retry::RetryRunner;
-use crate::git::{CliRunner, repo_root, version};
 use crate::model::AppState;
+use kika_git::recording::{CommandSink, RecordingRunner};
+use kika_git::retry::RetryRunner;
+use kika_git::{CliRunner, repo_root, version};
 
 fn main() -> color_eyre::Result<ExitCode> {
     // Hidden modes, each keyed on its own env var and run before anything
@@ -73,10 +71,10 @@ fn main() -> color_eyre::Result<ExitCode> {
     // Run by git or ssh as their askpass program, with the prompt as the
     // only argument, which `Cli::parse` would reject.
     #[cfg(unix)]
-    if let Some(socket) = std::env::var_os(git::askpass::SOCKET_ENV) {
+    if let Some(socket) = std::env::var_os(kika_git::askpass::SOCKET_ENV) {
         let prompt = std::env::args_os().nth(1).unwrap_or_default();
         let kind = std::env::var_os("SSH_ASKPASS_PROMPT");
-        return Ok(git::askpass::client(
+        return Ok(kika_git::askpass::client(
             std::path::Path::new(&socket),
             &prompt,
             kind.as_deref(),

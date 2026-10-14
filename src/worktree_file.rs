@@ -19,7 +19,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::git::path::RepoPath;
+use kika_git::path::RepoPath;
 
 /// Why a replace was refused: someone else wrote the file since it was read.
 pub const CHANGED_ON_DISK: &str = "The file changed on disk; reopen it";
@@ -114,7 +114,7 @@ fn plain_file(file: &Path) -> Result<(), String> {
 /// `file` as text safe to draw: a hostile name could carry ESC or a
 /// newline, which `Path::display` would pass to the terminal.
 fn shown(file: &Path) -> String {
-    crate::git::safe_text::sanitize(file.as_os_str().as_encoded_bytes())
+    kika_git::safe_text::sanitize(file.as_os_str().as_encoded_bytes())
 }
 
 /// The bytes of `file`, or `None` when there are more than `max`.
@@ -381,7 +381,7 @@ fn components(path: &RepoPath) -> Result<Vec<OsString>, &'static str> {
     };
     raw.split(|&b| b == b'/')
         .map(|bytes| {
-            let part = crate::git::path::os_string(bytes);
+            let part = kika_git::path::os_string(bytes);
             if !plain(&part) {
                 return Err(NOT_PLAIN);
             }
@@ -579,7 +579,7 @@ mod tests {
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     use super::*;
-    use crate::git::fake::TempDir;
+    use kika_git::fake::TempDir;
 
     /// The names in `dir` that are Kika's temp files.
     fn temps(dir: &Path) -> Vec<String> {
@@ -1017,7 +1017,7 @@ mod tests {
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::*;
-    use crate::git::fake::TempDir;
+    use kika_git::fake::TempDir;
 
     #[test]
     fn drive_prefixes_streams_and_backslashes_are_refused() {

@@ -11,9 +11,9 @@ use super::recent;
 use crate::background;
 use crate::effect::Tag;
 use crate::features::repos::ReposIntent;
-use crate::git::GitRunner;
-use crate::git::repo_root::init_repo;
 use crate::intent::AppIntent;
+use kika_git::GitRunner;
+use kika_git::repo_root::init_repo;
 
 /// Load the recent list from `store` and report it.
 pub(crate) fn load(store: Option<PathBuf>, tx: UnboundedSender<AppIntent>, seq: u64) {

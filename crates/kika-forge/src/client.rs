@@ -1,0 +1,181 @@
+//! The one forge client. Every `gh` call goes through [`ForgeContext`]:
+//! it checks the repository is on the host and that the host's
+//! `[forge.allow]` lets it through, runs `gh` in the cache directory and
+//! reads the clock, so no caller can reach the network for a repository
+//! the user never opted in.
+
+use std::path::PathBuf;
+
+use super::cache;
+use super::github::Gh;
+use super::merge::MergeMethod;
+use super::task::ForgeContext;
+use super::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
+use kika_git::commit_files::CommitId;
+
+impl ForgeContext {
+    /// Seconds since the epoch, for rate limits and the cache.
+    pub fn now(&self) -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64)
+    }
+
+    /// Where `gh` runs: the cache directory, never the repository, so
+    /// `gh` reads no repository's git config.
+    fn cwd(&self) -> PathBuf {
+        self.cache_dir
+            .clone()
+            .filter(|dir| cache::ensure_dir(dir).is_ok())
+            .unwrap_or_else(std::env::temp_dir)
+    }
+
+    /// A `gh` for `repo` on `host`, or `None` when `repo` is on another
+    /// host or the host's allow-list leaves it out: then nothing may
+    /// reach the network.
+    pub fn gh<'a>(&'a self, host: &'a ForgeHost, repo: &ForgeRepo, now: i64) -> Option<Gh<'a>> {
+        let on_host = repo.host.eq_ignore_ascii_case(host.as_str());
+        (on_host && host.allows(repo)).then(|| Gh {
+            runner: self.gh.as_ref(),
+            sink: &self.sink,
+            host,
+            cwd: self.cwd(),
+            now,
+        })
+    }
+
+    /// Open a pull request on `repo`; see [`Gh::create_pull`]. A
+    /// repository [`Self::gh`] refuses fails without a call.
+    pub fn create_pull(
+        &self,
+        host: &ForgeHost,
+        repo: &ForgeRepo,
+        head: &str,
+        base: &str,
+        title: &str,
+    ) -> Result<(u64, String), CreateError> {
+        self.gh(host, repo, self.now())
+            .ok_or(CreateError::Status(ForgeStatus::Failed))?
+            .create_pull(repo, head, base, title)
+    }
+
+    /// Merge pull request `number`; see [`Gh::merge_pull`]. A repository
+    /// [`Self::gh`] refuses fails without a call.
+    pub fn merge_pull(
+        &self,
+        host: &ForgeHost,
+        repo: &ForgeRepo,
+        number: u64,
+        method: MergeMethod,
+        head_oid: &CommitId,
+    ) -> Result<(), CreateError> {
+        self.gh(host, repo, self.now())
+            .ok_or(CreateError::Status(ForgeStatus::Failed))?
+            .merge_pull(repo, number, method, head_oid)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::allow::AllowRule;
+    use crate::github::fixtures::CREATE_201;
+    use crate::github::{FakeGh, answer};
+    use kika_git::fake::TempDir;
+    use kika_git::recording::CommandSink;
+
+    fn repo() -> ForgeRepo {
+        ForgeRepo {
+            host: "github.com".into(),
+            owner: "acme".into(),
+            name: "widgets".into(),
+        }
+    }
+
+    fn context(gh: Arc<FakeGh>, cache_dir: Option<PathBuf>) -> ForgeContext {
+        ForgeContext {
+            gh,
+            sink: CommandSink::new(),
+            cache_dir,
+        }
+    }
+
+    #[test]
+    fn a_repository_the_allow_list_leaves_out_never_reaches_gh() {
+        let runner = Arc::new(FakeGh::new());
+        let ctx = context(runner.clone(), None);
+        let host = ForgeHost::parse("github.com")
+            .unwrap()
+            .with_allow(vec![AllowRule::parse("someone-else").unwrap()]);
+        let failed = Err(CreateError::Status(ForgeStatus::Failed));
+
+        assert!(ctx.gh(&host, &repo(), 0).is_none());
+        assert_eq!(
+            ctx.create_pull(&host, &repo(), "topic", "main", "Add login")
+                .map(|_| ()),
+            failed
+        );
+        let head = CommitId::parse(&"a".repeat(40)).unwrap();
+        assert_eq!(
+            ctx.merge_pull(&host, &repo(), 7, MergeMethod::Merge, &head),
+            failed
+        );
+        assert!(runner.calls().is_empty());
+    }
+
+    #[test]
+    fn a_repository_on_another_host_never_reaches_gh() {
+        let runner = Arc::new(FakeGh::new());
+        let ctx = context(runner.clone(), None);
+        let host = ForgeHost::parse("gitlab.example").unwrap();
+        let failed = Err(CreateError::Status(ForgeStatus::Failed));
+
+        assert!(ctx.gh(&host, &repo(), 0).is_none());
+        assert_eq!(
+            ctx.create_pull(&host, &repo(), "topic", "main", "Add login")
+                .map(|_| ()),
+            failed
+        );
+        let head = CommitId::parse(&"a".repeat(40)).unwrap();
+        assert_eq!(
+            ctx.merge_pull(&host, &repo(), 7, MergeMethod::Merge, &head),
+            failed
+        );
+        assert!(runner.calls().is_empty());
+
+        // The host is compared without regard to case.
+        let github = ForgeHost::parse("github.com").unwrap();
+        let shown = ForgeRepo {
+            host: "GitHub.com".into(),
+            ..repo()
+        };
+        assert!(ctx.gh(&github, &shown, 0).is_some());
+    }
+
+    #[test]
+    fn gh_runs_in_the_cache_dir_or_else_the_temp_dir() {
+        let host = ForgeHost::parse("github.com").unwrap();
+        let tmp = TempDir::new("forge-client");
+        let dir = tmp.path().join("forge");
+
+        let runner = Arc::new(FakeGh::new().reply(answer(CREATE_201)));
+        let ctx = context(runner.clone(), Some(dir.clone()));
+        assert!(
+            ctx.create_pull(&host, &repo(), "topic", "main", "Add login")
+                .is_ok()
+        );
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].cwd, dir);
+
+        let runner = Arc::new(FakeGh::new().reply(answer(CREATE_201)));
+        let ctx = context(runner.clone(), None);
+        assert!(
+            ctx.create_pull(&host, &repo(), "topic", "main", "Add login")
+                .is_ok()
+        );
+        assert_eq!(runner.calls()[0].cwd, std::env::temp_dir());
+    }
+}

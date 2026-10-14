@@ -13,9 +13,9 @@ use crate::background;
 use crate::effect::Tag;
 use crate::features::diff::DiffIntent;
 use crate::features::diff::renderers::RenderersIntent;
-use crate::git::GitRunner;
-use crate::git::diff::DiffRequest;
 use crate::intent::AppIntent;
+use kika_git::GitRunner;
+use kika_git::diff::DiffRequest;
 
 /// Find the renderers, `pager` and `tool` from the global config first,
 /// and report them as `RenderersIntent::Found`.
@@ -83,8 +83,8 @@ mod tests {
     use crate::features::diff::DiffIntent;
     use crate::features::diff::renderers::RenderersIntent;
     #[cfg(unix)]
-    use crate::git::diff::DiffSide;
-    use crate::git::fake::{FakeRunner, ok};
+    use kika_git::diff::DiffSide;
+    use kika_git::fake::{FakeRunner, ok};
 
     #[cfg(unix)]
     #[tokio::test]
@@ -172,14 +172,14 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn render_diff_runs_a_tool_on_both_sides_of_a_worktree_change() {
-        use crate::git::fake::{TempDir, git};
+        use kika_git::fake::{TempDir, git};
         let tmp = TempDir::new("effect-tool");
         let dir = tmp.path();
         git(dir, &["init", "-q"]);
         std::fs::write(dir.join("a.txt"), "old \x1b]0;title\x07one\n").unwrap();
         git(dir, &["add", "a.txt"]);
         std::fs::write(dir.join("a.txt"), "new \x1b[2J\x08two\n").unwrap();
-        let runner: Arc<dyn GitRunner> = Arc::new(crate::git::CliRunner::isolated(dir));
+        let runner: Arc<dyn GitRunner> = Arc::new(kika_git::CliRunner::isolated(dir));
         let request = DiffRequest {
             path: "a.txt".into(),
             orig_path: None,

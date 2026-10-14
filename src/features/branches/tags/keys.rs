@@ -7,7 +7,6 @@
 use super::TagsIntent;
 use crate::confirm_question::Answer;
 use crate::features::branches::BranchesIntent;
-use crate::git::commit_files::CommitId;
 use crate::intent::AppIntent;
 use crate::keymap::{
     Binding, KeyPattern, KeyScope, NONE, OP_RUNNING, Reason, list_guard, never, push_tag_disabled,
@@ -15,6 +14,7 @@ use crate::keymap::{
 };
 use crate::model::AppState;
 use crossterm::event::{KeyCode, KeyModifiers};
+use kika_git::commit_files::CommitId;
 
 /// Why the selected commit cannot be tagged: the log needs a commit with
 /// an id git can use. Not refused while an operation runs, since the
@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn t_and_shift_t_tag_the_selected_commit_and_need_a_usable_id() {
-        let row = |oid: &str| crate::git::log::CommitRow {
+        let row = |oid: &str| kika_git::log::CommitRow {
             oid: oid.into(),
             short_oid: "abc".into(),
             parents: vec![],

@@ -8,9 +8,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::background;
 use crate::effect::Tag;
 use crate::features::submodules::SubmodulesIntent;
-use crate::git::GitRunner;
-use crate::git::submodule::read_submodules;
 use crate::intent::AppIntent;
+use kika_git::GitRunner;
+use kika_git::submodule::read_submodules;
 
 /// List the submodules and send them back as `SubmodulesIntent::Loaded`.
 pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {

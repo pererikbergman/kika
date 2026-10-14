@@ -7,7 +7,8 @@
 //! `LoadReviewQueues`, `LoadPrDetail`, `CheckReviewCommits`,
 //! `FetchReviewCommits`, `LoadReviewFiles` and `MergePullRequest`
 //! (`effects.rs`). The credential plumbing that `FetchReviewCommits`
-//! shares with sync, `src/forge` and the merge question popup stay in core.
+//! shares with sync and the merge question popup stay in core; the forge
+//! client is the `kika_forge` crate.
 //!
 //! Its intents are nested (ADR-0002): core wraps [`ReviewIntent`] in
 //! `AppIntent::Review`, and its one `update` arm calls [`update`] here.

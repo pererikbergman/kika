@@ -7,12 +7,12 @@ use crate::bisect;
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::Effect;
 use crate::features::commits::CommitsIntent;
-use crate::git::bisect::{BisectMark, BisectState};
 use crate::intent::AppIntent;
 use crate::keymap::KeyScope;
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
 use crate::popup::Popup;
+use kika_git::bisect::{BisectMark, BisectState};
 
 /// The bisect's half of `update`, which `commits::update` passes
 /// `CommitsIntent::Bisect` to. A free function, so its name cannot clash
@@ -125,13 +125,13 @@ impl AppState {
 mod tests {
     use super::*;
     use crate::effect::Tag;
-    use crate::git::FileEntry;
-    use crate::git::repo_state::Operation;
-    use crate::git::status::{BranchStatus, EntryKind, Head, RepoStatus};
     use crate::intent::AppIntent;
     use crate::menu::MenuId;
     use crate::test_support::*;
     use crossterm::event::KeyCode;
+    use kika_git::FileEntry;
+    use kika_git::repo_state::Operation;
+    use kika_git::status::{BranchStatus, EntryKind, Head, RepoStatus};
 
     fn status_with(tag: Tag, branch: BranchStatus) -> AppIntent {
         AppIntent::StatusLoaded {
@@ -149,7 +149,7 @@ mod tests {
         let found = BisectState {
             bad: 2,
             good: 1,
-            first_bad: Some(crate::git::bisect::Found {
+            first_bad: Some(kika_git::bisect::Found {
                 commit: cid("c1"),
                 subject: "commit 1".into(),
             }),
@@ -277,7 +277,7 @@ mod tests {
     fn a_bisect_with_its_own_terms_is_not_marked() {
         let mut state = testing_c1(&[Operation::Bisect]);
         if let Some(bisect) = state.branch.as_mut().and_then(|b| b.bisect.as_mut()) {
-            bisect.terms = crate::git::bisect::Terms {
+            bisect.terms = kika_git::bisect::Terms {
                 bad: "new".into(),
                 good: "old".into(),
             };

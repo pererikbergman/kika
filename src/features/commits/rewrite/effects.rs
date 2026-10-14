@@ -15,15 +15,15 @@ use crate::background;
 use crate::effect::Tag;
 use crate::features::commits::CommitsIntent;
 use crate::features::commits::rewrite::RewriteIntent;
-use crate::git::GitRunner;
-use crate::git::comment_prefix::read_comment_prefix;
-use crate::git::commit_files::CommitId;
-use crate::git::rebase_plan::{parse_todo, validate_edit};
-use crate::git::repo_state::{git_dir_command, git_dir_from};
 use crate::intent::AppIntent;
 use crate::op::GitOp;
 use crate::sequence_editor::MAX_TODO;
 use crate::worktree_file;
+use kika_git::GitRunner;
+use kika_git::comment_prefix::read_comment_prefix;
+use kika_git::commit_files::CommitId;
+use kika_git::rebase_plan::{parse_todo, validate_edit};
+use kika_git::repo_state::{git_dir_command, git_dir_from};
 
 /// Read the todo list and report it as `RewriteIntent::TodoLoaded`.
 pub(crate) fn load_todo(
@@ -182,10 +182,10 @@ mod tests {
 
     use super::*;
     use crate::effect::{Effect, Runtime};
-    use crate::git::fake::{FakeRunner, fail, ok};
+    use kika_git::fake::{FakeRunner, fail, ok};
 
     /// A `rebase-merge` dir in a temp git dir, with `todo` and `done`.
-    fn rebase_dir(tmp: &crate::git::fake::TempDir, todo: &[u8], done: &[u8]) -> PathBuf {
+    fn rebase_dir(tmp: &kika_git::fake::TempDir, todo: &[u8], done: &[u8]) -> PathBuf {
         let dir = tmp.path().join("rebase-merge");
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(dir.join("git-rebase-todo"), todo).unwrap();
@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn a_todo_write_checks_the_file_and_the_edit_before_writing() {
-        let tmp = crate::git::fake::TempDir::new("effect-todo");
+        let tmp = kika_git::fake::TempDir::new("effect-todo");
         let path = rebase_dir(&tmp, TODO, b"pick 0000 z\n");
         for bad in [
             &b"pick 1111 one\nupdate-ref refs/heads/x\npick 2222 two\npick 3333 more\n"[..],
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn a_todo_write_refuses_a_first_fold_only_when_nothing_is_done() {
-        let tmp = crate::git::fake::TempDir::new("effect-todo");
+        let tmp = kika_git::fake::TempDir::new("effect-todo");
         let todo = b"pick 1111 one\npick 2222 two\n";
         let path = rebase_dir(&tmp, todo, b"");
         let fold = b"fixup 1111 one\npick 2222 two\n";
@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn the_todo_is_read_from_git_s_dir_with_its_comment_prefix_and_none_without_one() {
-        let tmp = crate::git::fake::TempDir::new("effect-todo");
+        let tmp = kika_git::fake::TempDir::new("effect-todo");
         let mut git_dir = tmp.path().as_os_str().as_encoded_bytes().to_vec();
         git_dir.push(b'\n');
         let runner = FakeRunner::new()
@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn a_comment_prefix_that_cannot_be_read_still_loads_the_todo() {
-        let tmp = crate::git::fake::TempDir::new("effect-todo");
+        let tmp = kika_git::fake::TempDir::new("effect-todo");
         let mut git_dir = tmp.path().as_os_str().as_encoded_bytes().to_vec();
         git_dir.push(b'\n');
         let runner = FakeRunner::new()
@@ -324,7 +324,7 @@ mod tests {
 
     #[test]
     fn a_todo_write_refuses_a_line_the_prefix_would_hide() {
-        let tmp = crate::git::fake::TempDir::new("effect-todo");
+        let tmp = kika_git::fake::TempDir::new("effect-todo");
         let todo = b"b Rebase 1..2 onto 1\npick 1111 one\npick 2222 two\n";
         let path = rebase_dir(&tmp, todo, b"pick 0000 z\n");
         // The break would read as a comment, and git would not stop.
@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn a_todo_write_reads_both_lists_with_the_loaded_comment_prefix() {
-        let tmp = crate::git::fake::TempDir::new("effect-todo");
+        let tmp = kika_git::fake::TempDir::new("effect-todo");
         let todo = b"; Rebase 1..2 onto 1\npick 1111 one\npick 2222 two\n; help\n";
         let path = rebase_dir(&tmp, todo, b"pick 0000 z\n");
         let edit = b"pick 2222 two\npick 1111 one\n";

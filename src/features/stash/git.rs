@@ -4,13 +4,13 @@
 //! checks `run_op` makes before them.
 
 use super::push::with_literal_paths;
-use crate::git::commit_files::{CommitFile, CommitId, CommitRange, commit_files};
-use crate::git::error::GitError;
-use crate::git::path::RepoPath;
-use crate::git::runner::{GitCommand, GitOutput, GitRunner};
-use crate::git::safe_text::sanitize;
-use crate::git::version::{GitVersion, parse_version, version_command};
 use crate::op::{GitOp, op_command};
+use kika_git::commit_files::{CommitFile, CommitId, CommitRange, commit_files};
+use kika_git::error::GitError;
+use kika_git::path::RepoPath;
+use kika_git::runner::{GitCommand, GitOutput, GitRunner};
+use kika_git::safe_text::sanitize;
+use kika_git::version::{GitVersion, parse_version, version_command};
 
 /// One entry of `git stash list`. A stash is a commit whose first parent
 /// is `HEAD` when it was made and whose third, if any, holds the untracked
@@ -336,11 +336,11 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::features::stash::push::{StashSet, stash_file_for};
-    use crate::git::fake::{FakeRunner, fail, ok};
-    use crate::git::runner::EnvProfile;
-    use crate::git::status::EntryKind;
     use crate::op::{op_steps, refusal, run_op};
     use crate::test_support::{argv, file_entry as entry};
+    use kika_git::fake::{FakeRunner, fail, ok};
+    use kika_git::runner::EnvProfile;
+    use kika_git::status::EntryKind;
 
     const LIST: [&str; 4] = ["stash", "list", "-z", "--format=%H%x1f%P%x1f%gs"];
 
@@ -490,8 +490,8 @@ pub(crate) mod tests {
 
     #[test]
     fn a_real_stash_lists_and_shows_its_tracked_and_untracked_files() {
-        use crate::git::CliRunner;
-        use crate::git::fake::{TempDir, git};
+        use kika_git::CliRunner;
+        use kika_git::fake::{TempDir, git};
 
         let tmp = TempDir::new("stash-list");
         let dir = tmp.path();
@@ -956,8 +956,8 @@ pub(crate) mod tests {
     // --- Stash, in real git ---
 
     /// `a.txt` and `b.txt` committed, with an identity and no signing.
-    fn stash_repo() -> crate::git::fake::TempDir {
-        use crate::git::fake::{TempDir, git};
+    fn stash_repo() -> kika_git::fake::TempDir {
+        use kika_git::fake::{TempDir, git};
 
         let tmp = TempDir::new("stash");
         let dir = tmp.path();
@@ -977,7 +977,7 @@ pub(crate) mod tests {
     }
 
     fn porcelain(dir: &Path) -> String {
-        String::from_utf8(crate::git::fake::git(dir, &["status", "--porcelain"])).unwrap()
+        String::from_utf8(kika_git::fake::git(dir, &["status", "--porcelain"])).unwrap()
     }
 
     fn read(dir: &Path, name: &str) -> String {
@@ -985,7 +985,7 @@ pub(crate) mod tests {
     }
 
     fn real_entries(dir: &Path) -> Vec<crate::features::stash::git::StashEntry> {
-        crate::features::stash::git::list_stashes(&crate::git::CliRunner::isolated(dir)).unwrap()
+        crate::features::stash::git::list_stashes(&kika_git::CliRunner::isolated(dir)).unwrap()
     }
 
     fn real_ref(dir: &Path, index: usize) -> StashRef {
@@ -998,7 +998,7 @@ pub(crate) mod tests {
         let dir = tmp.path();
         std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
         std::fs::write(dir.join("new.txt"), "new\n").unwrap();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         run_op(&runner, &push(StashMode::All, Some("wip"), &[])).unwrap();
         assert_eq!(porcelain(dir), "?? new.txt\n");
         assert_eq!(read(dir, "a.txt"), "a\n");
@@ -1014,7 +1014,7 @@ pub(crate) mod tests {
         let dir = tmp.path();
         std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
         std::fs::write(dir.join("new.txt"), "new\n").unwrap();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         run_op(&runner, &push(StashMode::IncludeUntracked, None, &[])).unwrap();
         assert_eq!(porcelain(dir), "");
         assert!(!dir.join("new.txt").exists());
@@ -1023,7 +1023,7 @@ pub(crate) mod tests {
 
     /// `--staged` came in git 2.35; an older one skips this test.
     fn has_staged_stash() -> bool {
-        let out = crate::git::fake::git(Path::new("."), &["--version"]);
+        let out = kika_git::fake::git(Path::new("."), &["--version"]);
         parse_version(&out).is_some_and(|v| v >= STASH_STAGED_GIT)
     }
 
@@ -1036,9 +1036,9 @@ pub(crate) mod tests {
         let tmp = stash_repo();
         let dir = tmp.path();
         std::fs::write(dir.join("a.txt"), "staged\n").unwrap();
-        crate::git::fake::git(dir, &["add", "a.txt"]);
+        kika_git::fake::git(dir, &["add", "a.txt"]);
         std::fs::write(dir.join("b.txt"), "unstaged\n").unwrap();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         run_op(&runner, &push(StashMode::Staged, None, &[])).unwrap();
         assert_eq!(porcelain(dir), " M b.txt\n");
         assert_eq!(read(dir, "a.txt"), "a\n");
@@ -1052,7 +1052,7 @@ pub(crate) mod tests {
         std::fs::write(dir.join("a.txt"), "changed a\n").unwrap();
         let other = b"changed b\r\nno newline \xff";
         std::fs::write(dir.join("b.txt"), other).unwrap();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         let a = entry("a.txt", '.', 'M', EntryKind::Changed);
         let op = set_push(stash_file_for(&a).unwrap(), None);
         run_op(&runner, &op).unwrap();
@@ -1074,7 +1074,7 @@ pub(crate) mod tests {
     fn apply_keeps_the_entry_and_pop_and_drop_remove_it() {
         let tmp = stash_repo();
         let dir = tmp.path();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
         run_op(&runner, &push(StashMode::All, None, &[])).unwrap();
 
@@ -1082,7 +1082,7 @@ pub(crate) mod tests {
         assert_eq!(read(dir, "a.txt"), "changed\n");
         assert_eq!(real_entries(dir).len(), 1);
 
-        crate::git::fake::git(dir, &["checkout", "-q", "--", "a.txt"]);
+        kika_git::fake::git(dir, &["checkout", "-q", "--", "a.txt"]);
         run_op(&runner, &GitOp::StashPop(real_ref(dir, 0))).unwrap();
         assert_eq!(read(dir, "a.txt"), "changed\n");
         assert_eq!(real_entries(dir).len(), 0);
@@ -1097,7 +1097,7 @@ pub(crate) mod tests {
     fn a_range_of_stashes_drops_exactly_those_entries_in_real_git() {
         let tmp = stash_repo();
         let dir = tmp.path();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         for n in 0..4 {
             std::fs::write(dir.join("a.txt"), format!("change {n}\n")).unwrap();
             run_op(
@@ -1119,13 +1119,12 @@ pub(crate) mod tests {
     fn rename_puts_the_new_subject_on_top_with_the_same_tree_and_count() {
         let tmp = stash_repo();
         let dir = tmp.path();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         for (name, text) in [("a.txt", "one\n"), ("b.txt", "two\n"), ("a.txt", "three\n")] {
             std::fs::write(dir.join(name), text).unwrap();
             run_op(&runner, &push(StashMode::All, Some(text.trim()), &[])).unwrap();
         }
-        let tree =
-            |rev: &str| crate::git::fake::git(dir, &["rev-parse", &format!("{rev}^{{tree}}")]);
+        let tree = |rev: &str| kika_git::fake::git(dir, &["rev-parse", &format!("{rev}^{{tree}}")]);
 
         // The middle one, then the top one, which takes the other path.
         for (index, subject) in [(1, "renamed two"), (0, "renamed again")] {
@@ -1160,12 +1159,12 @@ pub(crate) mod tests {
     /// A repository whose stash list holds `layout` from the top: each
     /// letter a commit, a repeated letter a copy of the same commit, each
     /// entry's subject `<letter><place>`.
-    fn stash_layout(layout: &str) -> crate::git::fake::TempDir {
-        use crate::git::fake::git;
+    fn stash_layout(layout: &str) -> kika_git::fake::TempDir {
+        use kika_git::fake::git;
 
         let tmp = stash_repo();
         let dir = tmp.path();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         let mut made = std::collections::HashMap::new();
         for letter in layout.chars() {
             if made.contains_key(&letter) {
@@ -1229,7 +1228,7 @@ pub(crate) mod tests {
         for (layout, index, renames) in cases {
             let tmp = stash_layout(layout);
             let dir = tmp.path();
-            let runner = crate::git::CliRunner::isolated(dir);
+            let runner = kika_git::CliRunner::isolated(dir);
             let before = real_entries(dir);
             let result = run_op(
                 &runner,

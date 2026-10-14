@@ -9,8 +9,8 @@ use super::reflog::ReflogList;
 use super::rewrite::RebaseTodo;
 use crate::effect::Tag;
 use crate::filtered_list::{FilteredList, Row};
-use crate::git::commit_files::CommitId;
-use crate::git::log::{CommitRow, LogPage, LogQuery, Markers};
+use kika_git::commit_files::CommitId;
+use kika_git::log::{CommitRow, LogPage, LogQuery, Markers};
 
 /// Commits per page.
 pub const PAGE: usize = 200;

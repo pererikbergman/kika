@@ -28,12 +28,12 @@ use crate::features::stash::keys::{
 };
 use crate::features::submodules::SubmodulesIntent;
 use crate::features::worktrees::WorktreesIntent;
-use crate::git::bisect::BisectMark;
 use crate::intent::AppIntent;
 use crate::keymap::{Reason, never, no_commit_selected};
 use crate::model::AppState;
 use crate::op::{MergeStrategy, ResetMode};
 use crate::popup::PromptKind;
+use kika_git::bisect::BisectMark;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuId {
@@ -371,11 +371,11 @@ pub fn items(id: MenuId) -> &'static [MenuItem] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::FileEntry;
-    use crate::git::status::EntryKind;
     use crate::keymap::OP_RUNNING;
     use crate::model::Context;
     use crate::test_support::load_list;
+    use kika_git::FileEntry;
+    use kika_git::status::EntryKind;
 
     fn file(path: &str, index: char, worktree: char, kind: EntryKind) -> FileEntry {
         FileEntry {
@@ -441,12 +441,12 @@ mod tests {
 
     #[test]
     fn during_a_bisect_reset_merge_commit_and_amend_items_say_to_reset_it_first() {
-        use crate::git::repo_state::Operation;
-        use crate::git::status::{BranchStatus, Head};
+        use kika_git::repo_state::Operation;
+        use kika_git::status::{BranchStatus, Head};
 
         let mut state = AppState::new(Context::Workspace);
         state.files.rows = vec![file("a", 'M', '.', EntryKind::Changed)];
-        state.commits.list.rows = vec![crate::git::log::CommitRow {
+        state.commits.list.rows = vec![kika_git::log::CommitRow {
             oid: "abc".into(),
             short_oid: "abc".into(),
             parents: vec!["p".into()],
@@ -457,11 +457,11 @@ mod tests {
         }];
         load_list(
             &mut state.branches.list,
-            Ok(vec![crate::git::branches::Branch {
+            Ok(vec![kika_git::branches::Branch {
                 name: "topic".into(),
                 head: false,
                 upstream: None,
-                track: crate::git::branches::Track::None,
+                track: kika_git::branches::Track::None,
                 merged: false,
             }]),
         );

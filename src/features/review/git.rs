@@ -6,13 +6,13 @@
 
 use std::collections::HashMap;
 
-use crate::git::commit_files::{
+use kika_git::commit_files::{
     CommitFile, CommitId, CommitRange, LineCounts, commit_files, numstat,
 };
-use crate::git::error::GitError;
-use crate::git::remote::{AskpassEnv, askpass_for, with_prompts};
-use crate::git::remotes::RemoteName;
-use crate::git::runner::{GitCommand, GitRunner};
+use kika_git::error::GitError;
+use kika_git::remote::{AskpassEnv, askpass_for, with_prompts};
+use kika_git::remotes::RemoteName;
+use kika_git::runner::{GitCommand, GitRunner};
 
 /// What a changed file's line counts are known to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,9 +184,9 @@ pub fn pr_files(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::fake::{FakeRunner, fail, ok};
-    use crate::git::runner::EnvProfile;
     use crate::test_support::{STANDARD_ENV, env_list};
+    use kika_git::fake::{FakeRunner, fail, ok};
+    use kika_git::runner::EnvProfile;
 
     fn id(hex: &str) -> CommitId {
         CommitId::parse(hex).unwrap()
@@ -407,8 +407,8 @@ mod tests {
 
     #[test]
     fn against_real_git_a_missing_commit_is_fetched_by_id_without_a_ref() {
-        use crate::git::CliRunner;
-        use crate::git::fake::{TempDir, git};
+        use kika_git::CliRunner;
+        use kika_git::fake::{TempDir, git};
 
         let tmp = TempDir::new("pr-objects");
         let remote = tmp.path().join("remote.git");

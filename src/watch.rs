@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use crate::git::refs::RefsSnapshot;
+use kika_git::refs::RefsSnapshot;
 
 /// How often each watch runs. `fetch: None` turns auto-fetch off; a
 /// `Some` interval is the user's opt-in to background network access.

@@ -3,9 +3,9 @@
 //! `cherry-pick`'s command line one by one in argv order, so this order is
 //! the argv.
 
-use crate::git::GitRunner;
-use crate::git::commit_files::CommitId;
-use crate::git::runner::GitCommand;
+use kika_git::GitRunner;
+use kika_git::commit_files::CommitId;
+use kika_git::runner::GitCommand;
 
 /// `picks` in the order `stdout`, a `rev-list --topo-order --reverse`
 /// listing, has them. Lines that are not picks are dropped. A pick the
@@ -73,12 +73,12 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::git::CliRunner;
-    use crate::git::fake::{FakeRunner, TempDir, git, ok, try_git};
-    use crate::git::repo_state::Operation;
-    use crate::git::status::read_status;
     use crate::op::{GitOp, op_command, run_op};
     use crate::test_support::{argv, cid};
+    use kika_git::CliRunner;
+    use kika_git::fake::{FakeRunner, TempDir, git, ok, try_git};
+    use kika_git::repo_state::Operation;
+    use kika_git::status::read_status;
 
     fn id(hex: char) -> CommitId {
         CommitId::parse(&hex.to_string().repeat(40)).unwrap()

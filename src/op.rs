@@ -11,17 +11,17 @@ use crate::features::commits::git::detached_checkout;
 use crate::features::commits::reflog::{self, Direction, Expected, Step};
 use crate::features::commits::rewrite;
 use crate::features::stash::{self, StashMode, StashRef};
-use crate::git::bisect::BisectMark;
-use crate::git::branches::BranchName;
-use crate::git::commit_files::CommitId;
-use crate::git::error::GitError;
-use crate::git::path::RepoPath;
-use crate::git::rebase_plan::RebasePlan;
-use crate::git::remotes::{RemoteBranch, RemoteName};
-use crate::git::repo_state::Operation;
-use crate::git::runner::{GitCommand, GitRunner};
-use crate::git::status::{EntryKind, FileEntry};
-use crate::git::tags::{TagName, validate_tag_name};
+use kika_git::bisect::BisectMark;
+use kika_git::branches::BranchName;
+use kika_git::commit_files::CommitId;
+use kika_git::error::GitError;
+use kika_git::path::RepoPath;
+use kika_git::rebase_plan::RebasePlan;
+use kika_git::remotes::{RemoteBranch, RemoteName};
+use kika_git::repo_state::Operation;
+use kika_git::runner::{GitCommand, GitRunner};
+use kika_git::status::{EntryKind, FileEntry};
+use kika_git::tags::{TagName, validate_tag_name};
 
 /// One repository-changing Git operation. Path payloads are repo file names,
 /// in argv order.
@@ -347,7 +347,7 @@ impl GitOp {
 }
 
 /// The command for `op`. Unlike reads, these need `index.lock`, so most
-/// run with [`EnvProfile::Write`](crate::git::runner::EnvProfile::Write):
+/// run with [`EnvProfile::Write`](kika_git::runner::EnvProfile::Write):
 /// no `GIT_OPTIONAL_LOCKS=0`, and file names from the repo read literally,
 /// never as globs or pathspec magic. A commit runs in the user's env: its
 /// hooks inherit it, and must see what they would see outside Kika. Git
@@ -743,11 +743,11 @@ fn ssh_is_default(runner: &dyn GitRunner, env_set: &dyn Fn(&str) -> bool) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::fake::{FakeRunner, fail, ok};
-    use crate::git::runner::{EnvProfile, GitOutput};
     use crate::test_support::{
         STANDARD_ENV, argv, dirty_repo, env_list as env, file_entry as entry, paths,
     };
+    use kika_git::fake::{FakeRunner, fail, ok};
+    use kika_git::runner::{EnvProfile, GitOutput};
 
     /// The env of an op that takes the index lock.
     const WRITE: [(&str, &str); 2] = [("LC_ALL", "C"), ("GIT_LITERAL_PATHSPECS", "1")];
@@ -890,10 +890,10 @@ mod tests {
 
     #[test]
     fn every_op_declares_its_env() {
-        use crate::git::commit_files::CommitRange;
-        use crate::git::rebase_plan::PLAN_ENV;
-        use crate::git::rebase_plan::{encode, sample};
-        use crate::git::remotes::RemoteBranch;
+        use kika_git::commit_files::CommitRange;
+        use kika_git::rebase_plan::PLAN_ENV;
+        use kika_git::rebase_plan::{encode, sample};
+        use kika_git::remotes::RemoteBranch;
         use std::collections::BTreeSet;
 
         let id = |digit: &str| CommitId::parse(&digit.repeat(40)).unwrap();
@@ -1209,7 +1209,7 @@ mod tests {
     #[test]
     fn merge_and_rebase_put_the_raw_bytes_of_a_name_in_argv() {
         use std::os::unix::ffi::OsStrExt;
-        let raw = crate::git::branches::BranchName::from_bytes(b"x\xff");
+        let raw = kika_git::branches::BranchName::from_bytes(b"x\xff");
         let merge = op_command(&GitOp::Merge {
             branch: raw.clone(),
             strategy: MergeStrategy::Squash,
@@ -1223,12 +1223,12 @@ mod tests {
     fn checking_out_a_branch_named_like_an_option_keeps_the_worktree_in_real_git() {
         let tmp = dirty_repo();
         let dir = tmp.path();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         // `git branch` refuses such names; plumbing does not.
-        crate::git::fake::git(dir, &["update-ref", "refs/heads/-f", "HEAD"]);
-        crate::git::fake::git(dir, &["update-ref", "refs/heads/--force", "HEAD"]);
-        use crate::git::version::{GitVersion, parse_version};
-        let version = parse_version(&crate::git::fake::git(dir, &["--version"]));
+        kika_git::fake::git(dir, &["update-ref", "refs/heads/-f", "HEAD"]);
+        kika_git::fake::git(dir, &["update-ref", "refs/heads/--force", "HEAD"]);
+        use kika_git::version::{GitVersion, parse_version};
+        let version = parse_version(&kika_git::fake::git(dir, &["--version"]));
         // Older git has no `--end-of-options`: the checkout fails instead.
         let modern = version.is_some_and(|v| {
             v >= GitVersion {
@@ -1247,7 +1247,7 @@ mod tests {
             );
             if modern {
                 assert_eq!(result, Ok(()), "{name}");
-                let head = crate::git::fake::git(dir, &["symbolic-ref", "HEAD"]);
+                let head = kika_git::fake::git(dir, &["symbolic-ref", "HEAD"]);
                 assert_eq!(head, format!("refs/heads/{name}\n").as_bytes());
             }
         }
@@ -1412,12 +1412,12 @@ mod tests {
 
     #[test]
     fn an_ssh_command_in_the_repo_config_is_seen_in_real_git() {
-        use crate::git::fake::{TempDir, git};
+        use kika_git::fake::{TempDir, git};
 
         let tmp = TempDir::new("batch-ssh");
         let dir = tmp.path();
         git(dir, &["init", "-q"]);
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         assert!(ssh_is_default(&runner, &|_| false));
         git(dir, &["config", "core.sshCommand", "my-ssh"]);
         assert!(!ssh_is_default(&runner, &|_| false));
@@ -1488,8 +1488,8 @@ mod tests {
 
     /// `d.txt` committed as `head`, `staged` in the index, `work` in the
     /// worktree.
-    fn staged_and_changed_repo() -> crate::git::fake::TempDir {
-        use crate::git::fake::{TempDir, git};
+    fn staged_and_changed_repo() -> kika_git::fake::TempDir {
+        use kika_git::fake::{TempDir, git};
 
         let tmp = TempDir::new("discard");
         let dir = tmp.path();
@@ -1507,11 +1507,11 @@ mod tests {
 
     #[test]
     fn discard_worktree_restores_the_index_version_and_keeps_staged_content_in_real_git() {
-        use crate::git::fake::git;
+        use kika_git::fake::git;
 
         let tmp = staged_and_changed_repo();
         let dir = tmp.path();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         run_op(&runner, &GitOp::DiscardWorktree(paths(&["d.txt"]))).unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.join("d.txt")).unwrap(),
@@ -1535,9 +1535,9 @@ mod tests {
 
     #[test]
     fn apply_worktree_removes_only_the_selected_lines_and_leaves_the_index_in_real_git() {
-        use crate::git::diff::{DiffRequest, DiffSide, load_patch};
-        use crate::git::fake::{TempDir, git};
-        use crate::git::patch::{Direction, LineId, PatchSelection, build};
+        use kika_git::diff::{DiffRequest, DiffSide, load_patch};
+        use kika_git::fake::{TempDir, git};
+        use kika_git::patch::{Direction, LineId, PatchSelection, build};
 
         let tmp = TempDir::new("discard-lines");
         let dir = tmp.path();
@@ -1550,7 +1550,7 @@ mod tests {
             .replace("line 1\n", "line one\n")
             .replace("line 10\n", "ten a\nten b\n");
         std::fs::write(dir.join("l.txt"), &changed).unwrap();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         let request = DiffRequest {
             path: "l.txt".into(),
             orig_path: None,
@@ -1577,7 +1577,7 @@ mod tests {
     #[test]
     #[cfg_attr(windows, ignore = "Windows forbids * and : in file names")]
     fn delete_untracked_on_a_glob_name_deletes_only_that_file_in_real_git() {
-        use crate::git::fake::{TempDir, git};
+        use kika_git::fake::{TempDir, git};
 
         let tmp = TempDir::new("clean");
         let dir = tmp.path();
@@ -1588,7 +1588,7 @@ mod tests {
         for name in ["*.rs", "a.rs", ":(glob)b.rs", "b.rs"] {
             std::fs::write(dir.join(name), "new\n").unwrap();
         }
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         run_op(&runner, &GitOp::DeleteUntracked(paths(&["*.rs"]))).unwrap();
         run_op(&runner, &GitOp::DeleteUntracked(paths(&[":(glob)b.rs"]))).unwrap();
         assert!(!dir.join("*.rs").exists());
@@ -1651,9 +1651,9 @@ mod tests {
     /// the parts that must never show.
     #[test]
     fn no_command_kika_builds_shows_a_secret() {
-        use crate::git::command_line::display_line;
-        use crate::git::commit_files::CommitId;
         use crate::op::{GitOp, op_command};
+        use kika_git::command_line::display_line;
+        use kika_git::commit_files::CommitId;
 
         let oid = "0123456789abcdef0123456789abcdef01234567";
         let ops = [
@@ -1689,12 +1689,12 @@ mod tests {
     /// untouched.
     #[test]
     fn every_command_kind_runs_in_the_workdir() {
-        use crate::git::diff::{DiffRequest, DiffSide, diff_command, patch_diff_command};
-        use crate::git::path::RepoPath;
-        use crate::git::repo_state::git_dir_command;
-        use crate::git::runner::CliRunner;
-        use crate::git::status::status_command;
         use crate::op::{GitOp, op_command};
+        use kika_git::diff::{DiffRequest, DiffSide, diff_command, patch_diff_command};
+        use kika_git::path::RepoPath;
+        use kika_git::repo_state::git_dir_command;
+        use kika_git::runner::CliRunner;
+        use kika_git::status::status_command;
         use std::path::Path;
 
         let top = Path::new("/r/top");
@@ -1745,7 +1745,7 @@ mod tests {
             patch_diff_command(&staged),
             patch_diff_command(&untracked),
             git_dir_command(),
-            crate::git::submodule::status_command(),
+            kika_git::submodule::status_command(),
         ]
         .into_iter()
         .chain(ops.iter().map(op_command));

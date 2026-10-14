@@ -10,10 +10,10 @@ use crate::diff_mark::DiffEnd;
 use crate::effect::Tag;
 use crate::features::commits::CommitsIntent;
 use crate::features::commits::compare::CompareIntent;
-use crate::git::GitRunner;
-use crate::git::commit_files::{CommitId, CommitRange};
-use crate::git::log::branch_commit;
 use crate::intent::AppIntent;
+use kika_git::GitRunner;
+use kika_git::commit_files::{CommitId, CommitRange};
+use kika_git::log::branch_commit;
 
 /// Read both ends of a comparison as commits and send the range from
 /// `base` to `target` back as `CompareIntent::Resolved`.

@@ -5,9 +5,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::git::commit_files::{CommitId, CommitRange};
-use crate::git::patch::LineId;
-use crate::git::path::RepoPath;
+use kika_git::commit_files::{CommitId, CommitRange};
+use kika_git::patch::LineId;
+use kika_git::path::RepoPath;
 
 /// What is picked from one file of the source commit.
 #[derive(Debug, Clone, PartialEq, Eq)]

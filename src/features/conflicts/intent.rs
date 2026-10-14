@@ -4,7 +4,7 @@
 
 use super::Choice;
 use crate::effect::Tag;
-use crate::git::path::RepoPath;
+use kika_git::path::RepoPath;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ConflictsIntent {

@@ -9,11 +9,11 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::background;
 use crate::effect::Tag;
 use crate::features::commit::CommitIntent;
-use crate::git::GitRunner;
-use crate::git::head::read_head_message;
 use crate::intent::AppIntent;
 use crate::op::GitOp;
 use crate::prompts::read_prompt_facts;
+use kika_git::GitRunner;
+use kika_git::head::read_head_message;
 
 /// Read `HEAD`'s message and report it as `CommitIntent::HeadMessageLoaded`.
 pub(crate) fn load_head_message(
@@ -55,9 +55,9 @@ mod tests {
 
     use crate::effect::{Effect, Runtime, Tag};
     use crate::features::commit::CommitIntent;
-    use crate::git::fake::{FakeRunner, fail, ok};
     use crate::intent::AppIntent;
     use crate::test_support::{HostilePanic, commit_op};
+    use kika_git::fake::{FakeRunner, fail, ok};
 
     #[tokio::test]
     async fn probe_commit_reports_the_facts_with_the_same_tag_and_op() {

@@ -8,8 +8,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::process::ExitCode;
 
-use crate::git::rebase_plan::{PLAN_ENV, apply, decode, parse_todo};
 use crate::worktree_file::{read_file, replace_file};
+use kika_git::rebase_plan::{PLAN_ENV, apply, decode, parse_todo};
 
 /// Run the hidden mode if Kika was started as a sequence editor, and say
 /// how to exit; `None` starts Kika as usual.
@@ -107,7 +107,7 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::git::fake::TempDir;
+    use kika_git::fake::TempDir;
 
     fn id(digit: char) -> String {
         digit.to_string().repeat(40)

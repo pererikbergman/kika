@@ -1,0 +1,18 @@
+[package]
+name = "kika-forge"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+# Exposes the test builders (`FakeGh`, fixtures) to other crates' tests.
+# Only `[dev-dependencies]` turn it on, so release builds never carry them.
+test-support = ["kika-git/test-support"]
+
+[dependencies]
+kika-git = { path = "../kika-git" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+kika-git = { path = "../kika-git", features = ["test-support"] }

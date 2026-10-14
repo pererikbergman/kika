@@ -10,8 +10,8 @@ use crate::background;
 use crate::effect::Tag;
 use crate::features::commits::CommitsIntent;
 use crate::features::commits::reflog::ReflogIntent;
-use crate::git::GitRunner;
 use crate::intent::AppIntent;
+use kika_git::GitRunner;
 
 /// Read the reflog and report it as `ReflogIntent::Loaded`.
 pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {

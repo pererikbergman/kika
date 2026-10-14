@@ -2,7 +2,7 @@
 //! one file, and the file's content with a line added. Pure; the write
 //! goes through [`worktree_file`](crate::worktree_file).
 
-use crate::git::path::RepoPath;
+use kika_git::path::RepoPath;
 
 /// The pattern the `.gitignore` prompt offers for a file: the lossy,
 /// terminal-safe text it is filled with, and the exact bytes written when

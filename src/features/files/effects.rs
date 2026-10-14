@@ -11,12 +11,12 @@ use super::gitignore::{self, IgnoreAdded};
 use crate::background;
 use crate::effect::Tag;
 use crate::features::files::FilesIntent;
-use crate::git::GitRunner;
-use crate::git::path::RepoPath;
-use crate::git::safe_text::sanitize;
-use crate::git::status::read_status;
 use crate::intent::AppIntent;
 use crate::worktree_file;
+use kika_git::GitRunner;
+use kika_git::path::RepoPath;
+use kika_git::safe_text::sanitize;
+use kika_git::status::read_status;
 
 /// Read the status and report it as `StatusLoaded`.
 pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
@@ -65,10 +65,10 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::effect::{Effect, Runtime, Tag};
-    use crate::git::FileEntry;
-    use crate::git::fake::{FakeRunner, ok};
-    use crate::git::status::{BranchStatus, EntryKind, Head, RepoStatus};
     use crate::intent::AppIntent;
+    use kika_git::FileEntry;
+    use kika_git::fake::{FakeRunner, ok};
+    use kika_git::status::{BranchStatus, EntryKind, Head, RepoStatus};
 
     #[tokio::test]
     async fn load_status_reports_back_with_the_same_tag() {

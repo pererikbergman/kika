@@ -7,14 +7,14 @@
 use super::push::{self, leading_dirs};
 use crate::confirm_question::Answer;
 use crate::features::stash::StashIntent;
-use crate::git::FileEntry;
-use crate::git::path::RepoPath;
-use crate::git::status::EntryKind;
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, OP_RUNNING, Reason, list_guard, never};
 use crate::menu::MenuId;
 use crate::model::AppState;
 use crossterm::event::{KeyCode, KeyModifiers};
+use kika_git::FileEntry;
+use kika_git::path::RepoPath;
+use kika_git::status::EntryKind;
 
 /// Nothing in the Stash panel can be opened or acted on before it lists
 /// an entry.
@@ -463,8 +463,8 @@ mod tests {
         );
         state.stash.list.rows = vec![crate::features::stash::StashEntry {
             index: 0,
-            oid: crate::git::commit_files::CommitId::parse("a0").unwrap(),
-            base: crate::git::commit_files::CommitId::parse("b0").unwrap(),
+            oid: kika_git::commit_files::CommitId::parse("a0").unwrap(),
+            base: kika_git::commit_files::CommitId::parse("b0").unwrap(),
             untracked: None,
             subject: String::new(),
         }];
@@ -485,8 +485,8 @@ mod tests {
             .enumerate()
             .map(|(index, oid)| crate::features::stash::StashEntry {
                 index,
-                oid: crate::git::commit_files::CommitId::parse(oid).unwrap(),
-                base: crate::git::commit_files::CommitId::parse("b0").unwrap(),
+                oid: kika_git::commit_files::CommitId::parse(oid).unwrap(),
+                base: kika_git::commit_files::CommitId::parse("b0").unwrap(),
                 untracked: None,
                 subject: format!("On main: {oid}"),
             })

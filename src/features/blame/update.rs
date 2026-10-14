@@ -6,10 +6,10 @@ use super::BlameIntent;
 use super::keys::blame_disabled;
 use super::state::{BlameView, CommitView};
 use crate::effect::{Effect, Tag};
-use crate::git::blame::BlameLine;
-use crate::git::diff::DiffLine;
 use crate::intent::Scroll;
 use crate::model::{AppState, Context, Focus};
+use kika_git::blame::BlameLine;
+use kika_git::diff::DiffLine;
 
 /// The Blame feature's half of `update`: core's one `AppIntent::Blame` arm
 /// lands here. A free function, so its name cannot clash with handlers.
@@ -142,11 +142,11 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::path::RepoPath;
     use crate::intent::AppIntent;
     use crate::keymap::KeyScope;
     use crate::test_support::*;
     use crossterm::event::KeyCode;
+    use kika_git::path::RepoPath;
 
     #[test]
     fn b_on_a_tracked_modified_file_opens_its_blame_and_loads_it_once() {

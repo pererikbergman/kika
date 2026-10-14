@@ -3,7 +3,16 @@ name = "kika"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = ["crates/kika-git", "crates/kika-forge"]
+# A plain `cargo test` runs every crate's tests, not only the binary's.
+default-members = [".", "crates/kika-git", "crates/kika-forge"]
+
 [dependencies]
+# Git CLI plumbing and the forge client (ADR-0003).
+kika-git = { path = "crates/kika-git" }
+kika-forge = { path = "crates/kika-forge" }
+
 # UI & Terminal
 ratatui = "0.30"
 crossterm = "0.29"
@@ -27,3 +36,6 @@ libc = "0.2"
 [dev-dependencies]
 # Paused virtual time, so timer tests never wait for real.
 tokio = { version = "1.53", features = ["full", "test-util"] }
+# The test builders of the plumbing crates, for this crate's tests only.
+kika-git = { path = "crates/kika-git", features = ["test-support"] }
+kika-forge = { path = "crates/kika-forge", features = ["test-support"] }

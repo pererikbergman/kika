@@ -6,11 +6,11 @@
 use std::path::Path;
 
 use super::git::{StashMode, checked};
-use crate::git::commit_files::CommitId;
-use crate::git::path::RepoPath;
-use crate::git::runner::{GitCommand, GitRunner};
-use crate::git::status::{EntryKind, FileEntry};
 use crate::op::{GitOp, op_command};
+use kika_git::commit_files::CommitId;
+use kika_git::path::RepoPath;
+use kika_git::runner::{GitCommand, GitRunner};
+use kika_git::status::{EntryKind, FileEntry};
 
 /// Why a stash of a staged rename is refused: something sits at its old
 /// path, `path` here, which the push would leave alone and the restore
@@ -279,7 +279,7 @@ pub(crate) fn push_with_fixups(
     if !unstage.is_empty() && restore_taken(runner, unstage)?.is_some() {
         return Err(STASH_DELETED_TAKEN.into());
     }
-    let top = crate::git::repo_root::find_toplevel(runner)
+    let top = kika_git::repo_root::find_toplevel(runner)
         .ok_or_else(|| "Could not find the worktree's top level".to_string())?;
     if let Some(path) = restore_blocked_on_disk(&top, restore) {
         return Err(stash_rename_taken(&path));
@@ -329,10 +329,10 @@ fn listed(paths: &[RepoPath]) -> String {
 mod tests {
     use super::*;
     use crate::features::stash::git::tests::{WRITE, env_of, literal_env, set_push};
-    use crate::git::fake::{FakeRunner, ok};
-    use crate::git::runner::GitOutput;
     use crate::op::run_op;
     use crate::test_support::{argv, cid as oid, file_entry as entry, two_commit_repo};
+    use kika_git::fake::{FakeRunner, ok};
+    use kika_git::runner::GitOutput;
 
     fn set(mode: StashMode, paths: &[&str], restore: &[&str]) -> StashSet {
         unstaging(mode, paths, restore, &[])
@@ -377,7 +377,7 @@ mod tests {
 
     #[test]
     fn the_path_commands_take_the_lock_and_the_head_read_does_not() {
-        use crate::git::runner::EnvProfile;
+        use kika_git::runner::EnvProfile;
         let paths: [RepoPath; 1] = ["-a.rs".into()];
         let head = oid(&"ab".repeat(20));
         for cmd in [
@@ -752,11 +752,11 @@ mod tests {
 
     /// An empty directory standing in for the worktree's top level, so the
     /// filesystem check finds nothing there.
-    struct EmptyTop(crate::git::fake::TempDir);
+    struct EmptyTop(kika_git::fake::TempDir);
 
     impl EmptyTop {
         fn new() -> Self {
-            Self(crate::git::fake::TempDir::new("top"))
+            Self(kika_git::fake::TempDir::new("top"))
         }
 
         fn stdout(&self) -> GitOutput {
@@ -769,7 +769,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_disk_check_refuses_anything_at_the_old_path_or_a_non_directory_above_it() {
-        let tmp = crate::git::fake::TempDir::new("disk");
+        let tmp = kika_git::fake::TempDir::new("disk");
         let top = tmp.path();
         let blocked = |old: &str| restore_blocked_on_disk(top, &[old.into()]).is_some();
         assert!(!blocked("old.txt"), "nothing there");
@@ -789,7 +789,7 @@ mod tests {
         assert_eq!(named("f/g/old.txt"), Some("f".into()));
         assert_eq!(named("a/b/old.txt"), Some("a/b/old.txt".into()));
 
-        let elsewhere = crate::git::fake::TempDir::new("elsewhere");
+        let elsewhere = kika_git::fake::TempDir::new("elsewhere");
         std::os::unix::fs::symlink(elsewhere.path(), top.join("s")).unwrap();
         assert!(blocked("s/old.txt"), "a symlinked directory is not real");
         std::os::unix::fs::symlink("missing", top.join("dangling")).unwrap();
@@ -799,13 +799,13 @@ mod tests {
     /// Whether git took the repo at `dir` to be on a case-insensitive
     /// filesystem; the tests that need one skip otherwise.
     fn ignores_case(dir: &Path) -> bool {
-        crate::git::fake::git(dir, &["config", "--get", "core.ignorecase"]) == b"true\n"
+        kika_git::fake::git(dir, &["config", "--get", "core.ignorecase"]) == b"true\n"
     }
 
     /// A repo whose last commit adds `old`, then stages `old` renamed to
     /// `new.txt`. Git may leave an emptied directory behind; it is removed.
-    fn renamed_away(old: &str) -> crate::git::fake::TempDir {
-        use crate::git::fake::git;
+    fn renamed_away(old: &str) -> kika_git::fake::TempDir {
+        use kika_git::fake::git;
         let (tmp, _) = two_commit_repo();
         let dir = tmp.path();
         if let Some(parent) = Path::new(old).parent() {
@@ -826,7 +826,7 @@ mod tests {
 
     #[test]
     fn a_file_at_the_old_path_in_another_case_stops_the_stash_in_real_git() {
-        use crate::git::fake::git;
+        use kika_git::fake::git;
         let tmp = renamed_away("Old.txt");
         let dir = tmp.path();
         if !ignores_case(dir) {
@@ -836,7 +836,7 @@ mod tests {
         let before = git(dir, &["status", "--porcelain"]);
 
         let op = set_push(set(StashMode::All, &["new.txt"], &["Old.txt"]), None);
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         assert_eq!(
             run_op(&runner, &op),
             Err(stash_rename_taken(&"Old.txt".into()))
@@ -851,7 +851,7 @@ mod tests {
 
     #[test]
     fn a_file_at_the_old_directory_in_another_case_stops_the_stash_in_real_git() {
-        use crate::git::fake::git;
+        use kika_git::fake::git;
         let tmp = renamed_away("D/old.txt");
         let dir = tmp.path();
         if !ignores_case(dir) {
@@ -861,7 +861,7 @@ mod tests {
         let before = git(dir, &["status", "--porcelain"]);
 
         let op = set_push(set(StashMode::All, &["new.txt"], &["D/old.txt"]), None);
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         assert_eq!(run_op(&runner, &op), Err(stash_rename_taken(&"D".into())));
         assert_eq!(stash_count(dir), 0);
         assert_eq!(git(dir, &["status", "--porcelain"]), before);
@@ -904,7 +904,7 @@ mod tests {
 
     #[test]
     fn a_file_where_the_old_paths_directory_was_stops_the_stash_in_real_git() {
-        use crate::git::fake::git;
+        use kika_git::fake::git;
         let (tmp, _) = two_commit_repo();
         let dir = tmp.path();
         std::fs::create_dir(dir.join("d")).unwrap();
@@ -919,7 +919,7 @@ mod tests {
         assert_eq!(before, b"R  d/old.txt -> new.txt\n?? d\n");
 
         let op = set_push(set(StashMode::All, &["new.txt"], &["d/old.txt"]), None);
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         assert_eq!(run_op(&runner, &op), Err(stash_rename_taken(&"d".into())));
         assert_eq!(stash_count(dir), 0);
         assert_eq!(git(dir, &["status", "--porcelain"]), before);
@@ -928,8 +928,8 @@ mod tests {
 
     /// A repo with `old.txt` committed and staged as renamed to `new.txt`,
     /// with its content changed.
-    fn staged_rename_repo() -> crate::git::fake::TempDir {
-        use crate::git::fake::git;
+    fn staged_rename_repo() -> kika_git::fake::TempDir {
+        use kika_git::fake::git;
         let (tmp, _) = two_commit_repo();
         let dir = tmp.path();
         std::fs::write(dir.join("old.txt"), "old\n").unwrap();
@@ -944,13 +944,13 @@ mod tests {
     }
 
     fn stash_count(dir: &Path) -> usize {
-        let list = crate::git::fake::git(dir, &["stash", "list"]);
+        let list = kika_git::fake::git(dir, &["stash", "list"]);
         list.iter().filter(|&&b| b == b'\n').count()
     }
 
     #[test]
     fn a_staged_rename_is_stashed_whole_and_pops_back_in_real_git() {
-        use crate::git::fake::git;
+        use kika_git::fake::git;
         let tmp = staged_rename_repo();
         let dir = tmp.path();
         let renamed = FileEntry {
@@ -958,7 +958,7 @@ mod tests {
             ..entry("new.txt", 'R', '.', EntryKind::Renamed)
         };
         let op = set_push(stash_file_for(&renamed).unwrap(), None);
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         run_op(&runner, &op).unwrap();
 
         assert_eq!(git(dir, &["status", "--porcelain"]), b"");
@@ -983,7 +983,7 @@ mod tests {
 
     #[test]
     fn a_file_back_at_the_old_path_stops_the_stash_before_git_pushes_in_real_git() {
-        use crate::git::fake::git;
+        use kika_git::fake::git;
         let tmp = staged_rename_repo();
         let dir = tmp.path();
         let op = set_push(set(StashMode::All, &["new.txt"], &["old.txt"]), None);
@@ -991,7 +991,7 @@ mod tests {
         std::fs::write(dir.join("old.txt"), "mine\n").unwrap();
         let before = git(dir, &["status", "--porcelain"]);
 
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         assert_eq!(
             run_op(&runner, &op),
             Err(stash_rename_taken(&"old.txt".into()))
@@ -1007,8 +1007,8 @@ mod tests {
     /// A repo with `d/gone`, the only file in `d`, staged as deleted, and
     /// two changes beside it that no stash here selects: ` M other` and
     /// `A  added`.
-    fn staged_deletion_repo() -> crate::git::fake::TempDir {
-        use crate::git::fake::git;
+    fn staged_deletion_repo() -> kika_git::fake::TempDir {
+        use kika_git::fake::git;
         let (tmp, _) = two_commit_repo();
         let dir = tmp.path();
         std::fs::create_dir(dir.join("d")).unwrap();
@@ -1030,12 +1030,12 @@ mod tests {
 
     #[test]
     fn a_lone_staged_deletion_is_stashed_and_pops_back_in_real_git() {
-        use crate::git::fake::git;
+        use kika_git::fake::git;
         let tmp = staged_deletion_repo();
         let dir = tmp.path();
         let deleted = entry("d/gone", 'D', '.', EntryKind::Changed);
         let op = set_push(stash_file_for(&deleted).unwrap(), None);
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         run_op(&runner, &op).unwrap();
 
         assert_eq!(
@@ -1066,7 +1066,7 @@ mod tests {
 
     #[test]
     fn a_file_back_at_the_deleted_path_stops_the_stash_before_git_changes_in_real_git() {
-        use crate::git::fake::git;
+        use kika_git::fake::git;
         let tmp = staged_deletion_repo();
         let dir = tmp.path();
         let deleted = entry("d/gone", 'D', '.', EntryKind::Changed);
@@ -1077,7 +1077,7 @@ mod tests {
         let before = git(dir, &["status", "--porcelain"]);
         assert!(before.windows(10).any(|w| w == b"D  d/gone\n"));
 
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         assert_eq!(run_op(&runner, &op), Err(STASH_DELETED_TAKEN.into()));
         assert_eq!(stash_count(dir), 0);
         assert_eq!(git(dir, &["status", "--porcelain"]), before);
@@ -1089,7 +1089,7 @@ mod tests {
 
     #[test]
     fn a_file_at_the_deleted_path_in_another_case_stops_the_stash_in_real_git() {
-        use crate::git::fake::git;
+        use kika_git::fake::git;
         let tmp = staged_deletion_repo();
         let dir = tmp.path();
         if !ignores_case(dir) {
@@ -1103,7 +1103,7 @@ mod tests {
         std::fs::write(dir.join("D/Gone"), "MINE\n").unwrap();
         let before = git(dir, &["status", "--porcelain"]);
 
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         assert_eq!(run_op(&runner, &op), Err(STASH_DELETED_TAKEN.into()));
         assert_eq!(stash_count(dir), 0);
         assert_eq!(git(dir, &["status", "--porcelain"]), before);

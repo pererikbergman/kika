@@ -22,18 +22,18 @@ use crate::effect::Runtime;
 use crate::features::diff::DiffIntent;
 use crate::features::diff::renderers::ExternalRenderer;
 use crate::features::diff::renderers::RenderersIntent;
-use crate::forge::ForgeHost;
-use crate::forge::github::FakeGh;
-use crate::forge::task::ForgeContext;
-use crate::git::recording::CommandSink;
-use crate::git::repo_root::find_toplevel;
-use crate::git::version;
-use crate::git::{CliRunner, GitRunner};
 use crate::handoff;
 use crate::intent::AppIntent;
 use crate::layout::{self, Panel, SidePanel};
 use crate::model::{AppState, Context};
 use crate::view;
+use kika_forge::ForgeHost;
+use kika_forge::github::FakeGh;
+use kika_forge::task::ForgeContext;
+use kika_git::recording::CommandSink;
+use kika_git::repo_root::find_toplevel;
+use kika_git::version;
+use kika_git::{CliRunner, GitRunner};
 
 /// How long `wait_idle` lets the app go without news before calling it a
 /// hang. It bounds a failure; a passing test never waits this long.
@@ -358,7 +358,7 @@ pub(crate) fn is_idle(state: &AppState) -> bool {
 fn hidden_sequence_editor() {
     let (Some(todo), Some(_)) = (
         std::env::var_os("KIKA_E2E_TODO"),
-        std::env::var_os(crate::git::rebase_plan::PLAN_ENV),
+        std::env::var_os(kika_git::rebase_plan::PLAN_ENV),
     ) else {
         return;
     };
@@ -371,7 +371,7 @@ fn hidden_sequence_editor() {
 mod tests {
     use super::*;
     use crate::features::repos::ReposIntent;
-    use crate::git::diff::{DiffLine, LineKind};
+    use kika_git::diff::{DiffLine, LineKind};
 
     /// A state with a diff stream for request 1 that has asked for 10 lines.
     fn streaming() -> AppState {

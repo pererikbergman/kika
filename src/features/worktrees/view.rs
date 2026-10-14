@@ -8,9 +8,9 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::git::Worktree;
 use super::list::{WorktreeList, is_current, label};
-use crate::git::safe_text::sanitize;
 use crate::model::AppState;
 use crate::view::{centered, clip, elide_left, elide_right, width_of, wrap};
+use kika_git::safe_text::sanitize;
 
 /// One row per worktree the filter shows: `*` for the one Kika is in, the
 /// branch (or what stands for one), the path and its tags. A long path

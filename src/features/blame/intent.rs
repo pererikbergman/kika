@@ -3,9 +3,9 @@
 //! (see `docs/adr/0002-nested-intents.md`).
 
 use crate::effect::Tag;
-use crate::git::blame::BlameLine;
-use crate::git::diff::DiffLine;
 use crate::intent::Scroll;
+use kika_git::blame::BlameLine;
+use kika_git::diff::DiffLine;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BlameIntent {

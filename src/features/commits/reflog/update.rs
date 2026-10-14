@@ -7,11 +7,11 @@ use super::keys::undo_disabled;
 use super::{ReflogIntent, undo};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
-use crate::git::status::EntryKind;
 use crate::keymap::KeyScope;
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
 use crate::popup::Popup;
+use kika_git::status::EntryKind;
 
 /// The reflog's half of `update`, which `commits::update` passes
 /// `CommitsIntent::Reflog` to. A free function, so its name cannot clash
@@ -38,7 +38,7 @@ impl AppState {
     fn head_unborn(&self) -> bool {
         self.branch
             .as_ref()
-            .is_some_and(|b| matches!(b.head, crate::git::status::Head::Unborn(_)))
+            .is_some_and(|b| matches!(b.head, kika_git::status::Head::Unborn(_)))
     }
 
     /// Start reading the reflog; `user` as for the branch list. With no
@@ -178,13 +178,13 @@ mod tests {
     use crate::confirm_question::quit_question;
     use crate::features::commits::CommitsIntent;
     use crate::features::commits::CommitsTab;
-    use crate::git::repo_state::Operation;
-    use crate::git::status::{BranchStatus, Head};
     use crate::intent::AppIntent;
     use crate::keymap::{self, KeyScope};
     use crate::list_filter::{self, InputTarget};
     use crate::test_support::*;
     use crossterm::event::{KeyCode, KeyModifiers};
+    use kika_git::repo_state::Operation;
+    use kika_git::status::{BranchStatus, Head};
 
     fn undo_commit_op() -> GitOp {
         GitOp::Travel {

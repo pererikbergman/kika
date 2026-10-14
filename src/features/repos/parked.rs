@@ -1,8 +1,8 @@
 //! The state a repository's view is parked in while another is open.
 
-use crate::git::FileEntry;
-use crate::git::status::BranchStatus;
 use crate::model::ParentRepo;
+use kika_git::FileEntry;
+use kika_git::status::BranchStatus;
 
 /// What a repository showed when another was opened from the recent list,
 /// put back when it is opened again. Only the file list, the selection

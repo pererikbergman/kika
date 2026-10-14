@@ -11,14 +11,14 @@ use super::git::{self as pr_objects, CommitsHere};
 use crate::background;
 use crate::effect::{AnswerSlot, Bridge, Tag};
 use crate::features::review::ReviewIntent;
-use crate::forge::merge::MergeMethod;
-use crate::forge::review::{self, ReviewError, ReviewLoad};
-use crate::forge::task::ForgeContext;
-use crate::forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
-use crate::git::GitRunner;
-use crate::git::commit_files::CommitId;
-use crate::git::remotes::RemoteName;
 use crate::intent::AppIntent;
+use kika_forge::merge::MergeMethod;
+use kika_forge::review::{self, ReviewError, ReviewLoad};
+use kika_forge::task::ForgeContext;
+use kika_forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
+use kika_git::GitRunner;
+use kika_git::commit_files::CommitId;
+use kika_git::remotes::RemoteName;
 
 /// Read the review queues; always answered by one `ReviewIntent::QueuesLoaded`.
 pub(crate) fn load_queues(
@@ -208,21 +208,21 @@ mod tests {
 
     use crate::effect::{Effect, Runtime};
     use crate::features::review::ReviewIntent;
-    use crate::forge::merge::MergeMethod;
-    use crate::forge::review::ReviewError;
-    use crate::forge::task::ForgeContext;
-    use crate::forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
-    use crate::git::commit_files::CommitId;
-    use crate::git::fake::FakeRunner;
-    use crate::git::recording::CommandSink;
     use crate::intent::AppIntent;
     use crate::test_support::forge_tag;
+    use kika_forge::merge::MergeMethod;
+    use kika_forge::review::ReviewError;
+    use kika_forge::task::ForgeContext;
+    use kika_forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
+    use kika_git::commit_files::CommitId;
+    use kika_git::fake::FakeRunner;
+    use kika_git::recording::CommandSink;
 
     #[tokio::test]
     async fn review_loads_answer_once_and_reach_nobody_without_a_forge_client() {
-        use crate::forge::github::{FakeGh, answer};
-        use crate::forge::review::fixtures::DETAIL;
-        use crate::git::recording::CommandSink;
+        use kika_forge::github::{FakeGh, answer};
+        use kika_forge::review::fixtures::DETAIL;
+        use kika_git::recording::CommandSink;
 
         let github = vec![ForgeHost::parse("github.com").unwrap()];
         let repo = ForgeRepo {
@@ -280,9 +280,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_merge_runs_gh_in_the_cache_dir_and_answers_once() {
-        use crate::forge::github::{FakeGh, GhCall, answer};
+        use kika_forge::github::{FakeGh, GhCall, answer};
 
-        let tmp = crate::git::fake::TempDir::new("forge-effect-merge");
+        let tmp = kika_git::fake::TempDir::new("forge-effect-merge");
         let cache_dir = tmp.path().join("forge");
         let git = Arc::new(FakeRunner::new());
         let gh = Arc::new(FakeGh::new().reply(answer(
@@ -339,8 +339,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_merge_on_a_repository_the_allow_list_leaves_out_runs_no_gh() {
-        use crate::forge::allow::AllowRule;
-        use crate::forge::github::FakeGh;
+        use kika_forge::allow::AllowRule;
+        use kika_forge::github::FakeGh;
 
         let git = Arc::new(FakeRunner::new());
         let gh = Arc::new(FakeGh::new());

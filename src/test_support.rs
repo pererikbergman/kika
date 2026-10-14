@@ -23,26 +23,6 @@ use crate::features::stash::{StashEntry, StashFile, StashRef};
 use crate::features::submodules::SubmodulesIntent;
 use crate::features::sync::SyncIntent;
 use crate::filtered_list::{FilteredList, Row};
-use crate::forge::{ForgeHost, ForgeStatus, PrBadge};
-use crate::git::FileEntry;
-use crate::git::GitRunner;
-use crate::git::bisect::{BisectMark, BisectState};
-use crate::git::branches::{Branch, BranchName, Track};
-use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
-use crate::git::diff::{DiffChunk, DiffLine, DiffRequest, LineKind};
-pub(crate) use crate::git::fake::{STANDARD_ENV, env_list};
-use crate::git::log::{CommitRow, LogPage, LogQuery};
-use crate::git::patch::{self, FilePatch};
-use crate::git::path::RepoPath;
-use crate::git::rebase_plan;
-use crate::git::remote::{RemoteFailure, RemoteOp};
-use crate::git::remotes::{Remote, RemoteBranch, RemoteName};
-use crate::git::repo_state::Operation;
-use crate::git::runner::{GitChild, GitCommand, GitOutput};
-use crate::git::status::{BranchStatus, EntryKind, Head, RepoStatus};
-use crate::git::submodule::{Submodule, SubmoduleState};
-use crate::git::tags::TagRef;
-use crate::git::version::GitVersion;
 use crate::handoff::HandOff;
 use crate::hunk_view::HunkView;
 use crate::intent::AppIntent;
@@ -56,6 +36,26 @@ use crate::popup::Popup;
 use crate::view::{buffer_rows, render};
 use crate::watch::WatchEvent;
 use crossterm::event::{KeyCode, KeyModifiers};
+use kika_forge::{ForgeHost, ForgeStatus, PrBadge};
+use kika_git::FileEntry;
+use kika_git::GitRunner;
+use kika_git::bisect::{BisectMark, BisectState};
+use kika_git::branches::{Branch, BranchName, Track};
+use kika_git::commit_files::{CommitFile, CommitId, CommitRange};
+use kika_git::diff::{DiffChunk, DiffLine, DiffRequest, LineKind};
+pub(crate) use kika_git::fake::{STANDARD_ENV, env_list};
+use kika_git::log::{CommitRow, LogPage, LogQuery};
+use kika_git::patch::{self, FilePatch};
+use kika_git::path::RepoPath;
+use kika_git::rebase_plan;
+use kika_git::remote::{RemoteFailure, RemoteOp};
+use kika_git::remotes::{Remote, RemoteBranch, RemoteName};
+use kika_git::repo_state::Operation;
+use kika_git::runner::{GitChild, GitCommand, GitOutput};
+use kika_git::status::{BranchStatus, EntryKind, Head, RepoStatus};
+use kika_git::submodule::{Submodule, SubmoduleState};
+use kika_git::tags::TagRef;
+use kika_git::version::GitVersion;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use std::collections::HashMap;
@@ -365,8 +365,8 @@ pub(crate) fn press_char(state: &mut AppState, c: char) -> Vec<Effect> {
     press(state, KeyCode::Char(c))
 }
 
-pub(crate) fn blame_line(oid: &str, line_no: usize) -> crate::git::blame::BlameLine {
-    crate::git::blame::BlameLine {
+pub(crate) fn blame_line(oid: &str, line_no: usize) -> kika_git::blame::BlameLine {
+    kika_git::blame::BlameLine {
         oid: oid.into(),
         author: "Ann".into(),
         date: "2024-01-02".into(),
@@ -1251,14 +1251,14 @@ pub(crate) fn bisect_mark(mark: BisectMark, commit: &str, start: bool) -> GitOp 
 }
 
 pub(crate) fn rev_parse(dir: &Path, rev: &str) -> CommitId {
-    let out = crate::git::fake::git(dir, &["rev-parse", rev]);
+    let out = kika_git::fake::git(dir, &["rev-parse", rev]);
     cid(String::from_utf8(out).unwrap().trim())
 }
 
 /// `a.txt` committed as `one`, then as `two`, with an identity and no
 /// signing. Returns the repo and the first commit's id.
-pub(crate) fn two_commit_repo() -> (crate::git::fake::TempDir, CommitId) {
-    use crate::git::fake::{TempDir, git};
+pub(crate) fn two_commit_repo() -> (kika_git::fake::TempDir, CommitId) {
+    use kika_git::fake::{TempDir, git};
 
     let tmp = TempDir::new("history");
     let dir = tmp.path();
@@ -1287,7 +1287,7 @@ pub(crate) fn undoable() -> AppState {
         name: "main".into(),
         head: true,
         upstream: None,
-        track: crate::git::branches::Track::None,
+        track: kika_git::branches::Track::None,
         merged: true,
     }];
     state
@@ -1560,12 +1560,12 @@ pub(crate) fn from(focus: KeyScope, key: KeyPress) -> Option<AppIntent> {
     let mut state = AppState::new(Context::Workspace);
     state.stash.list.rows = vec![crate::features::stash::StashEntry {
         index: 0,
-        oid: crate::git::commit_files::CommitId::parse("a0").unwrap(),
-        base: crate::git::commit_files::CommitId::parse("b0").unwrap(),
+        oid: kika_git::commit_files::CommitId::parse("a0").unwrap(),
+        base: kika_git::commit_files::CommitId::parse("b0").unwrap(),
         untracked: None,
         subject: "On main: wip".into(),
     }];
-    state.files.rows = vec![crate::git::FileEntry {
+    state.files.rows = vec![kika_git::FileEntry {
         path: "a.rs".into(),
         orig_path: None,
         index: '.',
@@ -1573,7 +1573,7 @@ pub(crate) fn from(focus: KeyScope, key: KeyPress) -> Option<AppIntent> {
         kind: EntryKind::Changed,
     }];
     state.files.selected = 0;
-    state.commits.list.rows = vec![crate::git::log::CommitRow {
+    state.commits.list.rows = vec![kika_git::log::CommitRow {
         oid: "abc".into(),
         short_oid: "abc".into(),
         parents: vec![],
@@ -1599,8 +1599,8 @@ pub(crate) fn argv(cmd: &GitCommand) -> Vec<String> {
 
 /// A repository on `main` with one commit, and `origin`: a local bare
 /// repository holding `main` and `feature`, fetched once.
-pub(crate) fn cloned_repo() -> (crate::git::fake::TempDir, crate::git::fake::TempDir) {
-    use crate::git::fake::{TempDir, git};
+pub(crate) fn cloned_repo() -> (kika_git::fake::TempDir, kika_git::fake::TempDir) {
+    use kika_git::fake::{TempDir, git};
     let bare = TempDir::new("remote-bare");
     git(bare.path(), &["init", "-q", "--bare", "-b", "main"]);
     let tmp = TempDir::new("remote-ops");
@@ -1616,13 +1616,13 @@ pub(crate) fn cloned_repo() -> (crate::git::fake::TempDir, crate::git::fake::Tem
 
 /// A repo on `main` with `a.txt` committed and then changed in the
 /// worktree, so a forced checkout would lose the change.
-pub(crate) fn dirty_repo() -> crate::git::fake::TempDir {
-    let tmp = crate::git::fake::TempDir::new("branch-dash");
+pub(crate) fn dirty_repo() -> kika_git::fake::TempDir {
+    let tmp = kika_git::fake::TempDir::new("branch-dash");
     let dir = tmp.path();
-    crate::git::fake::git(dir, &["init", "-q", "-b", "main"]);
+    kika_git::fake::git(dir, &["init", "-q", "-b", "main"]);
     std::fs::write(dir.join("a.txt"), "a\n").unwrap();
-    crate::git::fake::git(dir, &["add", "-A"]);
-    crate::git::fake::git(dir, &["commit", "-q", "-m", "init"]);
+    kika_git::fake::git(dir, &["add", "-A"]);
+    kika_git::fake::git(dir, &["commit", "-q", "-m", "init"]);
     std::fs::write(dir.join("a.txt"), "work in progress\n").unwrap();
     tmp
 }
@@ -1712,14 +1712,14 @@ pub(crate) mod screen {
     use ratatui::backend::TestBackend;
 
     use crate::features::blame::BlameView;
-    use crate::git::FileEntry;
-    use crate::git::blame::BlameLine;
-    use crate::git::diff::{DiffLine, DiffSide, LineKind};
-    use crate::git::status::{BranchStatus, EntryKind, Head};
     use crate::hunk_view::HunkView;
     use crate::layout::{Panel, SidePanel, workspace_layout};
     use crate::model::{AppState, Context, Focus};
     use crate::view::{buffer_rows, render, screen_layout, width_of};
+    use kika_git::FileEntry;
+    use kika_git::blame::BlameLine;
+    use kika_git::diff::{DiffLine, DiffSide, LineKind};
+    use kika_git::status::{BranchStatus, EntryKind, Head};
     use ratatui::layout::Rect;
 
     /// Draw into a `width` x `height` buffer and return its rows as text.
@@ -1911,7 +1911,7 @@ pub(crate) mod screen {
         let mut state = loaded(vec![file("a.rs")]);
         state.files.selected = 0;
         let mut view = HunkView::new("a.rs".into(), side);
-        view.loaded(crate::git::patch::parse(bytes).unwrap(), 20);
+        view.loaded(kika_git::patch::parse(bytes).unwrap(), 20);
         state.focus_hunk_view(view);
         state
     }

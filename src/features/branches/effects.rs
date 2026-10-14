@@ -9,9 +9,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::BranchesIntent;
 use crate::background;
 use crate::effect::Tag;
-use crate::git::GitRunner;
-use crate::git::branches::{branch_log, list_branches};
 use crate::intent::AppIntent;
+use kika_git::GitRunner;
+use kika_git::branches::{branch_log, list_branches};
 
 /// List the local branches and report them as `BranchesIntent::Loaded`.
 pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
@@ -32,7 +32,7 @@ pub(crate) fn load_log(
     tag: Tag,
     refname: Vec<u8>,
 ) {
-    let read = crate::git::path::os_string(&refname);
+    let read = kika_git::path::os_string(&refname);
     background::run(
         tx,
         move || branch_log(runner.as_ref(), &read),
@@ -58,9 +58,9 @@ mod tests {
     use crate::features::branches::BranchesIntent;
     use crate::features::branches::remotes::RemotesIntent;
     use crate::features::branches::tags::TagsIntent;
-    use crate::git::fake::{FakeRunner, ok};
     use crate::intent::AppIntent;
     use crate::test_support::HostilePanic;
+    use kika_git::fake::{FakeRunner, ok};
 
     #[tokio::test]
     async fn branch_loads_report_back_with_the_same_tag_and_name() {
@@ -113,7 +113,7 @@ mod tests {
             Some(AppIntent::Branches(BranchesIntent::LogLoaded {
                 tag,
                 refname: b"refs/heads/main".to_vec(),
-                result: Ok(vec![crate::git::branches::LogRow {
+                result: Ok(vec![kika_git::branches::LogRow {
                     short_oid: "abc".into(),
                     date: "2024-01-02".into(),
                     author: "Ann".into(),

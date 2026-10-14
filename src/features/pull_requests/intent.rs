@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 
 use crate::effect::Tag;
-use crate::forge::{CreateError, ForgeRepo, ForgeStatus, PrBadge};
-use crate::git::branches::BranchName;
+use kika_forge::{CreateError, ForgeRepo, ForgeStatus, PrBadge};
+use kika_git::branches::BranchName;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PullRequestsIntent {

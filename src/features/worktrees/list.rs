@@ -5,10 +5,10 @@
 
 use super::git::Worktree;
 use crate::filtered_list::{FilteredList, Row};
-use crate::git::branches::BranchName;
-use crate::git::path::RepoPath;
 use crate::keymap::{FILTER_HIDES_ROW, OP_RUNNING, Reason};
 use crate::model::AppState;
+use kika_git::branches::BranchName;
+use kika_git::path::RepoPath;
 
 /// Hex digits of a detached commit, enough to tell commits apart.
 const SHORT_OID: usize = 7;

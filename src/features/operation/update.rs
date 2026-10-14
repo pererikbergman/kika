@@ -7,14 +7,14 @@ use super::OperationIntent;
 use super::state::StopWorkCheck;
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
-use crate::git::branches::BranchName;
-use crate::git::commit_files::CommitId;
-use crate::git::repo_state::Operation;
 use crate::intent::AppIntent;
 use crate::keymap::{self, KeyScope, Reason};
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
 use crate::popup::Popup;
+use kika_git::branches::BranchName;
+use kika_git::commit_files::CommitId;
+use kika_git::repo_state::Operation;
 
 /// The operation's half of `update`: core's one `AppIntent::Operation` arm
 /// lands here. A free function, so its name cannot clash with handlers.
@@ -284,13 +284,13 @@ fn skip_confirm(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::status::Head;
     use crate::intent::AppIntent;
     use crate::keymap::KeyScope;
     use crate::menu::MenuId;
     use crate::op::MergeStrategy;
     use crate::test_support::*;
     use crossterm::event::{KeyCode, KeyModifiers};
+    use kika_git::status::Head;
 
     // --- Merge, rebase and the operation in progress ---
 

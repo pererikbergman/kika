@@ -5,9 +5,9 @@ use super::CopyIntent;
 use super::copied::CopiedCommit;
 use super::keys;
 use crate::effect::Effect;
-use crate::git::commit_files::CommitId;
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
+use kika_git::commit_files::CommitId;
 
 /// Copying commits' half of `update`, which `commits::update` passes
 /// `CommitsIntent::Copy` to. A free function, so its name cannot clash
@@ -101,8 +101,6 @@ impl AppState {
 mod tests {
     use crate::features::commits::CommitsIntent;
     use crate::features::commits::copy::CopyIntent;
-    use crate::git::repo_state::Operation;
-    use crate::git::status::Head;
     use crate::intent::AppIntent;
     use crate::keymap;
     use crate::model::AppState;
@@ -112,6 +110,8 @@ mod tests {
         COPIED_OID, attached_of, changed, cid, copy_ready, finished, one_copied, op_of, press_char,
         untracked, with_merge,
     };
+    use kika_git::repo_state::Operation;
+    use kika_git::status::Head;
 
     #[test]
     fn c_copies_the_rows_full_id_and_c_again_takes_it_out() {

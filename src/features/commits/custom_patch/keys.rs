@@ -11,16 +11,16 @@ use crate::confirm_question::Answer;
 use crate::features::commits::CommitsIntent;
 use crate::features::commits::custom_patch::CustomPatchIntent;
 use crate::features::commits::with_stacked_branches;
-use crate::git::commit_files::{CommitId, CommitRange};
-use crate::git::patch::PatchError;
-use crate::git::rebase_plan::{self, RebasePlan};
-use crate::git::status::EntryKind;
 use crate::intent::AppIntent;
 use crate::keymap::{
     Binding, CLEAR_LOG_FILTER, KeyPattern, KeyScope, NONE, OP_RUNNING, Reason,
     commit_source_disabled, in_progress_disabled, list_guard, never,
 };
 use crate::model::AppState;
+use kika_git::commit_files::{CommitId, CommitRange};
+use kika_git::patch::PatchError;
+use kika_git::rebase_plan::{self, RebasePlan};
+use kika_git::status::EntryKind;
 
 /// Why picks from `range` cannot join the custom patch: it holds another
 /// commit's.

@@ -1,7 +1,7 @@
 use super::ansi::StyledRow;
-use crate::git::diff::DiffSide;
-use crate::git::path::RepoPath;
 use crate::intent::Scroll;
+use kika_git::diff::DiffSide;
+use kika_git::path::RepoPath;
 
 /// One side of a file's diff as an external renderer drew it, with each
 /// row mapped back to the patch line it shows. Pure state; the renderer

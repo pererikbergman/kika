@@ -2,8 +2,8 @@
 //! no branch, tag or remote-tracking branch reaches, so that once `HEAD`
 //! moves away only the reflog still has them.
 
-use crate::git::commit_files::CommitId;
-use crate::git::runner::{GitCommand, GitRunner};
+use kika_git::commit_files::CommitId;
+use kika_git::runner::{GitCommand, GitRunner};
 
 /// List the commits reachable from `head` but not from `target` or any
 /// branch, tag or remote-tracking branch. A read: no optional locks, and
@@ -47,9 +47,9 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::git::CliRunner;
-    use crate::git::fake::{FakeRunner, TempDir, fail, git};
-    use crate::git::runner::EnvProfile;
+    use kika_git::CliRunner;
+    use kika_git::fake::{FakeRunner, TempDir, fail, git};
+    use kika_git::runner::EnvProfile;
 
     fn id(text: &str) -> CommitId {
         CommitId::parse(text).unwrap()

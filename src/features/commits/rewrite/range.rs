@@ -7,13 +7,13 @@ use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::Effect;
 use crate::features::commits::CommitsIntent;
 use crate::features::commits::rewrite::RewriteIntent;
-use crate::git::commit_files::CommitId;
-use crate::git::rebase_plan::{Edit, RebasePlan, TodoAction};
 use crate::intent::AppIntent;
 use crate::keymap::{self, KeyScope, Reason};
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
 use crate::popup::Popup;
+use kika_git::commit_files::CommitId;
+use kika_git::rebase_plan::{Edit, RebasePlan, TodoAction};
 
 /// Why a confirmed drop did not run: the range is not the one asked about.
 pub(crate) const SELECTION_CHANGED: &str = "The selection changed; nothing was dropped";
@@ -126,14 +126,14 @@ mod tests {
     use crossterm::event::{KeyCode, KeyModifiers};
 
     use super::*;
-    use crate::git::log::CommitRow;
-    use crate::git::rebase_plan::{RANGE_GAP, Step};
     use crate::handoff::HandOff;
     use crate::intent::AppIntent;
     use crate::keymap::{KeyPress, KeyScope, OP_RUNNING};
     use crate::layout::SidePanel;
     use crate::model::Focus;
     use crate::op::op_command;
+    use kika_git::log::CommitRow;
+    use kika_git::rebase_plan::{RANGE_GAP, Step};
 
     fn press(state: &mut AppState, code: KeyCode) -> Vec<Effect> {
         state.update(AppIntent::Key(KeyPress::new(code, KeyModifiers::NONE)))
@@ -368,7 +368,7 @@ mod tests {
 
     #[test]
     fn reword_moves_and_the_other_rewrites_still_refuse_a_range() {
-        use crate::git::rebase_plan::Direction;
+        use kika_git::rebase_plan::Direction;
         let intents = [
             AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Edit(Edit::Reword))),
             AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Edit(Edit::Stop))),

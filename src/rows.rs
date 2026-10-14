@@ -3,8 +3,8 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::git::commit_files::CommitFile;
 use crate::view::elide_right;
+use kika_git::commit_files::CommitFile;
 
 /// `<status> <path>`, or `<status> <old> → <new>` for a rename or copy,
 /// cut to `width`.

@@ -15,11 +15,11 @@ use crate::features::{
     blame, command_log, commit, commits, conflicts, custom_commands, files, operation,
     pull_requests, repos, review, stash, submodules, sync, worktrees,
 };
-use crate::git::remotes::RemoteName;
-use crate::git::repo_state::{Operation, resumable};
 use crate::intent::{AppIntent, Scroll};
 use crate::layout::{Panel, SidePanel};
 use crate::model::{AppState, Focus};
+use kika_git::remotes::RemoteName;
+use kika_git::repo_state::{Operation, resumable};
 
 /// Why a key or menu item cannot run, shown to the user. Most reasons are
 /// fixed text; some name a branch or a commit, which `Notice` makes safe.
@@ -2526,14 +2526,14 @@ mod tests {
     use crate::features::submodules::SubmodulesIntent;
     use crate::features::sync::SyncIntent;
     use crate::features::worktrees::WorktreesIntent;
-    use crate::git::bisect::BisectMark;
-    use crate::git::commit_files::{CommitId, CommitRange};
-    use crate::git::rebase_plan::{Direction, Edit};
-    use crate::git::status::{EntryKind, Head};
-    use crate::git::version;
     use crate::menu::MenuId;
     use crate::model::Context;
     use crate::test_support::{binding, build, from, key, layer, load_list, load_remotes, plain};
+    use kika_git::bisect::BisectMark;
+    use kika_git::commit_files::{CommitId, CommitRange};
+    use kika_git::rebase_plan::{Direction, Edit};
+    use kika_git::status::{EntryKind, Head};
+    use kika_git::version;
 
     fn off(_: &AppState) -> Option<Reason> {
         Some("off".into())
@@ -2853,7 +2853,7 @@ mod tests {
         assert_eq!(c(&state), Err("An operation is running".into()));
         state.free_op();
         assert_eq!(c(&state), Err("Nothing to commit".into()));
-        let file = |kind| crate::git::FileEntry {
+        let file = |kind| kika_git::FileEntry {
             path: "a.rs".into(),
             orig_path: None,
             index: 'U',
@@ -2871,7 +2871,7 @@ mod tests {
 
     #[test]
     fn shift_a_amends_unless_an_op_runs_there_is_no_commit_or_there_are_conflicts() {
-        use crate::git::status::{BranchStatus, Head};
+        use kika_git::status::{BranchStatus, Head};
 
         let a = |state: &AppState| {
             let k = key(KeyCode::Char('A'), KeyModifiers::SHIFT);
@@ -2907,7 +2907,7 @@ mod tests {
         state.hold_op(1);
         assert_eq!(a(&state), Err(OP_RUNNING.into()));
         state.free_op();
-        state.files.rows = vec![crate::git::FileEntry {
+        state.files.rows = vec![kika_git::FileEntry {
             path: "a.rs".into(),
             orig_path: None,
             index: 'U',
@@ -3124,7 +3124,7 @@ mod tests {
 
     #[test]
     fn the_branches_panel_has_its_own_keys_and_reaches_the_workspace_ones() {
-        use crate::git::branches::{Branch, Track};
+        use kika_git::branches::{Branch, Track};
         let mut state = AppState::new(Context::Workspace);
         let branch = |name: &str, head| Branch {
             name: name.into(),
@@ -3203,7 +3203,7 @@ mod tests {
 
     #[test]
     fn the_remotes_tab_takes_its_own_keys_and_the_workspace_keys_still_reach_it() {
-        use crate::git::remotes::{Remote, RemoteBranch};
+        use kika_git::remotes::{Remote, RemoteBranch};
         let mut state =
             AppState::new(Context::Workspace).with_location(Some("/r".into()), "/r".into());
         load_remotes(
@@ -3299,9 +3299,9 @@ mod tests {
         assert_eq!(branches(shift('U')), None);
     }
 
-    fn tag_ref(name: &str) -> crate::git::tags::TagRef {
+    fn tag_ref(name: &str) -> kika_git::tags::TagRef {
         let oid = "1".repeat(40);
-        crate::git::tags::TagRef {
+        kika_git::tags::TagRef {
             name: name.into(),
             target: CommitId::parse(&oid).unwrap(),
             target_short: oid[..7].into(),
@@ -3312,8 +3312,8 @@ mod tests {
         }
     }
 
-    fn remote_named(name: &str, configured: bool) -> crate::git::remotes::Remote {
-        crate::git::remotes::Remote {
+    fn remote_named(name: &str, configured: bool) -> kika_git::remotes::Remote {
+        kika_git::remotes::Remote {
             name: name.into(),
             url: configured.then(|| "/srv".into()),
             configured,
@@ -3388,11 +3388,11 @@ mod tests {
         );
         load_list(
             &mut state.branches.list,
-            Ok(vec![crate::git::branches::Branch {
+            Ok(vec![kika_git::branches::Branch {
                 name: "main".into(),
                 head: true,
                 upstream: Some("origin/main".into()),
-                track: crate::git::branches::Track::None,
+                track: kika_git::branches::Track::None,
                 merged: true,
             }]),
         );
@@ -3402,7 +3402,7 @@ mod tests {
         );
         assert_eq!(push_tag_remote(&state), Ok("origin".into()));
         state.remote = Some(crate::remote_run::RemoteRun::new(
-            crate::git::remote::RemoteOp::Fetch,
+            kika_git::remote::RemoteOp::Fetch,
             1,
             None,
         ));
@@ -3412,11 +3412,11 @@ mod tests {
     #[test]
     fn a_tag_goes_to_the_upstreams_remote_or_the_only_one() {
         let mut state = AppState::new(Context::Workspace);
-        let branch = |upstream: Option<&str>| crate::git::branches::Branch {
+        let branch = |upstream: Option<&str>| kika_git::branches::Branch {
             name: "main".into(),
             head: true,
             upstream: upstream.map(Into::into),
-            track: crate::git::branches::Track::None,
+            track: kika_git::branches::Track::None,
             merged: true,
         };
         load_remotes(
@@ -3461,7 +3461,7 @@ mod tests {
     /// and a bisect in progress.
     fn bisecting() -> AppState {
         let mut state = AppState::new(Context::Workspace);
-        state.files.rows = vec![crate::git::FileEntry {
+        state.files.rows = vec![kika_git::FileEntry {
             path: "a.rs".into(),
             orig_path: None,
             index: 'M',
@@ -3469,7 +3469,7 @@ mod tests {
             kind: EntryKind::Changed,
         }];
         state.files.selected = 0;
-        state.commits.list.rows = vec![crate::git::log::CommitRow {
+        state.commits.list.rows = vec![kika_git::log::CommitRow {
             oid: "abc".into(),
             short_oid: "abc".into(),
             parents: vec!["p".into()],
@@ -3480,15 +3480,15 @@ mod tests {
         }];
         load_list(
             &mut state.branches.list,
-            Ok(vec![crate::git::branches::Branch {
+            Ok(vec![kika_git::branches::Branch {
                 name: "topic".into(),
                 head: false,
                 upstream: None,
-                track: crate::git::branches::Track::None,
+                track: kika_git::branches::Track::None,
                 merged: false,
             }]),
         );
-        state.branch = Some(crate::git::status::BranchStatus {
+        state.branch = Some(kika_git::status::BranchStatus {
             head: Head::Detached("abc".into()),
             upstream: None,
             ahead_behind: None,
@@ -3535,7 +3535,7 @@ mod tests {
         let ids = ['a', 'b', 'c'].map(|d| d.to_string().repeat(40));
         let mut state = AppState::new(Context::Workspace);
         state.commits.list.rows = (0..2)
-            .map(|i| crate::git::log::CommitRow {
+            .map(|i| kika_git::log::CommitRow {
                 oid: ids[i].clone(),
                 short_oid: "x".into(),
                 parents: vec![ids[i + 1].clone()],
@@ -3728,11 +3728,11 @@ mod tests {
         assert_eq!(listed(&state), Some(Some("No branch selected".into())));
         load_list(
             &mut state.branches.list,
-            Ok(vec![crate::git::branches::Branch {
+            Ok(vec![kika_git::branches::Branch {
                 name: "topic".into(),
                 head: false,
                 upstream: None,
-                track: crate::git::branches::Track::None,
+                track: kika_git::branches::Track::None,
                 merged: false,
             }]),
         );
@@ -3779,10 +3779,9 @@ mod tests {
             ),
             other => panic!("{other:?}"),
         }
-        state.forge = crate::forge::ForgeState::new(vec![
-            crate::forge::ForgeHost::parse("github.com").unwrap(),
-        ]);
-        state.forge.repo = Some(crate::forge::ForgeRepo {
+        state.forge =
+            kika_forge::ForgeState::new(vec![kika_forge::ForgeHost::parse("github.com").unwrap()]);
+        state.forge.repo = Some(kika_forge::ForgeRepo {
             host: "github.com".into(),
             owner: "acme".into(),
             name: "widgets".into(),
@@ -4168,7 +4167,7 @@ mod tests {
         let ids = ['a', 'b', 'c'].map(|d| d.to_string().repeat(40));
         let mut state = AppState::new(Context::Workspace);
         state.commits.list.rows = (0..2)
-            .map(|i| crate::git::log::CommitRow {
+            .map(|i| kika_git::log::CommitRow {
                 oid: ids[i].clone(),
                 short_oid: "x".into(),
                 parents: vec![ids[i + 1].clone()],
@@ -4275,7 +4274,7 @@ mod tests {
 
     #[test]
     fn a_filter_hiding_the_commit_file_disables_picking_it_and_focusing_its_diff() {
-        use crate::git::commit_files::CommitFile;
+        use kika_git::commit_files::CommitFile;
         let mut state = AppState::new(Context::Workspace);
         state.focus = Focus::Commits;
         let range = CommitRange {
@@ -4347,7 +4346,7 @@ mod tests {
     /// The Branches panel focused on `tab`, with a branch, a remote with
     /// a branch, and a tag loaded, and nothing running.
     fn branch_lists(tab: crate::features::branches::BranchesTab) -> AppState {
-        use crate::git::branches::{Branch, Track};
+        use kika_git::branches::{Branch, Track};
         let mut state = AppState::new(Context::Workspace);
         state.focus = Focus::Branches;
         state.branches.tab = tab;
@@ -4364,11 +4363,11 @@ mod tests {
         );
         load_remotes(
             &mut state.branches.remotes.list,
-            Ok(vec![crate::git::remotes::Remote {
+            Ok(vec![kika_git::remotes::Remote {
                 name: "origin".into(),
                 url: Some("/srv/origin".into()),
                 configured: true,
-                branches: vec![crate::git::remotes::RemoteBranch {
+                branches: vec![kika_git::remotes::RemoteBranch {
                     remote: "origin".into(),
                     short: b"topic".to_vec(),
                     refname: b"refs/remotes/origin/topic".to_vec(),
@@ -4378,7 +4377,7 @@ mod tests {
         let oid = "a".repeat(40);
         load_list(
             &mut state.branches.tags,
-            Ok(vec![crate::git::tags::TagRef {
+            Ok(vec![kika_git::tags::TagRef {
                 name: "v1".into(),
                 target: CommitId::parse(&oid).unwrap(),
                 target_short: oid[..7].into(),
@@ -5546,12 +5545,12 @@ mod tests {
             Some(OpenMenu(MenuId::Bisect))
         );
         let mut state = AppState::new(Context::Workspace);
-        state.branch = Some(crate::git::status::BranchStatus {
+        state.branch = Some(kika_git::status::BranchStatus {
             head: Head::Detached("abc".into()),
             upstream: None,
             ahead_behind: None,
-            in_progress: vec![crate::git::repo_state::Operation::Bisect],
-            bisect: Some(crate::git::bisect::BisectState::default()),
+            in_progress: vec![kika_git::repo_state::Operation::Bisect],
+            bisect: Some(kika_git::bisect::BisectState::default()),
         });
         let status = |c| match resolve(
             registry(),
@@ -5637,7 +5636,7 @@ mod tests {
             other => panic!("{other:?}"),
         };
         assert_eq!(resolve_i(&state), Err("No files".into()));
-        let file = |kind, index, worktree| crate::git::FileEntry {
+        let file = |kind, index, worktree| kika_git::FileEntry {
             path: "a.log".into(),
             orig_path: None,
             index,

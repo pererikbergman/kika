@@ -6,7 +6,7 @@
 use super::remotes::RemotesIntent;
 use super::tags::TagsIntent;
 use crate::effect::Tag;
-use crate::git::branches::{Branch, LogRow};
+use kika_git::branches::{Branch, LogRow};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BranchesIntent {

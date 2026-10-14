@@ -8,11 +8,11 @@ use super::list;
 use super::{Worktree, WorktreeList};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
-use crate::git::path::RepoPath;
 use crate::intent::AppIntent;
 use crate::keymap::{self, KeyScope};
 use crate::model::{AppState, Context};
 use crate::popup::{ErrorPopup, LineInput, Popup, PromptKind};
+use kika_git::path::RepoPath;
 
 /// The Worktrees popup's half of `update`: core's one
 /// `AppIntent::Worktrees` arm lands here. A free function, so its name
@@ -311,14 +311,14 @@ pub(crate) fn remove_worktree_question(path: RepoPath) -> ConfirmQuestion {
 mod tests {
     use super::*;
     use crate::features::worktrees::git::parse_list;
-    use crate::git::branches::BranchName;
-    use crate::git::path::RepoPath;
     use crate::keymap::KeyScope;
     use crate::list_filter::{self, InputTarget};
     use crate::menu::MenuId;
     use crate::model::ParentRepo;
     use crate::test_support::*;
     use crossterm::event::KeyCode;
+    use kika_git::branches::BranchName;
+    use kika_git::path::RepoPath;
 
     /// `main` at `/r/a` (on `main`), `topic` at `/r/a-topic`, a missing
     /// detached one at `/r/gone` and one whose path git may have split.

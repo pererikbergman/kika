@@ -7,9 +7,9 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::log::{CommandLog, CommandLogView, LogEntry, row_text};
-use crate::git::recording::CommandOutcome;
-use crate::git::safe_text::sanitize;
 use crate::view::{clip, elide_right, pad, width_of};
+use kika_git::recording::CommandOutcome;
+use kika_git::safe_text::sanitize;
 
 /// The whole of `area`, since command lines are long: one row per shown
 /// command, oldest at the top, scrolled so the cursor row is in view. The
@@ -110,12 +110,12 @@ mod tests {
 
     use super::*;
     use crate::features::command_log::CommandLogIntent;
-    use crate::git::recording::CommandEvent;
-    use crate::git::runner::GitCommand;
     use crate::intent::AppIntent;
     use crate::model::{AppState, Context};
     use crate::popup::Popup;
     use crate::view::{buffer_rows, render as render_app};
+    use kika_git::recording::CommandEvent;
+    use kika_git::runner::GitCommand;
 
     fn draw(state: &AppState, width: u16, height: u16) -> (ratatui::buffer::Buffer, Vec<String>) {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -166,7 +166,7 @@ mod tests {
             .arg("--")
             .arg("o")
             .arg("https://u:tok@h/r");
-        let url_line = crate::git::command_line::display_line(&url);
+        let url_line = kika_git::command_line::display_line(&url);
         log(&mut state, started(0, "git status", false));
         log(&mut state, finished(0, CommandOutcome::Ok, 12));
         log(&mut state, started(1, "git commit -F …/msg", true));

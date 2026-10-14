@@ -3,7 +3,7 @@
 //! (see `docs/adr/0002-nested-intents.md`).
 
 use crate::effect::Tag;
-use crate::git::remote::{RemoteFailure, RemoteOp};
+use kika_git::remote::{RemoteFailure, RemoteOp};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SyncIntent {

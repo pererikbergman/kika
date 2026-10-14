@@ -9,10 +9,10 @@ use crate::background;
 use crate::effect::Tag;
 use crate::features::commits::CommitsIntent;
 use crate::features::commits::copy::CopyIntent;
-use crate::git::GitRunner;
-use crate::git::commit_files::CommitId;
-use crate::git::head::read_commit_message;
 use crate::intent::AppIntent;
+use kika_git::GitRunner;
+use kika_git::commit_files::CommitId;
+use kika_git::head::read_commit_message;
 
 /// Read commit `oid`'s full message and send it back as
 /// `CopyIntent::MessageLoaded`.

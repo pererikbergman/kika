@@ -77,13 +77,13 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use crate::git::branches::BranchName;
-    use crate::git::commit_files::CommitId;
-    use crate::git::tags::TagName;
     use crate::model::AppState;
     use crate::op::GitOp;
     use crate::popup::{DeleteRangeConfirm, Popup, RangeKind};
     use crate::test_support::{on_commit, op_of};
+    use kika_git::branches::BranchName;
+    use kika_git::commit_files::CommitId;
+    use kika_git::tags::TagName;
 
     /// A state with the Local, Tags and Stash ranges all started.
     fn with_ranges() -> AppState {

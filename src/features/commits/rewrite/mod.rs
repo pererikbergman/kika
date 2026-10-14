@@ -91,12 +91,12 @@ pub(crate) use range::drop_range_question;
 
 use super::keys::commit_action_disabled;
 use super::{Crossing, with_stacked_branches};
-use crate::git::rebase_plan::{self, Direction, Edit, RebasePlan, TodoEntry};
-use crate::git::version;
 use crate::keymap::{
     CLEAR_LOG_FILTER, OP_RUNNING, Reason, commits_range_disabled, in_progress_disabled, list_guard,
 };
 use crate::model::AppState;
+use kika_git::rebase_plan::{self, Direction, Edit, RebasePlan, TodoEntry};
+use kika_git::version;
 
 /// Why the selected commit or todo row cannot be rewritten now. On a log
 /// row: one operation at a time, none in progress, and a history the
