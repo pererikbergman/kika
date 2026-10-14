@@ -8,7 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
-use super::files::{FilesFocus, FilesStage, PrFile, PrFiles};
+use super::files::{FilesFocus, FilesStage, PrFile, PrFiles, ReviewView};
 use super::git::FileCounts;
 use super::markdown;
 use super::state::{NO_FORGE, ReviewProblem, ReviewScreen, ReviewState};
@@ -253,12 +253,7 @@ pub fn files_diff_rows(main: Rect) -> usize {
 /// as the workspace frames its focused panel.
 fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rect) {
     let [list, diff] = files_areas(inner);
-    let title = format!(
-        " PR #{} · files ({}/{}) ",
-        files.number,
-        files.viewed_count(),
-        files.rows.len()
-    );
+    let title = files_title(files, usize::from(list.width));
     let block = view::panel_block(title, files.focus == FilesFocus::List);
     let list_inner = block.inner(list);
     frame.render_widget(block, list);
@@ -287,6 +282,45 @@ fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rec
         )),
     };
     frame.render_widget(body.block(block), diff);
+}
+
+/// What the list shows, long and short: `whole pull request` or
+/// `commit k/N <7-hex>`.
+fn view_labels(files: &PrFiles) -> (String, String) {
+    let commit = match files.view {
+        ReviewView::Whole => None,
+        ReviewView::Commit(i) => files.commits.as_ref().and_then(|(commits, _)| {
+            let commit = commits.get(i)?;
+            Some((i + 1, commits.len(), commit.range.oid.as_str()))
+        }),
+    };
+    match commit {
+        None => ("whole pull request".into(), "whole".into()),
+        Some((k, n, oid)) => {
+            let hex = view::short_hash(oid);
+            (format!("commit {k}/{n} {hex}"), format!("{k}/{n} {hex}"))
+        }
+    }
+}
+
+/// ` PR #N · files (viewed/listed) · <view> ` for a list `width` wide:
+/// the number goes first, then the view's long label, so which commit is
+/// shown stays as long as it can.
+fn files_title(files: &PrFiles, width: usize) -> String {
+    let count = format!("files ({}/{})", files.viewed_count(), files.rows.len());
+    let (long, short) = view_labels(files);
+    let room = width.saturating_sub(2);
+    let candidates = [
+        format!(" PR #{} · {count} · {long} ", files.number),
+        format!(" {count} · {long} "),
+        format!(" {count} · {short} "),
+        format!(" {short} "),
+    ];
+    candidates
+        .iter()
+        .find(|title| width_of(title) <= room)
+        .cloned()
+        .unwrap_or_else(|| format!(" {} ", elide_right(&short, room.saturating_sub(2))))
 }
 
 /// ` Diff <path><tail> ` for a pane `width` wide: the path gives way
@@ -911,6 +945,9 @@ mod tests {
             head: id('1'),
             base: id('2'),
             range: None,
+            whole: None,
+            view: ReviewView::Whole,
+            commits: None,
             rows: vec![
                 pr_file('M', b"src/cache.rs", lines(3, 1), Some(ViewedState::Viewed)),
                 pr_file(
@@ -942,7 +979,10 @@ mod tests {
     fn each_file_row_shows_status_viewed_mark_path_and_counts() {
         let state = files_state();
         let rows = draw(&state, 120, 20);
-        assert!(contains(&rows, "PR #12 · files (1/5)"), "{rows:#?}");
+        assert!(
+            contains(&rows, "files (1/5) · whole pull request"),
+            "{rows:#?}"
+        );
         for (status, mark, path, counts) in [
             ("M", "✓", "src/cache.rs", "+3 −1"),
             ("M", "~", "src/lib.rs", "+1 −2"),
@@ -1042,9 +1082,70 @@ mod tests {
             }
         }
         let rows = draw(&files_state(), 80, 24);
-        assert!(contains(&rows, "PR #12 · files (1/5)"), "{rows:#?}");
+        assert!(contains(&rows, "files (1/5) · whole"), "{rows:#?}");
         for counts in ["+3 −1", "+1 −2", "bin", "−4"] {
             assert!(contains(&rows, counts), "{counts:?} missing in {rows:#?}");
+        }
+    }
+
+    /// `files_state()` showing the second of three commits.
+    fn in_commit_view() -> AppState {
+        use crate::features::review::PrCommit;
+        use kika_git::commit_files::{CommitId, CommitRange};
+        let mut state = files_state();
+        let id = |c: char| CommitId::parse(&c.to_string().repeat(40)).unwrap();
+        let commit = |oid, parent| PrCommit {
+            range: CommitRange {
+                oid: id(oid),
+                parent: Some(id(parent)),
+            },
+            subject: "s".into(),
+        };
+        let files = state.review.files.as_mut().unwrap();
+        files.commits = Some((
+            vec![commit('a', '3'), commit('b', 'a'), commit('1', 'b')],
+            false,
+        ));
+        files.view = ReviewView::Commit(1);
+        state
+    }
+
+    #[test]
+    fn the_file_list_title_says_which_commit_is_shown() {
+        let state = in_commit_view();
+        let rows = draw(&state, 200, 24);
+        assert!(
+            contains(&rows, " PR #12 · files (1/5) · commit 2/3 bbbbbbb "),
+            "{rows:#?}"
+        );
+        let rows = draw(&state, 120, 24);
+        assert!(
+            contains(&rows, " files (1/5) · commit 2/3 bbbbbbb "),
+            "{rows:#?}"
+        );
+        // A narrow list keeps the commit before the count.
+        let rows = draw(&state, 80, 24);
+        assert!(contains(&rows, " 2/3 bbbbbbb "), "{rows:#?}");
+        let rows = draw(&files_state(), 200, 24);
+        assert!(
+            contains(&rows, " PR #12 · files (1/5) · whole pull request "),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn the_file_list_title_never_overflows_its_border() {
+        let mut state = in_commit_view();
+        for width in 0..70 {
+            let title = files_title(state.review.files.as_ref().unwrap(), width);
+            assert!(
+                width_of(&title) <= width.saturating_sub(2) || width < 4,
+                "{width}: {title:?}"
+            );
+        }
+        for (width, height) in [(80, 24), (40, 10), (20, 5), (10, 3), (3, 2), (1, 1)] {
+            state.size = (width, height);
+            draw(&state, width, height);
         }
     }
 

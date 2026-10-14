@@ -1,6 +1,7 @@
 //! A pull request's commits in the local repository: whether they are
-//! here, fetching the missing ones from the forge's remote by id, and the
-//! changed files between the merge base and the head. Ids reach argv only
+//! here, fetching the missing ones from the forge's remote by id, the
+//! changed files between the merge base and the head, and the commits in
+//! between, each of which can be reviewed on its own. Ids reach argv only
 //! as [`CommitId`]s, hex digits, so nothing in it reads as an option; no
 //! ref name from the server ever does, and no ref is written.
 
@@ -13,6 +14,7 @@ use kika_git::error::GitError;
 use kika_git::remote::{AskpassEnv, askpass_for, with_prompts};
 use kika_git::remotes::RemoteName;
 use kika_git::runner::{GitCommand, GitRunner};
+use kika_git::safe_text::sanitize;
 
 /// What a changed file's line counts are known to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,13 +160,20 @@ pub fn pr_files(
         oid: head.clone(),
         parent: Some(merge_base(runner, base, head)?),
     };
-    let files = commit_files(runner, &range)?;
+    let rows = range_files(runner, &range)?;
+    Ok((range, rows))
+}
+
+/// The files `range` changes with their line counts: the whole pull
+/// request from its merge base, or one of its commits.
+pub fn range_files(runner: &dyn GitRunner, range: &CommitRange) -> Result<Vec<PrFileRow>, String> {
+    let files = commit_files(runner, range)?;
     // By name, so a pull request of thousands of files is no slower to match.
-    let stats: HashMap<Vec<u8>, LineCounts> = numstat(runner, &range)?
+    let stats: HashMap<Vec<u8>, LineCounts> = numstat(runner, range)?
         .into_iter()
         .map(|(path, counts)| (path.as_bytes().to_vec(), counts))
         .collect();
-    let rows = files
+    Ok(files
         .into_iter()
         .map(|file| {
             let counts = match stats.get(file.path.as_bytes()) {
@@ -177,8 +186,91 @@ pub fn pr_files(
             };
             PrFileRow { file, counts }
         })
-        .collect();
-    Ok((range, rows))
+        .collect())
+}
+
+/// The most commits of a pull request offered one by one.
+pub const MAX_PR_COMMITS: usize = 250;
+
+/// One commit of a pull request, shown against its first parent, and its
+/// subject, already safe to draw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrCommit {
+    pub range: CommitRange,
+    pub subject: String,
+}
+
+/// `git log` of the commits in `range`, merge base to head, newest first,
+/// one more than [`MAX_PR_COMMITS`] so a longer list is known to be cut.
+/// Ids reach argv only as hex; `--` ends the revisions, so no path is
+/// read. No signature is checked, which would run gpg and add lines. A
+/// range with no base lists the head's history, as far as the cap.
+pub fn pr_commits_command(range: &CommitRange) -> GitCommand {
+    let revisions = match &range.parent {
+        Some(base) => format!("{}..{}", base.as_str(), range.oid.as_str()),
+        None => range.oid.as_str().to_string(),
+    };
+    query(
+        GitCommand::new("log")
+            .arg("--no-show-signature")
+            .arg("--no-color")
+            .arg("--format=%H%x00%P%x00%s")
+            .arg("-n")
+            .arg((MAX_PR_COMMITS + 1).to_string())
+            .arg(revisions)
+            .arg("--"),
+    )
+}
+
+/// The commits in `range`, oldest first, at most [`MAX_PR_COMMITS`] of
+/// the newest, and whether there were more. An id or parent that is not
+/// hex refuses the whole list rather than showing a commit against the
+/// wrong tree.
+pub fn pr_commits(
+    runner: &dyn GitRunner,
+    range: &CommitRange,
+) -> Result<(Vec<PrCommit>, bool), String> {
+    let output = runner
+        .run_checked(&pr_commits_command(range))
+        .map_err(|e| e.message_or("git log failed"))?;
+    let mut commits = output
+        .stdout
+        .split(|&b| b == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(parse_commit)
+        .collect::<Result<Vec<_>, _>>()?;
+    let truncated = commits.len() > MAX_PR_COMMITS;
+    commits.truncate(MAX_PR_COMMITS);
+    commits.reverse();
+    Ok((commits, truncated))
+}
+
+/// One `%H NUL %P NUL %s` line of [`pr_commits_command`].
+fn parse_commit(line: &[u8]) -> Result<PrCommit, String> {
+    const GARBLED: &str = "git log gave a commit Kika could not read";
+    let mut fields = line.splitn(3, |&b| b == 0);
+    let (Some(oid), Some(parents), Some(subject)) = (fields.next(), fields.next(), fields.next())
+    else {
+        return Err(GARBLED.into());
+    };
+    let id = |raw: &[u8]| {
+        std::str::from_utf8(raw)
+            .ok()
+            .and_then(CommitId::parse)
+            .ok_or_else(|| GARBLED.to_string())
+    };
+    let parent = parents
+        .split(|&b| b == b' ')
+        .find(|p| !p.is_empty())
+        .map(id)
+        .transpose()?;
+    Ok(PrCommit {
+        range: CommitRange {
+            oid: id(oid)?,
+            parent,
+        },
+        subject: sanitize(subject),
+    })
 }
 
 #[cfg(test)]
@@ -396,6 +488,135 @@ mod tests {
         assert_eq!(rows[2].file.orig_path, Some("old".into()));
     }
 
+    fn log_argv(mb: &str, head: &str) -> Vec<String> {
+        [
+            "log",
+            "--no-show-signature",
+            "--no-color",
+            "--format=%H%x00%P%x00%s",
+            "-n",
+            "251",
+            &format!("{mb}..{head}"),
+            "--",
+        ]
+        .map(String::from)
+        .to_vec()
+    }
+
+    fn whole() -> CommitRange {
+        CommitRange {
+            oid: id("a1"),
+            parent: Some(id("c2")),
+        }
+    }
+
+    #[test]
+    fn the_commit_list_is_a_fixed_log_of_the_merge_base_to_the_head() {
+        let cmd = pr_commits_command(&whole());
+        assert_eq!(args(&cmd), log_argv("c2", "a1"));
+        let query = env_list(&[STANDARD_ENV.as_slice(), &[("GIT_NO_LAZY_FETCH", "1")]].concat());
+        assert_eq!(cmd.env_profile(), Some(EnvProfile::Standard));
+        assert_eq!(cmd.process_env(), query);
+    }
+
+    #[test]
+    fn commits_come_oldest_first_against_their_first_parent_with_safe_subjects() {
+        let argv = log_argv("c2", "a1");
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let fake = FakeRunner::new().expect(
+            &argv,
+            ok(b"a1\0b3 d4\0Merge main\nb3\0c2\0Fix \x1b[2Jit\x07\n"),
+        );
+        let (commits, truncated) = pr_commits(&fake, &whole()).unwrap();
+        assert!(!truncated);
+        assert_eq!(
+            commits,
+            [
+                PrCommit {
+                    range: CommitRange {
+                        oid: id("b3"),
+                        parent: Some(id("c2"))
+                    },
+                    subject: "Fix \u{FFFD}[2Jit\u{FFFD}".into(),
+                },
+                PrCommit {
+                    range: CommitRange {
+                        oid: id("a1"),
+                        parent: Some(id("b3"))
+                    },
+                    subject: "Merge main".into(),
+                },
+            ]
+        );
+        fake.assert_done();
+    }
+
+    #[test]
+    fn past_250_commits_the_list_says_it_is_cut_and_keeps_the_latest() {
+        let argv = log_argv("c2", "a1");
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let lines = |n: usize| -> Vec<u8> {
+            (0..n)
+                .flat_map(|i| format!("{:x}\0c2\0c {i}\n", 0x1000 + i).into_bytes())
+                .collect()
+        };
+        let fake = FakeRunner::new()
+            .expect(&argv, ok(&lines(251)))
+            .expect(&argv, ok(&lines(250)));
+        let (commits, truncated) = pr_commits(&fake, &whole()).unwrap();
+        assert!(truncated);
+        assert_eq!(commits.len(), MAX_PR_COMMITS);
+        // git lists newest first: the 251st line, the oldest, is the one left out.
+        assert_eq!(commits[0].subject, "c 249");
+        assert_eq!(commits[249].subject, "c 0");
+        let (commits, truncated) = pr_commits(&fake, &whole()).unwrap();
+        assert!(!truncated);
+        assert_eq!(commits.len(), 250);
+    }
+
+    #[test]
+    fn a_non_hex_id_or_parent_or_a_failed_log_refuses_the_whole_list() {
+        let argv = log_argv("c2", "a1");
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let fake = FakeRunner::new()
+            .expect(&argv, ok(b"a1\0c2\0ok\n--evil\0c2\0bad\n"))
+            .expect(&argv, ok(b"a1\0-c2\0bad\n"))
+            .expect(&argv, ok(b"a1 no separators\n"))
+            .expect(&argv, fail("fatal: bad revision \x1b[2J\n"));
+        for _ in 0..3 {
+            assert!(pr_commits(&fake, &whole()).is_err());
+        }
+        let message = pr_commits(&fake, &whole()).unwrap_err();
+        assert!(!message.contains('\x1b'), "{message}");
+        fake.assert_done();
+    }
+
+    #[test]
+    fn a_root_commit_has_no_parent_and_a_range_without_a_base_lists_from_the_head() {
+        let root = CommitRange {
+            oid: id("a1"),
+            parent: None,
+        };
+        assert_eq!(
+            args(&pr_commits_command(&root)),
+            [
+                "log",
+                "--no-show-signature",
+                "--no-color",
+                "--format=%H%x00%P%x00%s",
+                "-n",
+                "251",
+                "a1",
+                "--"
+            ]
+        );
+        let argv = log_argv("c2", "a1");
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let fake = FakeRunner::new().expect(&argv, ok(b"a1\0\0root\n"));
+        let (commits, _) = pr_commits(&fake, &whole()).unwrap();
+        assert_eq!(commits[0].range.parent, None);
+    }
+
     #[test]
     fn unrelated_histories_or_a_garbled_answer_say_why() {
         let fake = FakeRunner::new()
@@ -459,7 +680,17 @@ mod tests {
         );
 
         let (range, rows) = pr_files(&runner, &base, &head).unwrap();
-        assert_eq!(range.parent, Some(base));
+        assert_eq!(range.parent, Some(base.clone()));
+        let (commits, truncated) = pr_commits(&runner, &range).unwrap();
+        assert!(!truncated);
+        assert_eq!(
+            commits,
+            [PrCommit {
+                range: range.clone(),
+                subject: "head".into()
+            }]
+        );
+        assert_eq!(range_files(&runner, &commits[0].range).unwrap(), rows);
         assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0].counts,

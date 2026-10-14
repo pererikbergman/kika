@@ -1,7 +1,7 @@
 //! The I/O behind the review effects: reading the queues and a pull
 //! request through `gh`, checking for and fetching its commits, listing
-//! its files, and merging it. Each answers with exactly one intent; none
-//! blocks the event loop.
+//! its files and its commits, and merging it. Each answers with exactly
+//! one intent; none blocks the event loop.
 
 use std::sync::Arc;
 
@@ -17,7 +17,7 @@ use kika_forge::review::{self, ReviewError, ReviewLoad};
 use kika_forge::task::ForgeContext;
 use kika_forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
 use kika_git::GitRunner;
-use kika_git::commit_files::CommitId;
+use kika_git::commit_files::{CommitId, CommitRange};
 use kika_git::remotes::RemoteName;
 
 /// Read the review queues; always answered by one `ReviewIntent::QueuesLoaded`.
@@ -157,6 +157,41 @@ pub(crate) fn load_files(
     background::run(
         tx,
         move || pr_objects::pr_files(runner.as_ref(), &base, &head),
+        background::crashed("git diff-tree"),
+        move |result| AppIntent::Review(ReviewIntent::FilesLoaded { tag, result }),
+    );
+}
+
+/// List the commits of the pull request's `range`; always answered by one
+/// `ReviewIntent::CommitsLoaded`.
+pub(crate) fn load_commits(
+    runner: Arc<dyn GitRunner>,
+    tx: UnboundedSender<AppIntent>,
+    tag: Tag,
+    range: CommitRange,
+) {
+    background::run(
+        tx,
+        move || pr_objects::pr_commits(runner.as_ref(), &range),
+        background::crashed("git log"),
+        move |result| AppIntent::Review(ReviewIntent::CommitsLoaded { tag, result }),
+    );
+}
+
+/// List the files `range` changes; always answered by one
+/// `ReviewIntent::FilesLoaded` carrying the range back.
+pub(crate) fn load_range_files(
+    runner: Arc<dyn GitRunner>,
+    tx: UnboundedSender<AppIntent>,
+    tag: Tag,
+    range: CommitRange,
+) {
+    background::run(
+        tx,
+        move || {
+            let rows = pr_objects::range_files(runner.as_ref(), &range)?;
+            Ok((range, rows))
+        },
         background::crashed("git diff-tree"),
         move |result| AppIntent::Review(ReviewIntent::FilesLoaded { tag, result }),
     );
