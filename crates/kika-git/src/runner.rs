@@ -1181,8 +1181,9 @@ mod tests {
     /// SIGKILLs what is left of a hook's group (stopped or hanging) if the
     /// test fails before the interrupt ends it. Each pid is signalled only
     /// while it is still in git's group, and never if that group is ours, so
-    /// a reused pid or an unrelated process is never touched. It never panics: a panic inside
-    /// `drop` while the test unwinds would abort the whole test binary.
+    /// a reused pid or an unrelated process is never touched. It never
+    /// panics: a panic inside `drop` while the test unwinds would abort the
+    /// whole test binary.
     #[cfg(unix)]
     struct GroupGuard {
         pids: Vec<String>,
@@ -1348,6 +1349,9 @@ mod tests {
             .arg("-c")
             .arg("user.email=t@t")
             .arg("commit")
+            // `-a` holds the index lock while the hook runs; a plain
+            // commit has already released it.
+            .arg("-a")
             .arg("-F")
             .arg("-")
             .env("OUTER_GROUP", ours.to_string())
@@ -1388,6 +1392,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
 
+        assert!(dir.join(".git/index.lock").exists(), "git holds no lock");
         runner.interrupt();
         let output = rx
             .recv_timeout(Duration::from_secs(10))
@@ -1395,7 +1400,10 @@ mod tests {
             .unwrap();
 
         assert!(!output.success);
-        assert!(!dir.join(".git/index.lock").exists());
+        assert!(
+            !dir.join(".git/index.lock").exists(),
+            "git left its lock behind"
+        );
     }
 
     #[cfg(unix)]
