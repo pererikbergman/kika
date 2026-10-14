@@ -468,8 +468,9 @@ pull request, then to the queue, then to the workspace.
 - `c` on the files screen picks what it shows: "Whole pull request", or
   one of its commits, oldest first, as `<id> <subject>`. A commit's files
   and diff are against its first parent, so a merge commit shows what it
-  brought in from that side. The commits are read once per files screen
-  with `git log --no-show-signature --no-color --format=%H%x00%P%x00%s -n 251 <merge-base>..<head> --`;
+  brought in from that side. The selected file stays selected when the
+  new view has it; otherwise the first file is. The commits are read once
+  per files screen with `git log --no-show-signature --no-color --format=%H%x00%P%x00%s -n 251 <merge-base>..<head> --`;
   only the latest 250 are offered, and the list then ends with a note
   saying so. The list title shows the view, `whole pull request` or
   `commit 2/5 <id>`, and its viewed count is of the files listed. Viewed
