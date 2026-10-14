@@ -3,8 +3,8 @@
 //! close). The feature owns the state (`state.rs`), its `update` handlers
 //! (`update.rs`), its key bindings and guards (`keys.rs`), its two render
 //! functions (`view.rs`) and the loads behind `Effect::LoadBlame` and
-//! `Effect::LoadCommit` (`effects.rs`). `src/git/blame.rs` stays in `src/git`
-//! as shared plumbing.
+//! `Effect::LoadCommit` (`effects.rs`). `kika_git::blame` stays in the `kika_git`
+//! crate as shared plumbing.
 //!
 //! Its intents are nested (ADR-0002): core wraps [`BlameIntent`] in
 //! `AppIntent::Blame`, and its one `update` arm calls [`update`] here.

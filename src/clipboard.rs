@@ -16,7 +16,7 @@
 
 use std::io::{self, Write};
 
-use crate::git::safe_text::is_invisible_or_bidi;
+use kika_git::safe_text::is_invisible_or_bidi;
 
 /// What of a commit to copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

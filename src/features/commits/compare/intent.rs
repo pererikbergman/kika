@@ -4,7 +4,7 @@
 
 use crate::effect::Tag;
 use crate::features::commits::CommitsIntent;
-use crate::git::commit_files::CommitRange;
+use kika_git::commit_files::CommitRange;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CompareIntent {

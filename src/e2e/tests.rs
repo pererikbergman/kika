@@ -7,12 +7,12 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use crate::e2e::harness::Harness;
 use crate::e2e::repo::TestRepo;
 use crate::features::repos::ReposIntent;
-use crate::git::CliRunner;
-use crate::git::fake::{TempDir, git};
-use crate::git::repo_root::resolve_workdir;
-use crate::git::status::EntryKind;
 use crate::intent::AppIntent;
 use crate::watch::WatchEvent;
+use kika_git::CliRunner;
+use kika_git::fake::{TempDir, git};
+use kika_git::repo_root::resolve_workdir;
+use kika_git::status::EntryKind;
 
 #[test]
 fn the_setup_api_builds_commits_and_leaves_new_files_untracked() {
@@ -859,7 +859,7 @@ async fn started_in_a_subdirectory_kika_acts_on_root_relative_paths() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn started_outside_a_repository_the_files_panel_shows_gits_error() {
-    let outside = crate::git::fake::TempDir::new("outside");
+    let outside = kika_git::fake::TempDir::new("outside");
     let launch = outside.path().to_path_buf();
     let top = resolve_workdir(&CliRunner::isolated(&launch), launch.clone());
     assert_eq!(top, launch);
@@ -891,7 +891,7 @@ async fn started_outside_a_repository_the_files_panel_shows_gits_error() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn started_outside_a_repository_i_initialises_it_and_the_files_load() {
-    let outside = crate::git::fake::TempDir::new("outside");
+    let outside = kika_git::fake::TempDir::new("outside");
     let launch = outside.path().to_path_buf();
     std::fs::write(launch.join("notes.txt"), "hello\n").unwrap();
 
@@ -1109,8 +1109,8 @@ fn runner_allowing_local_clones(repo: &TestRepo) -> CliRunner {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_submodule_is_listed_updated_entered_and_left() {
-    use crate::git::submodule::SubmoduleState;
     use crate::popup::Popup;
+    use kika_git::submodule::SubmoduleState;
 
     let (parent, _inner) = repo_with_submodule();
     let mut app = Harness::start_with(runner_allowing_local_clones(&parent), 80, 24).await;
@@ -2157,7 +2157,7 @@ async fn b_stops_the_rebase_right_after_the_commit() {
             .as_ref()
             .unwrap()
             .in_progress
-            .contains(&crate::git::repo_state::Operation::Rebase)
+            .contains(&kika_git::repo_state::Operation::Rebase)
     );
     app.assert_screen_contains("Rebase todo (1 left)");
     app.press(KeyCode::Char('1')).await;
@@ -2199,7 +2199,7 @@ async fn moving_a_todo_row_while_stopped_changes_the_final_order() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_branch_on_a_rewritten_commit_moves_to_its_new_copy() {
     let (repo, mut app) = four_commits().await;
-    if !app.state().git_has(crate::git::version::UPDATE_REFS) {
+    if !app.state().git_has(kika_git::version::UPDATE_REFS) {
         eprintln!("skipped: --update-refs needs Git 2.38 or newer");
         return;
     }
@@ -2721,8 +2721,8 @@ async fn review_files_fetch_a_missing_head_once_then_list_and_diff_it_locally() 
     use std::sync::Arc;
 
     use crate::features::review::ReviewScreen;
-    use crate::forge::github::{FakeGh, answer};
-    use crate::forge::review::fixtures::{DETAIL, QUEUES};
+    use kika_forge::github::{FakeGh, answer};
+    use kika_forge::review::fixtures::{DETAIL, QUEUES};
 
     let (repo, _remote, head, base) = clone_missing_a_pull_request_head();
     assert!(!repo.try_git(["cat-file", "-e", &format!("{head}^{{commit}}")]));
@@ -2768,9 +2768,9 @@ async fn review_files_fetch_a_missing_head_once_then_list_and_diff_it_locally() 
 async fn shift_b_in_branches_asks_github_once_and_only_for_an_opted_in_host() {
     use std::sync::Arc;
 
-    use crate::forge::ForgeView;
-    use crate::forge::github::fixtures::{PROBE_200, STATES};
-    use crate::forge::github::{FakeGh, answer};
+    use kika_forge::ForgeView;
+    use kika_forge::github::fixtures::{PROBE_200, STATES};
+    use kika_forge::github::{FakeGh, answer};
 
     let repo = on_main();
     repo.git(["remote", "add", "origin", "https://github.com/acme/widgets"]);

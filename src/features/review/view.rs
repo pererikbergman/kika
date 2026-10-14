@@ -13,14 +13,14 @@ use super::git::FileCounts;
 use super::markdown;
 use super::state::{NO_FORGE, ReviewProblem, ReviewScreen, ReviewState};
 use crate::diff_pane_view::{diff_pane_body, diff_position, found_note};
-use crate::forge::merge::{MergeBlock, merge_options};
-use crate::forge::review::{
-    CheckStatus, Mergeability, PrDetail, PrSummary, QueueKind, ReviewVerdict, ViewedState,
-};
-use crate::forge::{ForgeStatus, PrState};
 use crate::model::AppState;
 use crate::rows::{clock, drawn_path, status_colour};
 use crate::view::{self, elide_right};
+use kika_forge::merge::{MergeBlock, merge_options};
+use kika_forge::review::{
+    CheckStatus, Mergeability, PrDetail, PrSummary, QueueKind, ReviewVerdict, ViewedState,
+};
+use kika_forge::{ForgeStatus, PrState};
 
 pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
     let review = &state.review;
@@ -554,10 +554,10 @@ mod tests {
     use crate::features::review::state::tests::{
         detail_from, fixture_detail, fixture_queues, repo,
     };
-    use crate::forge::ForgeHost;
-    use crate::forge::review::fixtures::hostile_detail;
     use crate::model::Context;
     use crate::view::buffer_rows;
+    use kika_forge::ForgeHost;
+    use kika_forge::review::fixtures::hostile_detail;
 
     fn draw(state: &AppState, width: u16, height: u16) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -613,7 +613,7 @@ mod tests {
         assert!(!contains(&rows, "Cannot merge"), "{rows:#?}");
 
         let mut detail = fixture_detail();
-        detail.merge_state = crate::forge::review::MergeState::Behind;
+        detail.merge_state = kika_forge::review::MergeState::Behind;
         state.review.detail = Some(detail);
         let rows = draw(&state, 80, 30);
         assert!(
@@ -657,7 +657,7 @@ mod tests {
         assert!(merged.add_modifier.contains(Modifier::DIM), "{merged:?}");
 
         let mut detail = fixture_detail();
-        detail.merge_state = crate::forge::review::MergeState::Blocked;
+        detail.merge_state = kika_forge::review::MergeState::Blocked;
         state.review.detail = Some(detail);
         let blocked = style_at(&state, "Cannot merge: a required review");
         assert_eq!(blocked.fg, Some(Color::Red));
@@ -767,7 +767,7 @@ mod tests {
         let mut queues = fixture_queues();
         state.review.queue = QueueKind::AllOpen;
         let long = "日本語のとても長いタイトルが続きます".repeat(4);
-        queues = crate::forge::review::fixtures::with_title(queues, 15, &long);
+        queues = kika_forge::review::fixtures::with_title(queues, 15, &long);
         state.review.queues = Some(queues);
         let rows = draw(&state, 40, 10);
         let row = rows.iter().find(|r| r.contains("#15")).unwrap();
@@ -881,9 +881,9 @@ mod tests {
         viewed: Option<ViewedState>,
     ) -> PrFile {
         PrFile {
-            file: crate::git::commit_files::CommitFile {
+            file: kika_git::commit_files::CommitFile {
                 status,
-                path: crate::git::path::RepoPath::from_bytes(path),
+                path: kika_git::path::RepoPath::from_bytes(path),
                 orig_path: None,
             },
             counts,
@@ -893,7 +893,7 @@ mod tests {
 
     /// Pull request 12's files screen, ready, with every kind of row.
     fn files_state() -> AppState {
-        use crate::git::commit_files::CommitId;
+        use kika_git::commit_files::CommitId;
         let mut state = reviewing(ReviewScreen::Files(12));
         let id = |c: char| CommitId::parse(&c.to_string().repeat(40)).unwrap();
         let lines = |added, removed| FileCounts::Lines { added, removed };
@@ -973,7 +973,7 @@ mod tests {
     #[test]
     fn the_review_diff_marks_search_matches_like_the_workspace_diff() {
         use crate::diff_search::DiffSearch;
-        use crate::git::diff::{DiffLine, LineKind};
+        use kika_git::diff::{DiffLine, LineKind};
         let mut state = files_state();
         state.diff.path = Some("src/cache.rs".into());
         state.diff.done = true;
@@ -1114,8 +1114,8 @@ mod tests {
         // Drawn on a 50-column screen with a search active.
         let mut state = files_state();
         state.diff.path = Some(path.into());
-        state.diff.lines = vec![crate::git::diff::DiffLine {
-            kind: crate::git::diff::LineKind::Added,
+        state.diff.lines = vec![kika_git::diff::DiffLine {
+            kind: kika_git::diff::LineKind::Added,
             text: "+cache".into(),
         }];
         let files = state.review.files.as_mut().unwrap();

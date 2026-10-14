@@ -7,9 +7,9 @@
 //! back over one more action, and each redo marker takes one back.
 
 use super::git::{Action, REDO_MARKER, Reflog, ReflogEntry, UNDO_MARKER, finishes_rebase_of};
-use crate::git::branches::{Branch, BranchName};
-use crate::git::commit_files::CommitId;
-use crate::git::safe_text::terminal_safe;
+use kika_git::branches::{Branch, BranchName};
+use kika_git::commit_files::CommitId;
+use kika_git::safe_text::terminal_safe;
 
 /// Characters any reflog-derived text may take in the preview.
 const ELIDE: usize = 60;
@@ -442,7 +442,7 @@ fn elide(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::features::commits::reflog::git::parse_records;
-    use crate::git::branches::Track;
+    use kika_git::branches::Track;
 
     const COMMIT: &[u8] = include_bytes!("fixtures/commit.bin");
     const CHECKOUT: &[u8] = include_bytes!("fixtures/checkout.bin");

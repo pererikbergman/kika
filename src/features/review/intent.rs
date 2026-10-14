@@ -4,9 +4,9 @@
 
 use super::{CommitsHere, PrFileRow};
 use crate::effect::Tag;
-use crate::forge::review::{PrDetail, Queues, ReviewError};
-use crate::forge::{CreateError, ForgeRepo};
-use crate::git::commit_files::CommitRange;
+use kika_forge::review::{PrDetail, Queues, ReviewError};
+use kika_forge::{CreateError, ForgeRepo};
+use kika_git::commit_files::CommitRange;
 
 // `PrDetailLoaded` carries the pull request as it did in `AppIntent`,
 // which wraps this enum and is larger still, so boxing it would save

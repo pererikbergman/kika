@@ -16,10 +16,10 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use super::ansi::StyledRow;
-use crate::git::diff::{DiffRequest, EmojiZwj, diff_command, run_diff, sanitize_body};
-use crate::git::patch::FilePatch;
-use crate::git::runner::{GitCommand, GitRunner};
-use crate::git::safe_text::{sanitize, terminal_safe};
+use kika_git::diff::{DiffRequest, EmojiZwj, diff_command, run_diff, sanitize_body};
+use kika_git::patch::FilePatch;
+use kika_git::runner::{GitCommand, GitRunner};
+use kika_git::safe_text::{sanitize, terminal_safe};
 
 /// One configured renderer: the program and its arguments, as argv.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,7 +199,7 @@ pub fn run_renderer(
 }
 
 /// The renderer's process, not yet started: its argv, then `extra_args`,
-/// with the program found by [`crate::git::program::resolve`] and the pane
+/// with the program found by [`kika_git::program::resolve`] and the pane
 /// width in `COLUMNS` and `DFT_WIDTH` (a tool that ignores `COLUMNS` when
 /// piped reads that).
 /// No shell is involved.
@@ -214,7 +214,7 @@ fn command(
         .split_first()
         .ok_or_else(|| format!("{label} has no command"))?;
     let mut command =
-        crate::git::program::command(program).map_err(|_| format!("{label} not found"))?;
+        kika_git::program::command(program).map_err(|_| format!("{label} not found"))?;
     command
         .args(args)
         .args(extra_args)
@@ -446,9 +446,9 @@ fn squeeze(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::features::diff::renderers::ansi::parse;
-    use crate::git::diff::DiffSide;
-    use crate::git::fake::{FakeRunner, fail, ok};
-    use crate::git::patch;
+    use kika_git::diff::DiffSide;
+    use kika_git::fake::{FakeRunner, fail, ok};
+    use kika_git::patch;
 
     fn os(argv: &[&str]) -> Vec<OsString> {
         argv.iter().map(OsString::from).collect()
@@ -601,7 +601,7 @@ mod tests {
         let command = command(&tool, &extra, 61).unwrap();
         assert_eq!(
             Some(command.get_program()),
-            crate::git::program::resolve(OsStr::new("sh"))
+            kika_git::program::resolve(OsStr::new("sh"))
                 .as_deref()
                 .ok()
                 .map(Path::as_os_str)
@@ -657,7 +657,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_timed_out_renderer_takes_what_it_started_with_it() {
-        let tmp = crate::git::fake::TempDir::new("external-diff-kill");
+        let tmp = kika_git::fake::TempDir::new("external-diff-kill");
         let pidfile = tmp.path().join("pid");
         let script = format!("sleep 30 & echo $! >'{}'; wait", pidfile.display());
         let r = renderer(&["sh", "-c", &script]);
@@ -676,7 +676,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_renderer_that_exited_still_takes_what_it_left_holding_stdout() {
-        let tmp = crate::git::fake::TempDir::new("external-diff-exited");
+        let tmp = kika_git::fake::TempDir::new("external-diff-exited");
         let pidfile = tmp.path().join("pid");
         let script = format!("sleep 30 & echo $! >'{}'; exit 0", pidfile.display());
         let r = renderer(&["/bin/sh", "-c", &script]);

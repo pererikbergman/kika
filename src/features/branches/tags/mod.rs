@@ -28,7 +28,7 @@
 //!
 //! What stays in core: the push and selection guards `push_tag_disabled`,
 //! `push_tag_remote` and `tag_selected_disabled` in `keymap.rs`, which
-//! sync's push uses too; `src/git/tags.rs`; the `GitOp` tag variants with
+//! sync's push uses too; `kika_git::tags`; the `GitOp` tag variants with
 //! their steps, refusals and refresh plan; and the tag branches of shared
 //! dispatch: the range delete arm, `key_focus`, `open_filter`,
 //! `toggle_range`, the `TagName` prompt submit and `range_delete.rs`. The

@@ -8,12 +8,12 @@ use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
 use crate::features::commits::CommitsIntent;
 use crate::features::commits::rewrite::RewriteIntent;
-use crate::git::commit_files::CommitId;
 use crate::intent::AppIntent;
 use crate::keymap::KeyScope;
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
 use crate::popup::{ErrorPopup, Popup};
+use kika_git::commit_files::CommitId;
 
 impl AppState {
     /// Commit the staged change as a `fixup!` of the selected commit. Git

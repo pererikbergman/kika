@@ -5,11 +5,11 @@
 use crate::confirm_question::Answer;
 use crate::effect::{Effect, Tag};
 use crate::features::commits::{checkout_question, reset_hard_question};
-use crate::git::commit_files::CommitId;
 use crate::keymap::KeyScope;
 use crate::model::AppState;
 use crate::op::{GitOp, ResetMode};
 use crate::popup::{ErrorPopup, LeaveCommitsConfirm, Popup};
+use kika_git::commit_files::CommitId;
 
 /// The left-behind check in flight, and where the user was when it
 /// started. Its answer only asks if they are still there, so a key meant
@@ -148,7 +148,6 @@ mod tests {
     use crate::confirm_question::quit_question;
     use crate::effect::Tag;
     use crate::features::commits::{checkout_question, reset_hard_question};
-    use crate::git::status::Head;
     use crate::intent::AppIntent;
     use crate::keymap::KeyScope;
     use crate::op::ResetMode;
@@ -157,6 +156,7 @@ mod tests {
         check_of, checked, cid, detached_on_commit, ids, moves, on_branch, on_commit, op_of, press,
         press_char, reset_op,
     };
+    use kika_git::status::Head;
 
     #[test]
     fn a_detached_head_checks_for_commits_left_behind_before_anything_else() {

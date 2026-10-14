@@ -1,7 +1,7 @@
 //! `git bisect start`, which runs before the first mark of a bisect.
 
-use crate::git::error::GitError;
-use crate::git::runner::{GitCommand, GitRunner};
+use kika_git::error::GitError;
+use kika_git::runner::{GitCommand, GitRunner};
 
 /// `git bisect start` with no arguments: it records where `HEAD` is and
 /// moves nothing, so the first mark that follows starts the bisect. Hooks
@@ -22,12 +22,12 @@ fn start_command() -> GitCommand {
 
 #[cfg(test)]
 mod tests {
-    use crate::git::bisect::BisectMark;
-    use crate::git::commit_files::CommitId;
-    use crate::git::fake::{FakeRunner, fail, ok};
-    use crate::git::runner::{EnvProfile, GitOutput};
     use crate::op::{GitOp, op_command, run_op};
     use crate::test_support::{argv, cid as oid, rev_parse};
+    use kika_git::bisect::BisectMark;
+    use kika_git::commit_files::CommitId;
+    use kika_git::fake::{FakeRunner, fail, ok};
+    use kika_git::runner::{EnvProfile, GitOutput};
 
     fn mark(mark: BisectMark, start: bool) -> GitOp {
         GitOp::BisectMark {
@@ -99,8 +99,8 @@ mod tests {
     /// Eight commits on `main`, `commit 1` to `commit 8`; from commit 5 on
     /// the tree has a `bug` file. Returns the repo and the commits, oldest
     /// first.
-    fn buggy_history() -> (crate::git::fake::TempDir, Vec<CommitId>) {
-        use crate::git::fake::{TempDir, git};
+    fn buggy_history() -> (kika_git::fake::TempDir, Vec<CommitId>) {
+        use kika_git::fake::{TempDir, git};
 
         let tmp = TempDir::new("bisect");
         let dir = tmp.path();
@@ -127,13 +127,13 @@ mod tests {
 
     #[test]
     fn marks_find_the_first_bad_commit_and_reset_returns_to_the_branch_in_real_git() {
-        use crate::git::bisect::read_bisect;
-        use crate::git::fake::{git, try_git};
+        use kika_git::bisect::read_bisect;
+        use kika_git::fake::{git, try_git};
 
         let (tmp, commits) = buggy_history();
         let dir = tmp.path();
         let git_dir = dir.join(".git");
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         let run = |mark: BisectMark, commit: &CommitId, start: bool| {
             let op = GitOp::BisectMark {
                 mark,

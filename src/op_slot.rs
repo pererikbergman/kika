@@ -13,13 +13,13 @@
 
 use crate::effect::{Effect, Tag};
 use crate::features::commits::reflog;
-use crate::git::askpass::Secret;
-use crate::git::repo_state::Operation;
 use crate::layout::SidePanel;
 use crate::model::{AppState, Context, Focus};
 use crate::op::{GitOp, MergeStrategy};
 use crate::popup::{CredentialPrompt, ErrorPopup, Popup};
 use crate::refresh;
+use kika_git::askpass::Secret;
+use kika_git::repo_state::Operation;
 
 /// The state behind the op slot, held by `AppState`. Its fields are
 /// private so only this file can change them.

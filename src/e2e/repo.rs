@@ -3,11 +3,11 @@
 
 use std::ffi::OsStr;
 
-use crate::git::fake::{TempDir, git, try_git};
-use crate::git::path::RepoPath;
-use crate::git::repo_root::resolve_workdir;
-use crate::git::status::read_status;
-use crate::git::{CliRunner, FileEntry};
+use kika_git::fake::{TempDir, git, try_git};
+use kika_git::path::RepoPath;
+use kika_git::repo_root::resolve_workdir;
+use kika_git::status::read_status;
+use kika_git::{CliRunner, FileEntry};
 
 /// Setup steps take and return the repo, so a test reads as one chain:
 /// `TestRepo::new().write("a.txt", "one\n").commit("init")`.
@@ -118,7 +118,7 @@ impl TestRepo {
         }
         let mut child = std::process::Command::new("git")
             .current_dir(self.dir.path())
-            .envs(crate::git::runner::isolation_env())
+            .envs(kika_git::runner::isolation_env())
             .args(["fast-import", "--quiet"])
             .stdin(std::process::Stdio::piped())
             .spawn()

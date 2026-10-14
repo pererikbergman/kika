@@ -5,7 +5,6 @@
 
 use crate::confirm_question::Answer;
 use crate::features::files::FilesIntent;
-use crate::git::status::EntryKind;
 use crate::intent::AppIntent;
 use crate::keymap::{
     Binding, KeyPattern, KeyScope, NONE, OP_RUNNING, Reason, discard_disabled, list_guard, never,
@@ -14,6 +13,7 @@ use crate::keymap::{
 use crate::menu::MenuId;
 use crate::model::{AppState, Focus};
 use crossterm::event::{KeyCode, KeyModifiers};
+use kika_git::status::EntryKind;
 
 // Chunk 10: files
 pub(crate) static FILES_NAV: &[Binding] = &[

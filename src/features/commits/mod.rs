@@ -94,12 +94,12 @@ pub(crate) use intent::CommitsIntent;
 pub(crate) use panel::{CommitsPanel, CommitsTab, PAGE};
 pub(crate) use update::update;
 
-use crate::git::rebase_plan::{self, RebasePlan};
-use crate::git::status::Head;
-use crate::git::version;
 use crate::keymap::Reason;
 use crate::model::AppState;
 use keys::{TIPS_UNKNOWN, tips_failed};
+use kika_git::rebase_plan::{self, RebasePlan};
+use kika_git::status::Head;
+use kika_git::version;
 
 /// A log commit a plan moves, `moved`, and the rows it moves past:
 /// `len` of them from `from`. A branch on one of those would change what

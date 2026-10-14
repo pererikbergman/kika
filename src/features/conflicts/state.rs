@@ -7,9 +7,9 @@
 //! outside the markers, line endings included, are kept exactly, so a file
 //! with no picks renders back to what was read.
 
-use crate::git::path::RepoPath;
-use crate::git::safe_text::sanitize;
 use crate::intent::Scroll;
+use kika_git::path::RepoPath;
+use kika_git::safe_text::sanitize;
 
 /// The marker size git uses unless a `conflict-marker-size` attribute
 /// says otherwise.
@@ -562,7 +562,7 @@ bottom\n";
     /// merge style), or `None` when this git does not know the style
     /// (zdiff3 needs 2.35).
     fn merged_by_git(style: &str) -> Option<Vec<u8>> {
-        let tmp = crate::git::fake::TempDir::new("merge-file");
+        let tmp = kika_git::fake::TempDir::new("merge-file");
         let dir = tmp.path();
         for (name, text) in [
             ("ours", "a\nB1\nX\nd\n"),
@@ -573,7 +573,7 @@ bottom\n";
         }
         let out = std::process::Command::new("git")
             .current_dir(dir)
-            .envs(crate::git::runner::isolation_env())
+            .envs(kika_git::runner::isolation_env())
             .args(["merge-file", "-p", style, "ours", "base", "theirs"])
             .output()
             .unwrap();

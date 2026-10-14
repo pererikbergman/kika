@@ -6,12 +6,12 @@
 use crate::bisect;
 use crate::features::commits::CommitsIntent;
 use crate::features::commits::bisect::BisectIntent;
-use crate::git::bisect::BisectMark;
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, Reason, list_guard};
 use crate::menu::MenuId;
 use crate::model::AppState;
 use crossterm::event::KeyCode;
+use kika_git::bisect::BisectMark;
 
 /// The bisect menu marks the selected commit, so it is one row's action.
 fn commits_bisect_disabled(state: &AppState) -> Option<Reason> {
@@ -64,10 +64,10 @@ pub(crate) static BISECT_STATUS: &[Binding] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::repo_state::Operation;
-    use crate::git::status::{EntryKind, Head};
     use crate::keymap::registry;
     use crate::model::Context;
+    use kika_git::repo_state::Operation;
+    use kika_git::status::{EntryKind, Head};
 
     #[test]
     fn the_bisect_keys_clash_with_nothing_they_could_hide_or_be_hidden_by() {
@@ -96,8 +96,8 @@ mod tests {
     #[test]
     fn the_bisect_menu_refuses_as_the_marks_do() {
         use crate::bisect::{Target, mark_disabled, reset_disabled};
-        use crate::git::bisect::{BisectState, Terms};
-        use crate::git::status::BranchStatus;
+        use kika_git::bisect::{BisectState, Terms};
+        use kika_git::status::BranchStatus;
 
         let branch = |head: Head, ops: &[Operation], bisect: Option<BisectState>| {
             Some(BranchStatus {
@@ -132,7 +132,7 @@ mod tests {
             ),
         ] {
             let mut state = AppState::new(Context::Workspace);
-            state.commits.list.rows = vec![crate::git::log::CommitRow {
+            state.commits.list.rows = vec![kika_git::log::CommitRow {
                 oid: "abc".into(),
                 short_oid: "abc".into(),
                 parents: vec![],
@@ -146,7 +146,7 @@ mod tests {
             state.hold_op(1);
             states.push(state.clone());
             state.free_op();
-            state.files.rows = vec![crate::git::FileEntry {
+            state.files.rows = vec![kika_git::FileEntry {
                 path: "a.rs".into(),
                 orig_path: None,
                 index: 'M',

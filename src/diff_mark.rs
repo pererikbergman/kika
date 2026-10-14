@@ -2,8 +2,8 @@
 //! another commit or branch against. Pure; `AppState` keeps the mark and
 //! the task resolves its ends to commits.
 
-use crate::git::branches::BranchName;
-use crate::git::commit_files::CommitId;
+use kika_git::branches::BranchName;
+use kika_git::commit_files::CommitId;
 
 /// What the user marked for diffing.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -194,11 +194,11 @@ pub(crate) static REFLOG_LOG_FILTER: &[Binding] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::repo_state::Operation;
-    use crate::git::status::Head;
     use crate::keymap::{Keymap, REPO_LOCKED, Resolution, Trust, registry, resolve};
     use crate::model::Context;
     use crate::test_support::{build, from, key, plain};
+    use kika_git::repo_state::Operation;
+    use kika_git::status::Head;
 
     #[test]
     fn the_travel_question_has_no_enter_and_n_or_esc_leave_everything() {
@@ -280,7 +280,7 @@ mod tests {
         assert_eq!(undo_disabled(&state), Some("Not in a repository".into()));
         state.repo = Some("/repo".into());
         assert_eq!(undo_disabled(&state), None);
-        state.branch = Some(crate::git::status::BranchStatus {
+        state.branch = Some(kika_git::status::BranchStatus {
             head: Head::Branch("main".into()),
             upstream: None,
             ahead_behind: None,

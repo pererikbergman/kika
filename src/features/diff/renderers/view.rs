@@ -142,13 +142,13 @@ mod tests {
     use super::*;
     use crate::features::diff::DiffIntent;
     use crate::features::diff::renderers::RenderersIntent;
-    use crate::git::diff::{DiffSide, LineKind};
     use crate::layout::SidePanel;
     use crate::model::{AppState, Focus};
     use crate::test_support::screen::{
         TWO_HUNKS, contains, diff_line, draw, draw_buffer, find, hunks, with_diff,
     };
     use crate::view::buffer_rows;
+    use kika_git::diff::{DiffSide, LineKind};
 
     /// Show `text` as renderer `delta` drew the shown diff, mapped to the
     /// focused view's patch when there is one.
@@ -209,8 +209,8 @@ mod tests {
 
     #[test]
     fn an_open_commits_file_shows_its_streamed_diff_not_a_stale_render() {
-        use crate::git::commit_files::{CommitId, CommitRange};
         use crate::test_support::commit_files_list;
+        use kika_git::commit_files::{CommitId, CommitRange};
 
         // A commit's file of the same name as the rendered worktree file.
         let mut state = with_diff(vec![diff_line(LineKind::Added, "+in the commit")]);

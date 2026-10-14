@@ -9,9 +9,9 @@ use super::RemotesIntent;
 use crate::background;
 use crate::effect::Tag;
 use crate::features::branches::BranchesIntent;
-use crate::git::GitRunner;
-use crate::git::remotes::list_remotes;
 use crate::intent::AppIntent;
+use kika_git::GitRunner;
+use kika_git::remotes::list_remotes;
 
 /// List the remotes and report them as `RemotesIntent::Loaded`.
 pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
@@ -38,8 +38,8 @@ mod tests {
     use crate::effect::{Effect, Runtime, Tag};
     use crate::features::branches::BranchesIntent;
     use crate::features::branches::remotes::RemotesIntent;
-    use crate::git::fake::{FakeRunner, ok};
     use crate::intent::AppIntent;
+    use kika_git::fake::{FakeRunner, ok};
 
     #[tokio::test]
     async fn a_remotes_load_reports_back_with_the_same_tag() {

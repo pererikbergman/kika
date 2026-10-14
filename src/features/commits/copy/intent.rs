@@ -5,7 +5,7 @@
 use crate::clipboard::CopyWhat;
 use crate::effect::Tag;
 use crate::features::commits::CommitsIntent;
-use crate::git::commit_files::CommitId;
+use kika_git::commit_files::CommitId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CopyIntent {

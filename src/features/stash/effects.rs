@@ -10,8 +10,8 @@ use super::git::{StashEntry, list_stashes, stash_files};
 use crate::background;
 use crate::effect::Tag;
 use crate::features::stash::StashIntent;
-use crate::git::GitRunner;
 use crate::intent::AppIntent;
+use kika_git::GitRunner;
 
 /// Read the stash list and report it as `StashIntent::Loaded`.
 pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
@@ -48,13 +48,13 @@ mod tests {
 
     use crate::effect::{Effect, Runtime, Tag};
     use crate::features::stash::StashIntent;
-    use crate::git::fake::{FakeRunner, ok};
     use crate::intent::AppIntent;
     use crate::test_support::HostilePanic;
+    use kika_git::fake::{FakeRunner, ok};
 
     #[tokio::test]
     async fn stash_loads_report_back_with_the_same_tag_even_on_a_panic() {
-        use crate::git::commit_files::CommitId;
+        use kika_git::commit_files::CommitId;
         let tag = Tag {
             generation: 3,
             seq: 9,

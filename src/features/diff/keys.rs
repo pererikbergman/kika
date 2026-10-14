@@ -6,9 +6,6 @@
 //! position there is behaviour.
 
 use crate::features::diff::DiffIntent;
-use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
-use crate::git::patch::{FileKind, PatchError};
-use crate::git::status::EntryKind;
 use crate::hunk_view::NO_CHANGES;
 use crate::intent::AppIntent;
 use crate::keymap::{
@@ -17,6 +14,9 @@ use crate::keymap::{
 };
 use crate::model::{AppState, Focus};
 use crossterm::event::{KeyCode, KeyModifiers};
+use kika_git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
+use kika_git::patch::{FileKind, PatchError};
+use kika_git::status::EntryKind;
 
 /// The diff settings reach the conflict view the same way, and the diff
 /// is just as hidden.
@@ -559,11 +559,11 @@ mod tests {
 
     #[test]
     fn hidden_whitespace_disables_the_patch_keys_in_the_diff_only() {
-        use crate::git::patch::parse;
         use crate::hunk_view::{HunkView, LineCursor};
+        use kika_git::patch::parse;
 
         let mut state = AppState::new(Context::Workspace);
-        state.files.rows = vec![crate::git::FileEntry {
+        state.files.rows = vec![kika_git::FileEntry {
             path: "a.rs".into(),
             orig_path: None,
             index: '.',
@@ -617,11 +617,11 @@ mod tests {
     #[test]
     fn a_diff_tool_view_disables_the_patch_keys_in_the_diff_only() {
         use crate::features::diff::renderers::{ExternalRenderer, RendererKind};
-        use crate::git::patch::parse;
         use crate::hunk_view::{HunkView, LineCursor};
+        use kika_git::patch::parse;
 
         let mut state = AppState::new(Context::Workspace);
-        state.files.rows = vec![crate::git::FileEntry {
+        state.files.rows = vec![kika_git::FileEntry {
             path: "a.rs".into(),
             orig_path: None,
             index: '.',
@@ -730,9 +730,9 @@ mod tests {
 
     #[test]
     fn o_and_e_say_why_they_cannot_run() {
-        use crate::git::diff::DiffSide;
-        use crate::git::patch::parse;
         use crate::hunk_view::{HunkView, LineCursor};
+        use kika_git::diff::DiffSide;
+        use kika_git::patch::parse;
 
         let reason = |state: &AppState, scope, c| match resolve(
             registry(),

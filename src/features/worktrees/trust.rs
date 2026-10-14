@@ -6,8 +6,8 @@
 use std::path::{Path, PathBuf};
 
 use super::git::{Worktree, canonical};
-use crate::git::path::os_string;
 use crate::worktree_file::read_file;
+use kika_git::path::os_string;
 
 /// A gitfile is one short line; anything larger is not one.
 const GITFILE_MAX: u64 = 4 * 1024;
@@ -68,7 +68,7 @@ mod tests {
 
     use super::*;
     use crate::features::worktrees::git::parse_list;
-    use crate::git::fake::TempDir;
+    use kika_git::fake::TempDir;
 
     const OID: &str = "0123456789abcdef0123456789abcdef01234567";
 

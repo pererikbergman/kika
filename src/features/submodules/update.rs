@@ -6,10 +6,10 @@ use super::SubmodulesIntent;
 use super::keys::{enter_submodule_disabled, leave_submodule_disabled};
 use super::list::SubmoduleList;
 use crate::effect::{Effect, Tag};
-use crate::git::submodule::Submodule;
 use crate::model::{AppState, Context, ParentRepo};
 use crate::op::GitOp;
 use crate::popup::Popup;
+use kika_git::submodule::Submodule;
 
 /// The Submodules feature's half of `update`: core's one
 /// `AppIntent::Submodules` arm lands here. A free function, so its name
@@ -164,8 +164,6 @@ impl AppState {
 mod tests {
     use super::*;
     use crate::diff_pane::DiffPane;
-    use crate::git::path::RepoPath;
-    use crate::git::submodule::SubmoduleState;
     use crate::intent::AppIntent;
     use crate::keymap::KeyScope;
     use crate::menu::MenuId;
@@ -173,6 +171,8 @@ mod tests {
     use crate::refresh::Selection;
     use crate::test_support::*;
     use crossterm::event::KeyCode;
+    use kika_git::path::RepoPath;
+    use kika_git::submodule::SubmoduleState;
     use std::path::Path;
 
     fn submodule_list(state: &AppState) -> &SubmoduleList {

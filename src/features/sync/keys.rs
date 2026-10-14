@@ -4,11 +4,11 @@
 //! chunks, so their position there is behaviour.
 
 use crate::features::sync::SyncIntent;
-use crate::git::status::Head;
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, Reason, never, remote_disabled};
 use crate::model::AppState;
 use crossterm::event::{KeyCode, KeyModifiers};
+use kika_git::status::Head;
 
 /// A fetch also waits for auto-fetch, which would race it for the same refs.
 pub(crate) fn fetch_disabled(state: &AppState) -> Option<Reason> {

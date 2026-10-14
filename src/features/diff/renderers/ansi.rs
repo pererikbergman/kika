@@ -6,7 +6,7 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::git::diff::{EmojiZwj, sanitize_body};
+use kika_git::diff::{EmojiZwj, sanitize_body};
 
 /// One line of renderer output: styled runs of terminal-safe text.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

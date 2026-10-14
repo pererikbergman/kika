@@ -7,13 +7,13 @@ use super::keys;
 use super::state::{Choice, ConflictView, PendingPick};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
-use crate::git::path::RepoPath;
 use crate::intent::AppIntent;
 use crate::keymap::KeyScope;
 use crate::model::{AppState, Context, Focus};
 use crate::op::GitOp;
 use crate::popup::{ErrorPopup, Popup};
 use crate::refresh::Selection;
+use kika_git::path::RepoPath;
 
 /// The conflict view's half of `update`: core's one `AppIntent::Conflicts`
 /// arm lands here. A free function, so its name cannot clash with handlers.

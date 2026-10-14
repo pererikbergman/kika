@@ -8,8 +8,8 @@ use std::ffi::OsString;
 
 use serde::Deserialize;
 
-use crate::git::path::RepoPath;
 use crate::keymap::{KeyPattern, KeyScope, parse_key};
+use kika_git::path::RepoPath;
 
 /// One `[[commands]]` entry as written in the global file.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -1055,7 +1055,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn accepted_shell_forms_never_run_the_value() {
-        let tmp = crate::git::fake::TempDir::new("shell-guard");
+        let tmp = kika_git::fake::TempDir::new("shell-guard");
         let hostile = target(RepoPath::from(
             "a;touch pwned1;$(touch pwned2)`touch pwned3`",
         ));

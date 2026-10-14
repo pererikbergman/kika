@@ -3,7 +3,7 @@
 //! must never stop to ask for a password: nobody is there to type it, and
 //! the prompt would draw over the screen.
 
-use crate::git::runner::{GitCommand, GitRunner};
+use kika_git::runner::{GitCommand, GitRunner};
 
 /// Fetch every remote, quietly, failing instead of prompting for
 /// credentials or an SSH passphrase. Only the locale: a fetch may gc and
@@ -32,8 +32,8 @@ mod tests {
     use std::ffi::OsString;
 
     use super::*;
-    use crate::git::fake::{FakeRunner, fail, ok};
-    use crate::git::runner::EnvProfile;
+    use kika_git::fake::{FakeRunner, fail, ok};
+    use kika_git::runner::EnvProfile;
 
     const ARGV: &[&str] = &["fetch", "--all", "--quiet", "--no-write-fetch-head"];
 

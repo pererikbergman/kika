@@ -7,13 +7,13 @@ use super::{PendingTag, TagsIntent};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
 use crate::features::branches::BranchesTab;
-use crate::git::commit_files::CommitId;
-use crate::git::remote::RemoteOp;
-use crate::git::tags::{TagRef, validate_tag_name};
 use crate::keymap::{self, KeyScope};
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
 use crate::popup::{LineInput, Popup, PromptKind, RangeKind};
+use kika_git::commit_files::CommitId;
+use kika_git::remote::RemoteOp;
+use kika_git::tags::{TagRef, validate_tag_name};
 
 /// The Tags tab's half of `update`, which `branches::update` passes
 /// `BranchesIntent::Tags` to. A free function, so its name cannot clash

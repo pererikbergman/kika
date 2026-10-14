@@ -32,7 +32,7 @@
 //!
 //! What stays in core: the tag push and selection guards `push_tag_disabled`,
 //! `push_tag_remote` and `tag_selected_disabled` and `op_running` in
-//! `keymap.rs`; `src/git/remotes.rs`; the `GitOp` remote variants with the
+//! `keymap.rs`; `kika_git::remotes`; the `GitOp` remote variants with the
 //! `RemoveRemotes` steps, refusals, redaction, failure messages and refresh
 //! plan; the upstream code; and the remote branches of shared dispatch: the
 //! range remove arm, `key_focus`, `open_filter`, `toggle_range`, the

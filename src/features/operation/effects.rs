@@ -8,11 +8,11 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::OperationIntent;
 use crate::background;
 use crate::effect::Tag;
-use crate::git::GitRunner;
-use crate::git::commit_files::CommitId;
-use crate::git::repo_state::Operation;
-use crate::git::stop_work::read_stop_work;
 use crate::intent::AppIntent;
+use kika_git::GitRunner;
+use kika_git::commit_files::CommitId;
+use kika_git::repo_state::Operation;
+use kika_git::stop_work::read_stop_work;
 
 /// Look for work done since `operation` stopped and report it as
 /// `OperationIntent::StopWorkChecked`, with the `head` Skip was pressed
@@ -47,7 +47,7 @@ mod tests {
 
     use super::*;
     use crate::effect::{Effect, Runtime};
-    use crate::git::fake::{FakeRunner, ok};
+    use kika_git::fake::{FakeRunner, ok};
 
     const TAG: Tag = Tag {
         generation: 1,

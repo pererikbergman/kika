@@ -7,11 +7,11 @@
 use std::path::{Component, Path, PathBuf};
 
 use super::trust::mark_untrusted;
-use crate::git::branches::BranchName;
-use crate::git::commit_files::CommitId;
-use crate::git::error::GitError;
-use crate::git::path::{RepoPath, os_string};
-use crate::git::runner::{GitCommand, GitRunner};
+use kika_git::branches::BranchName;
+use kika_git::commit_files::CommitId;
+use kika_git::error::GitError;
+use kika_git::path::{RepoPath, os_string};
+use kika_git::runner::{GitCommand, GitRunner};
 
 /// One worktree as `git worktree list --porcelain` reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -371,14 +371,14 @@ fn has_dot_git(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::CliRunner;
-    use crate::git::fake::{self, FakeRunner, TempDir, fail, ok};
-    use crate::git::runner::EnvProfile;
     use crate::test_support::{STANDARD_ENV, env_list};
+    use kika_git::CliRunner;
+    use kika_git::fake::{self, FakeRunner, TempDir, fail, ok};
+    use kika_git::runner::EnvProfile;
 
     /// `stderr` as a failed `worktree remove` returns it.
     fn removal_failed(stderr: &[u8]) -> GitError {
-        let output = crate::git::runner::GitOutput {
+        let output = kika_git::runner::GitOutput {
             success: false,
             stdout: Vec::new(),
             stderr: stderr.to_vec(),
@@ -874,11 +874,11 @@ mod tests {
     }
 
     impl GitRunner for WorkdirRunner {
-        fn run(&self, cmd: &GitCommand) -> std::io::Result<crate::git::runner::GitOutput> {
+        fn run(&self, cmd: &GitCommand) -> std::io::Result<kika_git::runner::GitOutput> {
             self.fake.run(cmd)
         }
 
-        fn spawn(&self, cmd: &GitCommand) -> std::io::Result<crate::git::runner::GitChild> {
+        fn spawn(&self, cmd: &GitCommand) -> std::io::Result<kika_git::runner::GitChild> {
             self.fake.spawn(cmd)
         }
 

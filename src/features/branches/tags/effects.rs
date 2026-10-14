@@ -9,9 +9,9 @@ use super::TagsIntent;
 use crate::background;
 use crate::effect::Tag;
 use crate::features::branches::BranchesIntent;
-use crate::git::GitRunner;
-use crate::git::tags::list_tags;
 use crate::intent::AppIntent;
+use kika_git::GitRunner;
+use kika_git::tags::list_tags;
 
 /// List the tags and report them as `TagsIntent::Loaded`.
 pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
@@ -33,14 +33,14 @@ mod tests {
     use crate::effect::{Effect, Runtime, Tag};
     use crate::features::branches::BranchesIntent;
     use crate::features::branches::tags::TagsIntent;
-    use crate::git::fake::{FakeRunner, ok};
     use crate::intent::AppIntent;
+    use kika_git::fake::{FakeRunner, ok};
 
     #[tokio::test]
     async fn a_tags_load_reports_back_with_the_same_tag() {
         let oid = "1".repeat(40);
         let record = format!("refs/tags/v1\0commit\0{oid}\0\0\0\0d\0s\n");
-        let list = crate::git::tags::list_command();
+        let list = kika_git::tags::list_command();
         let argv: Vec<String> = list
             .args()
             .iter()

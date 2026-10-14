@@ -11,10 +11,10 @@ use super::git::read_tips;
 use crate::background;
 use crate::effect::{Tag, unix_now};
 use crate::features::commits::CommitsIntent;
-use crate::git::GitRunner;
-use crate::git::commit_files::{CommitRange, commit_files};
-use crate::git::log::{LogQuery, log_page, markers};
 use crate::intent::AppIntent;
+use kika_git::GitRunner;
+use kika_git::commit_files::{CommitRange, commit_files};
+use kika_git::log::{LogQuery, log_page, markers};
 
 /// Read a page of `HEAD`'s log, from `tip` when set, narrowed to `query`,
 /// and report it as `CommitsIntent::PageLoaded`.
@@ -86,11 +86,11 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::effect::{Effect, Runtime, Tag};
-    use crate::git::commit_files::CommitRange;
-    use crate::git::fake::{FakeRunner, ok};
-    use crate::git::log::LogQuery;
     use crate::intent::AppIntent;
     use crate::test_support::{HostilePanic, background};
+    use kika_git::commit_files::CommitRange;
+    use kika_git::fake::{FakeRunner, ok};
+    use kika_git::log::LogQuery;
 
     #[tokio::test]
     async fn load_commits_reports_the_page_with_the_same_tag_skip_and_a_time() {
@@ -215,7 +215,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_commit_files_reports_back_with_the_same_tag_even_on_a_panic() {
-        use crate::git::commit_files::{CommitFile, CommitId};
+        use kika_git::commit_files::{CommitFile, CommitId};
         let range = CommitRange {
             oid: CommitId::parse("abc").unwrap(),
             parent: None,

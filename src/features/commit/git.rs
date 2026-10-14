@@ -5,8 +5,8 @@
 
 use std::path::Path;
 
-use crate::git::commit_files::CommitId;
-use crate::git::runner::GitCommand;
+use kika_git::commit_files::CommitId;
+use kika_git::runner::GitCommand;
 
 /// Where `git commit` takes its message from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,10 +42,10 @@ pub fn commit_command(amend: bool, no_verify: bool, source: MessageSource) -> Gi
 mod tests {
     use std::ffi::OsString;
 
-    use crate::git::commit_files::CommitId;
-    use crate::git::fake::{FakeRunner, fail, ok};
-    use crate::git::runner::GitOutput;
     use crate::op::{GitOp, op_command, run_op};
+    use kika_git::commit_files::CommitId;
+    use kika_git::fake::{FakeRunner, fail, ok};
+    use kika_git::runner::GitOutput;
 
     fn commit(message: &str, stage_all: bool) -> GitOp {
         GitOp::Commit {
@@ -106,8 +106,8 @@ mod tests {
 
     /// One commit of `a.txt` as `one`, with an identity, no signing and only
     /// this repo's hooks, then `a.txt` changed to `two` and staged.
-    fn committed_and_staged_repo() -> crate::git::fake::TempDir {
-        use crate::git::fake::{TempDir, git};
+    fn committed_and_staged_repo() -> kika_git::fake::TempDir {
+        use kika_git::fake::{TempDir, git};
 
         let tmp = TempDir::new("amend");
         let dir = tmp.path();
@@ -130,11 +130,11 @@ mod tests {
 
     #[test]
     fn amend_folds_the_staged_change_into_head_and_keeps_or_replaces_the_message_in_real_git() {
-        use crate::git::fake::git;
+        use kika_git::fake::git;
 
         let tmp = committed_and_staged_repo();
         let dir = tmp.path();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         let amend = |message: Option<&str>| GitOp::Commit {
             message: message.map(Into::into),
             stage_all: false,
@@ -160,7 +160,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_failing_pre_commit_hook_blocks_a_commit_unless_hooks_are_skipped_in_real_git() {
-        use crate::git::fake::git;
+        use kika_git::fake::git;
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = committed_and_staged_repo();
@@ -170,7 +170,7 @@ mod tests {
         let hook = hooks.join("pre-commit");
         std::fs::write(&hook, "#!/bin/sh\necho 'lint failed'\nexit 1\n").unwrap();
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         let commit = |no_verify| GitOp::Commit {
             message: Some("second\n".into()),
             stage_all: false,
@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn a_fixup_commit_takes_its_target_s_raw_subject_in_real_git() {
-        use crate::git::fake::git;
+        use kika_git::fake::git;
 
         let tmp = committed_and_staged_repo();
         let dir = tmp.path();
@@ -240,7 +240,7 @@ mod tests {
         git(dir, &["commit", "-q", "-m", "B"]);
         std::fs::write(dir.join("a.txt"), "fixed\n").unwrap();
         git(dir, &["add", "-A"]);
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
 
         run_op(&runner, &fixup_of(target.trim(), false)).unwrap();
 
@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn every_message_source_runs_in_the_user_s_env() {
         use super::{MessageSource, commit_command};
-        use crate::git::runner::EnvProfile;
+        use kika_git::runner::EnvProfile;
         use std::path::Path;
 
         let target = CommitId::parse(&"a".repeat(40)).unwrap();

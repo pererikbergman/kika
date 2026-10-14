@@ -9,14 +9,14 @@ use std::borrow::Cow;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::effect::Effect;
-use crate::git::commit_files::CommitId;
-use crate::git::path::RepoPath;
-use crate::git::status::Head;
 use crate::intent::AppIntent;
 use crate::keymap::{KeyPattern, KeyScope};
 use crate::model::AppState;
 use crate::op::GitOp;
 use crate::popup::{MergePrConfirm, Popup};
+use kika_git::commit_files::CommitId;
+use kika_git::path::RepoPath;
+use kika_git::status::Head;
 
 /// The keys that answer yes to a question.
 ///
@@ -166,12 +166,12 @@ mod tests {
     use super::*;
     use crate::features::commits::CommitsIntent;
     use crate::features::commits::reset_hard_question;
-    use crate::git::repo_state::Operation;
     use crate::intent::AppIntent;
     use crate::op::ResetMode;
     use crate::test_support::{
         checked, cid, on_branch, on_commit, op_of, press, press_char, reset_op,
     };
+    use kika_git::repo_state::Operation;
 
     #[test]
     fn a_destructive_answer_is_y_or_d_alone_and_only_the_checkout_takes_enter() {
@@ -384,9 +384,9 @@ mod tests {
     /// One of each question that only `y` (or `D`) answers, as asked.
     fn destructive_questions() -> Vec<ConfirmQuestion> {
         use crate::features::{branches, commits, stash};
-        use crate::forge::merge::MergeMethod;
-        use crate::forge::{ForgeHost, ForgeRepo};
         use crate::popup::{DeleteRangeConfirm, DiscardWhat, LeaveCommitsConfirm, RangeKind};
+        use kika_forge::merge::MergeMethod;
+        use kika_forge::{ForgeHost, ForgeRepo};
         let branch = |force| GitOp::DeleteBranch {
             name: "t".into(),
             force,

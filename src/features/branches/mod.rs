@@ -61,7 +61,7 @@
 //! (`key_focus`, `open_filter`, the filter apply, `list_escape`,
 //! `toggle_range`, `prompt_title`); the `DeleteBranch` popups and their
 //! render; `checkout_command` in `op.rs`, which reflog builds too; and
-//! `src/git/branches.rs`.
+//! `kika_git::branches`.
 
 pub(crate) mod effects;
 pub(crate) mod git;

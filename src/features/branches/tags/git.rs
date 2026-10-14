@@ -1,9 +1,9 @@
 //! The argv for making and deleting a tag, which `op_command` in `op.rs`
 //! builds through these two functions.
 
-use crate::git::commit_files::CommitId;
-use crate::git::runner::GitCommand;
-use crate::git::tags::TagName;
+use kika_git::commit_files::CommitId;
+use kika_git::runner::GitCommand;
+use kika_git::tags::TagName;
 
 /// `git tag` for `name` at `target`, annotated when there is a message.
 ///
@@ -36,10 +36,10 @@ pub(crate) fn delete_command(name: &TagName, oid: &str) -> GitCommand {
 
 #[cfg(test)]
 mod tests {
-    use crate::git::commit_files::CommitId;
-    use crate::git::fake::{FakeRunner, ok};
     use crate::op::{GitOp, op_command, refusal, run_op};
     use crate::test_support::argv;
+    use kika_git::commit_files::CommitId;
+    use kika_git::fake::{FakeRunner, ok};
 
     const OID: &str = "0123456789abcdef0123456789abcdef01234567";
 
@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn tags_are_made_and_deleted_only_while_unmoved_in_real_git() {
-        use crate::git::fake::{TempDir, git, try_git};
+        use kika_git::fake::{TempDir, git, try_git};
         let tmp = TempDir::new("tag-ops");
         let dir = tmp.path();
         git(dir, &["init", "-q", "-b", "main"]);
@@ -106,7 +106,7 @@ mod tests {
         git(dir, &["commit", "-q", "--allow-empty", "-m", "one"]);
         let head = String::from_utf8(git(dir, &["rev-parse", "HEAD"])).unwrap();
         let head = CommitId::parse(head.trim()).unwrap();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         let made = |name: &str, message: Option<&str>| GitOp::CreateTag {
             name: name.into(),
             target: head.clone(),
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn deleting_a_symbolic_tag_removes_only_the_tag_never_its_branch() {
-        use crate::git::fake::{TempDir, git, try_git};
+        use kika_git::fake::{TempDir, git, try_git};
         let tmp = TempDir::new("tag-symref");
         let dir = tmp.path();
         git(dir, &["init", "-q", "-b", "main"]);
@@ -154,7 +154,7 @@ mod tests {
         git(dir, &["branch", "keep"]);
         git(dir, &["symbolic-ref", "refs/tags/evil", "refs/heads/keep"]);
         let head = String::from_utf8(git(dir, &["rev-parse", "HEAD"])).unwrap();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
 
         let delete = GitOp::DeleteTag {
             name: "evil".into(),

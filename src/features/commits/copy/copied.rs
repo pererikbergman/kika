@@ -5,7 +5,7 @@
 //! never picks in this order; it asks git for parents before children
 //! (see `super::git`).
 
-use crate::git::commit_files::CommitId;
+use kika_git::commit_files::CommitId;
 
 /// One copied commit, with what the bar names it by.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -5,11 +5,11 @@
 //! is behaviour.
 
 use crate::features::submodules::SubmodulesIntent;
-use crate::git::submodule::SubmoduleState;
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, OP_RUNNING, Reason, never};
 use crate::model::AppState;
 use crossterm::event::{KeyCode, KeyModifiers};
+use kika_git::submodule::SubmoduleState;
 
 fn no_submodule(state: &AppState) -> Option<Reason> {
     state
@@ -182,9 +182,9 @@ mod tests {
     #[test]
     fn the_submodule_list_has_its_own_keys_and_never_reaches_global_ones() {
         use crate::features::submodules::SubmoduleList;
-        use crate::git::submodule::{Submodule, SubmoduleState};
         use crate::popup::Popup;
         use AppIntent::*;
+        use kika_git::submodule::{Submodule, SubmoduleState};
 
         let none = KeyModifiers::NONE;
         let shift = KeyModifiers::SHIFT;

@@ -17,13 +17,13 @@ use crate::features::commits::custom_patch;
 use crate::features::custom_commands::CustomCommandsIntent;
 use crate::features::custom_commands::{CommandFailure, OutputMode};
 use crate::features::diff::DiffIntent;
-use crate::git::GitRunner;
-use crate::git::path::RepoPath;
-use crate::git::runner::GitCommand;
-use crate::git::safe_text::terminal_safe;
 use crate::intent::AppIntent;
 use crate::op::{GitOp, op_command, run_op};
 use crate::sequence_editor::editor_value;
+use kika_git::GitRunner;
+use kika_git::path::RepoPath;
+use kika_git::runner::GitCommand;
+use kika_git::safe_text::terminal_safe;
 
 /// Something to run with the terminal handed over.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,7 +177,7 @@ fn run_command(argv: &[OsString], workdir: &Path) -> Result<(), CommandFailure> 
     let Some((program, args)) = argv.split_first() else {
         return Err(CommandFailure::Launch("The command is empty".into()));
     };
-    let status = crate::git::program::command(program)
+    let status = kika_git::program::command(program)
         .and_then(|mut command| command.args(args).current_dir(workdir).status())
         .map_err(|e| CommandFailure::Launch(start_error(program, &e)))?;
     if status.success() {
@@ -379,7 +379,7 @@ fn launch(editor: &str, file: &Path, line: Option<u32>, workdir: &Path) -> Resul
     let Some((program, args)) = argv.split_first() else {
         return Err("Could not start the editor: no program".into());
     };
-    let status = crate::git::program::command(program)
+    let status = kika_git::program::command(program)
         .and_then(|mut command| command.args(args).current_dir(workdir).status())
         .map_err(|e| terminal_safe(format!("Could not start the editor: {e}").as_bytes()))?;
     if status.success() {
@@ -583,7 +583,7 @@ impl Drop for TempFile {
 mod tests {
     use super::*;
     use crate::features::diff::DiffIntent;
-    use crate::git::fake::{ANY_ARG, FakeRunner, fail, ok};
+    use kika_git::fake::{ANY_ARG, FakeRunner, fail, ok};
 
     fn argv(editor: &str, line: Option<u32>) -> Vec<String> {
         editor_argv(editor, Path::new("/r/a b.txt"), line)
@@ -608,7 +608,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn decoy_child_run_command_and_editor() {
-        use crate::git::program::NOT_FOUND;
+        use kika_git::program::NOT_FOUND;
         if !crate::spawn_guard::in_decoy_child() {
             return;
         }
@@ -786,7 +786,7 @@ mod tests {
 
     #[test]
     fn an_interactive_rebase_runs_attached_with_kika_as_the_sequence_editor() {
-        let op = GitOp::InteractiveRebase(crate::git::rebase_plan::sample());
+        let op = GitOp::InteractiveRebase(kika_git::rebase_plan::sample());
         let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
         let record = std::sync::Arc::clone(&seen);
         let runner = FakeRunner::new()
@@ -824,7 +824,7 @@ mod tests {
 
     #[test]
     fn without_its_own_path_kika_starts_no_rebase() {
-        let op = GitOp::InteractiveRebase(crate::git::rebase_plan::sample());
+        let op = GitOp::InteractiveRebase(kika_git::rebase_plan::sample());
         let missing = || Err(io::Error::from(io::ErrorKind::NotFound));
         let error = attached_command(&op, missing).unwrap_err();
         assert!(
@@ -832,7 +832,7 @@ mod tests {
             "{error}"
         );
         // Other ops do not need it.
-        let other = GitOp::Continue(crate::git::repo_state::Operation::Rebase);
+        let other = GitOp::Continue(kika_git::repo_state::Operation::Rebase);
         assert_eq!(attached_command(&other, missing), Ok(op_command(&other)));
         let with = attached_command(&op, || Ok(PathBuf::from("/opt/k's/kika"))).unwrap();
         assert_eq!(
@@ -928,7 +928,7 @@ mod tests {
             stage_all: false,
             amend: false,
             no_verify: true,
-            fixup: crate::git::commit_files::CommitId::parse(oid),
+            fixup: kika_git::commit_files::CommitId::parse(oid),
         };
         let fixup = format!("--fixup={oid}");
         let runner = FakeRunner::new().expect_attached(&["commit", "--no-verify", &fixup], true);
@@ -1004,7 +1004,7 @@ mod tests {
 
     #[test]
     fn a_failed_attached_op_pauses_once_and_says_where_its_output_went() {
-        let op = GitOp::Continue(crate::git::repo_state::Operation::Rebase);
+        let op = GitOp::Continue(kika_git::repo_state::Operation::Rebase);
         let runner = FakeRunner::new().expect_attached(&["rebase", "--continue"], false);
         assert_eq!(
             attached_with(&runner, &op),
@@ -1024,7 +1024,7 @@ mod tests {
     #[test]
     fn a_paste_picks_in_the_order_git_gives_and_reports_the_ordered_op() {
         let (a, b) = ("a".repeat(40), "b".repeat(40));
-        let id = |hex: &str| crate::git::commit_files::CommitId::parse(hex).unwrap();
+        let id = |hex: &str| kika_git::commit_files::CommitId::parse(hex).unwrap();
         let runner = FakeRunner::new()
             .expect(
                 &[
@@ -1053,7 +1053,7 @@ mod tests {
     #[test]
     fn a_pick_already_on_the_branch_starts_nothing_and_says_which() {
         let (a, b) = ("a".repeat(40), "b".repeat(40));
-        let id = |hex: &str| crate::git::commit_files::CommitId::parse(hex).unwrap();
+        let id = |hex: &str| kika_git::commit_files::CommitId::parse(hex).unwrap();
         // No attached run is expected, so the fake would panic on one.
         let runner = FakeRunner::new().expect(
             &[
@@ -1092,7 +1092,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_edited_hunk_comes_back_as_a_patch_and_the_temp_file_is_gone() {
-        let tmp = crate::git::fake::TempDir::new("handoff");
+        let tmp = kika_git::fake::TempDir::new("handoff");
         let dir = tmp.path();
         let editor = editor_script(
             dir,
@@ -1127,7 +1127,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_edited_commit_message_comes_back_and_the_temp_file_is_gone() {
-        let tmp = crate::git::fake::TempDir::new("handoff-commit");
+        let tmp = kika_git::fake::TempDir::new("handoff-commit");
         let dir = tmp.path();
         let editor = editor_script(
             dir,
@@ -1170,7 +1170,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_failing_editor_is_an_error_for_a_commit_message() {
-        let tmp = crate::git::fake::TempDir::new("handoff-commit-fail");
+        let tmp = kika_git::fake::TempDir::new("handoff-commit-fail");
         let dir = tmp.path();
         let editor = editor_script(dir, "exit 3");
         let runner = FakeRunner::new().expect(&["var", "GIT_EDITOR"], ok(editor.as_bytes()));
@@ -1189,7 +1189,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_hunk_file_is_private_while_the_editor_runs() {
-        let tmp = crate::git::fake::TempDir::new("handoff-mode");
+        let tmp = kika_git::fake::TempDir::new("handoff-mode");
         let dir = tmp.path();
         let editor = editor_script(
             dir,
@@ -1216,7 +1216,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_failing_editor_is_an_error_and_still_removes_the_file() {
-        let tmp = crate::git::fake::TempDir::new("handoff-fail");
+        let tmp = kika_git::fake::TempDir::new("handoff-fail");
         let dir = tmp.path();
         let editor = editor_script(dir, "echo \"$1\" > seen\nexit 3");
         let runner = FakeRunner::new().expect(&["var", "GIT_EDITOR"], ok(editor.as_bytes()));
@@ -1241,7 +1241,7 @@ mod tests {
     /// `seen`; returns the result and that path's directory.
     #[cfg(unix)]
     fn edit_hunk_with(name: &str, body: &str) -> (AppIntent, PathBuf) {
-        let tmp = crate::git::fake::TempDir::new(name);
+        let tmp = kika_git::fake::TempDir::new(name);
         let dir = tmp.path();
         let editor = editor_script(dir, &format!("echo \"$1\" > seen\n{body}"));
         let runner = FakeRunner::new().expect(&["var", "GIT_EDITOR"], ok(editor.as_bytes()));
@@ -1305,7 +1305,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_entry_already_at_the_directory_name_is_skipped_and_left_alone() {
-        let tmp = crate::git::fake::TempDir::new("handoff-planted");
+        let tmp = kika_git::fake::TempDir::new("handoff-planted");
         let target = tmp.path().join("target");
         fs::create_dir(&target).unwrap();
         fs::write(target.join("planted"), "x").unwrap();
@@ -1358,7 +1358,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn open_file_runs_the_editor_in_the_workdir_on_the_raw_path() {
-        let tmp = crate::git::fake::TempDir::new("handoff-open");
+        let tmp = kika_git::fake::TempDir::new("handoff-open");
         let dir = tmp.path();
         let editor = editor_script(dir, "pwd > cwd\nprintf '%s\\n' \"$@\" > args");
         let runner = FakeRunner::new().expect(&["var", "GIT_EDITOR"], ok(editor.as_bytes()));
@@ -1386,7 +1386,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_command_runs_in_the_workdir_with_each_value_one_argument() {
-        let tmp = crate::git::fake::TempDir::new("handoff-command");
+        let tmp = kika_git::fake::TempDir::new("handoff-command");
         let dir = tmp.path();
         let argv: Vec<OsString> = ["sh", "-c", "pwd > cwd; printf '%s\\n' \"$@\" > args", "sh"]
             .into_iter()
@@ -1418,7 +1418,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_failing_or_missing_command_says_why() {
-        let tmp = crate::git::fake::TempDir::new("handoff-command-fail");
+        let tmp = kika_git::fake::TempDir::new("handoff-command-fail");
         let result = |argv: &[&str]| match execute(
             HandOff::RunCommand {
                 title: "t".into(),

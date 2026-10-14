@@ -3,7 +3,7 @@
 //! request through the target-remote and base-branch pickers (`create.rs`).
 //! The feature also owns its key bindings (`keys.rs`) and the I/O behind
 //! `LoadPullRequests`, `OpenUrl` and `CreatePullRequest` (`effects.rs`).
-//! `ForgeState`, `src/forge`, merging and review mode stay outside it.
+//! `ForgeState` (in `kika_forge`), merging and review mode stay outside it.
 //!
 //! Its intents are nested (ADR-0002): core wraps [`PullRequestsIntent`] in
 //! `AppIntent::PullRequests`, and its one `update` arm calls [`update`]
@@ -30,7 +30,7 @@
 //! - `pick_select` dispatches to `pick_check` and `pick_merge_method`
 //!   (review), accepted cross-feature calls listed in ADR-0001's Outcome;
 //! - `REFRESH_LIMITED`, `same_repo` and `ForgeState::record_rate_limit`,
-//!   which review's merge shares, live in `src/forge`;
+//!   which review's merge shares, live in `kika_forge`;
 //! - branches (`branches_loaded`, when a branch list loads) and review
 //!   (after a merge) ask core (`reload.rs`) for `Scope::PullRequests`, which
 //!   calls `load_pull_requests`. A fetch, pull or

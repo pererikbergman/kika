@@ -8,12 +8,12 @@ use super::git::{CommitsHere, FileCounts, PrFileRow};
 use super::state::{ReviewScreen, ReviewState};
 use crate::diff_pane::DiffStart;
 use crate::effect::{Effect, Tag};
-use crate::forge::review::ViewedState;
-use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
-use crate::git::diff::DiffRequest;
 use crate::intent::Scroll;
 use crate::keymap::{OP_RUNNING, Reason};
 use crate::model::{AppState, Context};
+use kika_forge::review::ViewedState;
+use kika_git::commit_files::{CommitFile, CommitId, CommitRange};
+use kika_git::diff::DiffRequest;
 
 pub const STILL_MISSING: &str = "PR head is not available locally after fetch";
 pub const FETCHED_BEFORE: &str =
@@ -180,7 +180,7 @@ pub(crate) fn review_search_step_disabled(state: &AppState) -> Option<Reason> {
 
 impl AppState {
     /// The repository review mode is on, from the badges or a review load.
-    pub(super) fn review_repo(&self) -> Option<crate::forge::ForgeRepo> {
+    pub(super) fn review_repo(&self) -> Option<kika_forge::ForgeRepo> {
         self.forge.repo.clone().or_else(|| self.review.repo.clone())
     }
 
@@ -461,11 +461,11 @@ mod tests {
     use crate::diff_pane::{DIFF_PREFETCH, DiffPane};
     use crate::features::review::ReviewIntent;
     use crate::features::review::state::tests::{github, in_detail, press, repo, type_char};
-    use crate::git::diff::{DiffChunk, DiffLine, LineKind};
-    use crate::git::remotes::RemoteName;
     use crate::intent::AppIntent;
     use crate::keymap::KeyScope;
     use crate::test_support::diff_chunk;
+    use kika_git::diff::{DiffChunk, DiffLine, LineKind};
+    use kika_git::remotes::RemoteName;
 
     fn id(c: char) -> CommitId {
         CommitId::parse(&c.to_string().repeat(40)).unwrap()
@@ -630,7 +630,7 @@ mod tests {
     fn a_local_name_that_is_not_utf8_is_unknown_not_matched_lossily() {
         let viewed = [("x\u{FFFD}".to_string(), ViewedState::Viewed)];
         let mut odd = row('M', "x", lines(1, 0));
-        odd.file.path = crate::git::path::RepoPath::from_bytes(b"x\xff");
+        odd.file.path = kika_git::path::RepoPath::from_bytes(b"x\xff");
         let rows = with_viewed(vec![odd], &viewed);
         assert_eq!(rows[0].viewed, None);
     }
@@ -884,8 +884,8 @@ mod tests {
 
     #[test]
     fn a_workspace_status_load_landing_late_leaves_the_review_diff_alone() {
-        use crate::git::FileEntry;
-        use crate::git::status::{BranchStatus, EntryKind, Head, RepoStatus};
+        use kika_git::FileEntry;
+        use kika_git::status::{BranchStatus, EntryKind, Head, RepoStatus};
         let entry = FileEntry {
             path: "a.txt".into(),
             orig_path: None,

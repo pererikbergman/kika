@@ -10,8 +10,8 @@ use tokio::task::AbortHandle;
 use super::captured::run_captured;
 use super::command::{CommandFailure, OutputMode};
 use crate::features::custom_commands::CustomCommandsIntent;
-use crate::git::safe_text::terminal_safe;
 use crate::intent::AppIntent;
+use kika_git::safe_text::terminal_safe;
 
 /// Run a captured command in `workdir` and send `CustomCommandsIntent::Finished` back.
 /// The returned handle cancels it.

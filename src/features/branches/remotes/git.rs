@@ -2,8 +2,8 @@
 //! adding, renaming and removing a remote, which `op_command` in `op.rs`
 //! builds through these four functions.
 
-use crate::git::remotes::{RemoteBranch, RemoteName};
-use crate::git::runner::GitCommand;
+use kika_git::remotes::{RemoteBranch, RemoteName};
+use kika_git::runner::GitCommand;
 
 /// `git checkout --track -b` for `name` at the remote branch `from`.
 ///
@@ -51,9 +51,9 @@ pub(crate) fn remove_command(name: &RemoteName) -> GitCommand {
 
 #[cfg(test)]
 mod tests {
-    use crate::git::fake::{FakeRunner, config, fail};
     use crate::op::{GitOp, run_op};
     use crate::test_support::cloned_repo;
+    use kika_git::fake::{FakeRunner, config, fail};
 
     #[test]
     fn a_failed_remote_op_says_why_without_credentials() {
@@ -72,7 +72,7 @@ mod tests {
     }
 
     fn remote_refs(dir: &std::path::Path) -> String {
-        String::from_utf8(crate::git::fake::git(
+        String::from_utf8(kika_git::fake::git(
             dir,
             &["for-each-ref", "--format=%(refname)", "refs/remotes"],
         ))
@@ -83,7 +83,7 @@ mod tests {
     fn remotes_are_added_renamed_and_removed_without_a_fetch_in_real_git() {
         let (tmp, bare) = cloned_repo();
         let dir = tmp.path();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         let url = bare.path().to_str().unwrap().to_string();
 
         let add = GitOp::AddRemote {
@@ -95,7 +95,7 @@ mod tests {
         assert!(!remote_refs(dir).contains("refs/remotes/fork/"), "fetched");
 
         // Its refs move with it once there are some.
-        crate::git::fake::git(dir, &["fetch", "-q", "fork"]);
+        kika_git::fake::git(dir, &["fetch", "-q", "fork"]);
         let rename = GitOp::RenameRemote {
             from: "fork".into(),
             to: "mine".into(),

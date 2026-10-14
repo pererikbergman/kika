@@ -8,8 +8,8 @@ use std::fmt::Display;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinError;
 
-use crate::git::safe_text::terminal_safe;
 use crate::intent::AppIntent;
+use kika_git::safe_text::terminal_safe;
 
 /// Run `work` on the blocking pool and send what `reply` makes of its
 /// outcome. `None` sends nothing: the base form for the effects that report
@@ -66,7 +66,7 @@ mod tests {
         user: true,
     };
 
-    fn loaded(result: Result<Vec<crate::git::branches::Branch>, String>) -> AppIntent {
+    fn loaded(result: Result<Vec<kika_git::branches::Branch>, String>) -> AppIntent {
         AppIntent::Branches(BranchesIntent::Loaded { tag: TAG, result })
     }
 

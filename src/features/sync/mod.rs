@@ -27,7 +27,7 @@
 //! `close_credential` and `quit_interrupts` (`op_slot.rs`), the `Quit` arm, `Popup::Credential` and its view);
 //! `RemoteRun`, `AppState::remote`, `remote_disabled` and `REMOTE_BUSY`; the
 //! auto-fetch trigger in `watch()` and `WatchState`; `refresh::remote_plan`;
-//! and `src/git/remote.rs` and `src/git/askpass.rs`.
+//! and `kika_git::remote` and `kika_git::askpass`.
 
 pub(crate) mod effects;
 mod git;

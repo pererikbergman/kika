@@ -5,9 +5,9 @@
 use super::{FixupBase, TodoFile};
 use crate::effect::Tag;
 use crate::features::commits::CommitsIntent;
-use crate::git::commit_files::CommitId;
-use crate::git::rebase_plan::{Direction, Edit};
 use crate::op::GitOp;
+use kika_git::commit_files::CommitId;
+use kika_git::rebase_plan::{Direction, Edit};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RewriteIntent {

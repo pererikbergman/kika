@@ -7,12 +7,12 @@ use super::keys;
 use super::{BranchesIntent, BranchesTab, remotes, tags};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
-use crate::git::branches::{Branch, BranchName, LogRow};
 use crate::keymap::{self, KeyScope};
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
 use crate::popup::{LineInput, Popup, PromptKind, RangeKind};
 use crate::refresh::{RefreshPlan, Scope};
+use kika_git::branches::{Branch, BranchName, LogRow};
 
 /// The branches subtree's half of `update`: core's one
 /// `AppIntent::Branches` arm lands here, and each sub-feature's intent goes
@@ -439,7 +439,6 @@ mod tests {
     use crate::effect::Effect;
     use crate::features::branches::BranchesIntent;
     use crate::features::branches::BranchesTab;
-    use crate::git::branches::LogRow;
     use crate::intent::AppIntent;
     use crate::keymap::{KeyPress, KeyScope};
     use crate::model::{AppState, Context};
@@ -447,6 +446,7 @@ mod tests {
     use crate::popup::{Popup, PromptKind};
     use crate::test_support::*;
     use crossterm::event::{KeyCode, KeyModifiers};
+    use kika_git::branches::LogRow;
 
     fn log_row(subject: &str) -> LogRow {
         LogRow {
@@ -481,7 +481,7 @@ mod tests {
 
     #[test]
     fn the_forge_sees_the_names_of_an_applied_load_only() {
-        use crate::git::branches::BranchName;
+        use kika_git::branches::BranchName;
         let mut state = with_branches();
         let names = |state: &AppState| state.forge.branches.clone();
         let listed: Vec<BranchName> = ["main", "topic", "wip"].map(Into::into).into();
@@ -923,13 +923,13 @@ mod tests {
 
     /// `detached_on_commit`, with `HEAD` on a full id the log has not
     /// loaded, so the prompt shortens it itself.
-    fn detached_on_hex() -> (AppState, crate::git::commit_files::CommitId) {
+    fn detached_on_hex() -> (AppState, kika_git::commit_files::CommitId) {
         let mut state = detached_on_commit();
         let hex = "fedcba9".repeat(6)[..40].to_string();
-        state.branch.as_mut().unwrap().head = crate::git::status::Head::Detached(hex.clone());
+        state.branch.as_mut().unwrap().head = kika_git::status::Head::Detached(hex.clone());
         (
             state,
-            crate::git::commit_files::CommitId::parse(&hex).unwrap(),
+            kika_git::commit_files::CommitId::parse(&hex).unwrap(),
         )
     }
 
@@ -968,7 +968,7 @@ mod tests {
     fn a_branch_at_head_runs_nothing_once_head_has_moved() {
         // Detached elsewhere, then onto a branch.
         let moved = [
-            crate::git::status::Head::Detached("c2".into()),
+            kika_git::status::Head::Detached("c2".into()),
             on_branch("main").head,
         ];
         for head in moved {
@@ -1009,7 +1009,7 @@ mod tests {
         let branch = state.branch.as_mut().unwrap();
         branch
             .in_progress
-            .push(crate::git::repo_state::Operation::Bisect);
+            .push(kika_git::repo_state::Operation::Bisect);
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         assert_eq!(state.held_seq(), None);
         assert!(state.notice.is_some());

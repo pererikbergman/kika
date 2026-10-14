@@ -11,9 +11,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::background;
 use crate::effect::{DIFF_LOADING_DELAY, Tag};
 use crate::features::diff::DiffIntent;
-use crate::git::GitRunner;
-use crate::git::diff::DiffRequest;
 use crate::intent::AppIntent;
+use kika_git::GitRunner;
+use kika_git::diff::DiffRequest;
 
 /// Report `DiffIntent::Slow` after [`DIFF_LOADING_DELAY`], so fast loads never
 /// flash "Loading…".
@@ -34,7 +34,7 @@ pub(crate) fn load_patch(
 ) {
     background::run(
         tx,
-        move || crate::git::diff::load_patch(runner.as_ref(), &request),
+        move || kika_git::diff::load_patch(runner.as_ref(), &request),
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("git diff"),
         move |result| AppIntent::Diff(DiffIntent::PatchLoaded { tag, result }),
@@ -49,11 +49,11 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::effect::{Effect, Runtime, Tag};
-    use crate::git::diff::{DiffRequest, DiffSide};
-    use crate::git::fake::{FakeRunner, ok};
     use crate::intent::AppIntent;
     use crate::op::{GitOp, run_op};
     use crate::test_support::{HostilePanic, env_list};
+    use kika_git::diff::{DiffRequest, DiffSide};
+    use kika_git::fake::{FakeRunner, ok};
 
     fn patch_request() -> DiffRequest {
         DiffRequest {
@@ -167,9 +167,9 @@ mod tests {
     /// Stage hunk 1 of a two-hunk file through the real patch engine and
     /// `git apply`, then unstage it again from the staged diff.
     fn stage_and_unstage_one_hunk(name: &str) {
-        use crate::git::diff::{DiffRequest, DiffSide, load_patch};
-        use crate::git::fake::{TempDir, git};
-        use crate::git::patch::{Direction, PatchSelection, build};
+        use kika_git::diff::{DiffRequest, DiffSide, load_patch};
+        use kika_git::fake::{TempDir, git};
+        use kika_git::patch::{Direction, PatchSelection, build};
 
         let tmp = TempDir::new("apply");
         let dir = tmp.path();
@@ -182,7 +182,7 @@ mod tests {
         changed[0] = "line 1a\nline 1b\n".into();
         changed[19] = "line twenty\n".into();
         std::fs::write(dir.join(name), changed.concat()).unwrap();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         let request = |side| DiffRequest {
             path: name.into(),
             orig_path: None,
@@ -247,9 +247,9 @@ mod tests {
     /// staged view, each time through the real engine and `git apply`.
     #[test]
     fn single_lines_stage_and_unstage_alone_in_real_git() {
-        use crate::git::diff::{DiffRequest, DiffSide, load_patch};
-        use crate::git::fake::{TempDir, git};
-        use crate::git::patch::{Direction, FilePatch, LineId, PatchSelection, build};
+        use kika_git::diff::{DiffRequest, DiffSide, load_patch};
+        use kika_git::fake::{TempDir, git};
+        use kika_git::patch::{Direction, FilePatch, LineId, PatchSelection, build};
 
         /// The id of the one changed line whose text is `text`.
         fn id_of(patch: &FilePatch, text: &str) -> LineId {
@@ -273,7 +273,7 @@ mod tests {
         changed[0] = "line 1a\nline 1b\n".into();
         changed[14] = "fifteen a\nfifteen b\n".into();
         std::fs::write(dir.join("l.txt"), changed.concat()).unwrap();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         let request = |side| DiffRequest {
             path: "l.txt".into(),
             orig_path: None,
@@ -326,9 +326,9 @@ mod tests {
     /// forward apply lands on an identical copy and unstages that instead.
     #[test]
     fn unstaging_one_of_two_staged_hunks_next_to_repeated_blocks_takes_out_only_it() {
-        use crate::git::diff::{DiffRequest, DiffSide, load_patch};
-        use crate::git::fake::{TempDir, git};
-        use crate::git::patch::{Direction, PatchSelection, build};
+        use kika_git::diff::{DiffRequest, DiffSide, load_patch};
+        use kika_git::fake::{TempDir, git};
+        use kika_git::patch::{Direction, PatchSelection, build};
 
         let tmp = TempDir::new("reverse");
         let dir = tmp.path();
@@ -354,7 +354,7 @@ mod tests {
         std::fs::write(dir.join("r.txt"), &changed).unwrap();
         git(dir, &["add", "--", "r.txt"]);
 
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         let request = DiffRequest {
             path: "r.txt".into(),
             orig_path: None,
@@ -410,8 +410,8 @@ mod tests {
     }
 
     /// `e.txt` committed as `one`, then `two` and `three` added after it.
-    fn edit_repo() -> crate::git::fake::TempDir {
-        use crate::git::fake::{TempDir, git};
+    fn edit_repo() -> kika_git::fake::TempDir {
+        use kika_git::fake::{TempDir, git};
 
         let tmp = TempDir::new("edited");
         let dir = tmp.path();
@@ -425,11 +425,11 @@ mod tests {
 
     #[test]
     fn an_edited_hunk_with_stale_counts_stages_exactly_what_is_left_in_real_git() {
-        use crate::git::fake::git;
+        use kika_git::fake::git;
 
         let tmp = edit_repo();
         let dir = tmp.path();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         // `+three` was deleted in the editor; the counts still say 3.
         let patch = b"diff --git a/e.txt b/e.txt\n--- a/e.txt\n+++ b/e.txt\n\
             @@ -1 +1,3 @@\n one\n+two\n"
@@ -444,11 +444,11 @@ mod tests {
 
     #[test]
     fn a_garbage_edit_fails_and_leaves_the_index_alone_in_real_git() {
-        use crate::git::fake::git;
+        use kika_git::fake::git;
 
         let tmp = edit_repo();
         let dir = tmp.path();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         let header = "diff --git a/e.txt b/e.txt\n--- a/e.txt\n+++ b/e.txt\n";
         for body in ["garbage\n", "@@ -1 +1,2 @@\n nope\n+two\n"] {
             let patch = format!("{header}{body}").into_bytes();

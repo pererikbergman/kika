@@ -4,7 +4,7 @@
 
 use crate::effect::Tag;
 use crate::features::branches::BranchesIntent;
-use crate::git::remotes::Remote;
+use kika_git::remotes::Remote;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RemotesIntent {

@@ -2,12 +2,12 @@
 //! may run, which commit a mark is for, and the words shown for it. Pure;
 //! the model runs the ops and the view draws the state.
 
-use crate::git::bisect::{BisectMark, BisectState, elide};
-use crate::git::commit_files::CommitId;
-use crate::git::repo_state::Operation;
-use crate::git::status::{EntryKind, Head};
 use crate::keymap::{OP_RUNNING, Reason, resumable_operation};
 use crate::model::AppState;
+use kika_git::bisect::{BisectMark, BisectState, elide};
+use kika_git::commit_files::CommitId;
+use kika_git::repo_state::Operation;
+use kika_git::status::{EntryKind, Head};
 
 /// Where a mark is made: on the selected Commits row, or on the commit git
 /// checked out to test, from the Status panel.
@@ -235,10 +235,10 @@ pub(crate) const ONLY_SKIPPED: &str = "Only skipped commits are left; see the St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::bisect::Terms;
-    use crate::git::log::CommitRow;
-    use crate::git::status::{BranchStatus, FileEntry};
     use crate::model::Context;
+    use kika_git::bisect::Terms;
+    use kika_git::log::CommitRow;
+    use kika_git::status::{BranchStatus, FileEntry};
 
     const HEX: &str = "abc1234";
 

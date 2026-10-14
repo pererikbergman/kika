@@ -314,15 +314,15 @@ pub(crate) static COMMITS_FILES_LOG: &[Binding] = &[
 mod tests {
     use super::*;
     use crate::features::commits::compare::keys::commits_mark_disabled;
-    use crate::git::repo_state::Operation;
-    use crate::git::status::Head;
     use crate::model::{Context, Focus};
+    use kika_git::repo_state::Operation;
+    use kika_git::status::Head;
 
     #[test]
     fn a_range_keeps_the_new_commits_keys_from_running() {
         let mut state = AppState::new(Context::Workspace);
         state.focus = Focus::Commits;
-        state.commits.list.rows = vec![crate::git::log::CommitRow {
+        state.commits.list.rows = vec![kika_git::log::CommitRow {
             oid: "a".repeat(40),
             short_oid: "a".into(),
             parents: vec![],
@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn commit_actions_say_why_they_cannot_run() {
-        let row = |parents: &[&str]| crate::git::log::CommitRow {
+        let row = |parents: &[&str]| kika_git::log::CommitRow {
             oid: "abc".into(),
             short_oid: "abc".into(),
             parents: parents.iter().map(|p| p.to_string()).collect(),
@@ -372,7 +372,7 @@ mod tests {
         assert_eq!(checkout_commit_disabled(&state), None);
 
         state.commits.list.rows = vec![row(&["p"])];
-        state.branch = Some(crate::git::status::BranchStatus {
+        state.branch = Some(kika_git::status::BranchStatus {
             head: Head::Branch("main".into()),
             upstream: None,
             ahead_behind: None,

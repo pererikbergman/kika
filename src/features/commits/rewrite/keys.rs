@@ -14,10 +14,10 @@ use super::{
 use crate::confirm_question::Answer;
 use crate::features::commits::CommitsIntent;
 use crate::features::commits::rewrite::RewriteIntent;
-use crate::git::rebase_plan::{Direction, Edit};
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, Reason, list_guard, never};
 use crate::model::AppState;
+use kika_git::rebase_plan::{Direction, Edit};
 
 fn squash_disabled(state: &AppState) -> Option<Reason> {
     rewrite_disabled(state, Rewrite::Edit(Edit::Squash))
@@ -352,22 +352,22 @@ mod tests {
     use crate::features::commits::rewrite::{
         FILTER_HIDES_NEIGHBOUR, STAGE_THE_FIX, autosquash_plan, range_log_plan,
     };
-    use crate::git::commit_files::CommitId;
-    use crate::git::rebase_plan;
-    use crate::git::repo_state::Operation;
-    use crate::git::status::{EntryKind, Head};
-    use crate::git::version;
     use crate::keymap::{
         CLEAR_LOG_FILTER, CLEAR_RANGE_FIRST, FILTER_HIDES_ROW, Keymap, OP_RUNNING, REPO_LOCKED,
         Resolution, Trust, registry, resolve,
     };
     use crate::model::{Context, Focus};
     use crate::test_support::{binding, build, key, plain};
+    use kika_git::commit_files::CommitId;
+    use kika_git::rebase_plan;
+    use kika_git::repo_state::Operation;
+    use kika_git::status::{EntryKind, Head};
+    use kika_git::version;
 
     #[test]
     fn rewrites_say_why_they_cannot_run() {
         let ids = ['a', 'b', 'c'].map(|d| d.to_string().repeat(40));
-        let row = |i: usize, parents: Vec<String>| crate::git::log::CommitRow {
+        let row = |i: usize, parents: Vec<String>| kika_git::log::CommitRow {
             oid: ids[i].clone(),
             short_oid: "x".into(),
             parents,
@@ -408,7 +408,7 @@ mod tests {
         for disabled in all {
             assert_eq!(disabled(&state), None);
         }
-        state.branch = Some(crate::git::status::BranchStatus {
+        state.branch = Some(kika_git::status::BranchStatus {
             head: Head::Branch("main".into()),
             upstream: None,
             ahead_behind: None,
@@ -434,7 +434,7 @@ mod tests {
         let mut state = AppState::new(Context::Workspace);
         state.focus = Focus::Commits;
         state.commits.list.rows = (0..4)
-            .map(|i| crate::git::log::CommitRow {
+            .map(|i| kika_git::log::CommitRow {
                 oid: ids[i].clone(),
                 short_oid: ids[i][..7].into(),
                 parents: vec![ids[i + 1].clone()],
@@ -546,7 +546,7 @@ mod tests {
     /// HEAD `fixup! A` (`d…`), then `B` (`b…`), then `A` (`a…`) on `9…`,
     /// not loaded; `a.txt` staged and the Commits panel focused on `HEAD`.
     fn fixup_state() -> AppState {
-        let row = |digit: &str, parent: &str, subject: &str| crate::git::log::CommitRow {
+        let row = |digit: &str, parent: &str, subject: &str| kika_git::log::CommitRow {
             oid: digit.repeat(40),
             short_oid: digit.repeat(7),
             parents: vec![parent.repeat(40)],
@@ -563,8 +563,8 @@ mod tests {
         ];
         state.commits.tips = Some(vec![]);
         state.focus = Focus::Commits;
-        state.files.rows = vec![crate::git::FileEntry {
-            path: crate::git::path::RepoPath::from("a.txt"),
+        state.files.rows = vec![kika_git::FileEntry {
+            path: kika_git::path::RepoPath::from("a.txt"),
             orig_path: None,
             index: 'M',
             worktree: '.',
@@ -574,7 +574,7 @@ mod tests {
     }
 
     fn in_rebase(state: &mut AppState) {
-        state.branch = Some(crate::git::status::BranchStatus {
+        state.branch = Some(kika_git::status::BranchStatus {
             head: Head::Branch("main".into()),
             upstream: None,
             ahead_behind: None,
@@ -624,7 +624,7 @@ mod tests {
         running.hold_op(1);
         let mut unborn = fixup_state();
         unborn.commits.list.rows.clear();
-        unborn.branch = Some(crate::git::status::BranchStatus {
+        unborn.branch = Some(kika_git::status::BranchStatus {
             head: Head::Unborn("main".into()),
             upstream: None,
             ahead_behind: None,
@@ -714,7 +714,7 @@ mod tests {
         let with = |tips| {
             let mut state = fixup_state();
             state.git_version = Some(version::UPDATE_REFS);
-            state.branch = Some(crate::git::status::BranchStatus {
+            state.branch = Some(kika_git::status::BranchStatus {
                 head: Head::Branch("main".into()),
                 upstream: None,
                 ahead_behind: None,

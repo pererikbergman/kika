@@ -49,7 +49,7 @@
 //! - `status_unchanged`, `files_range_paths`, `RANGE_FILES_CHANGED` and
 //!   `select_from` (the commit and stash closes call it), the `files`
 //!   field of `AppState`, `refresh::Selection`,
-//!   `src/git/status.rs`, the `Effect::LoadStatus` variant, and the
+//!   `kika_git::status`, the `Effect::LoadStatus` variant, and the
 //!   `StatusLoaded` intent and its `update()` arm;
 //! - the `ignore_draft` field, and the prompt kinds and menu item that
 //!   open the `.gitignore` and go-to-file prompts;

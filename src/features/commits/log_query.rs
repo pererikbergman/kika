@@ -3,12 +3,12 @@
 
 use super::CommitsTab;
 use crate::effect::Effect;
-use crate::git::log::LogQuery;
 use crate::keymap::KeyScope;
 use crate::layout::{Panel, SidePanel};
 use crate::list_filter::{InputTarget, ListInput, LogFilterField};
 use crate::model::{AppState, Context};
 use crate::popup::LineInput;
+use kika_git::log::LogQuery;
 
 impl AppState {
     /// Type the path or author, starting from the one in force. A path
@@ -86,12 +86,12 @@ mod tests {
     use crossterm::event::{KeyCode, KeyModifiers};
 
     use super::*;
-    use crate::git::path::RepoPath;
-    use crate::git::status::{EntryKind, FileEntry};
     use crate::intent::AppIntent;
     use crate::keymap::KeyPress;
     use crate::model::Focus;
     use crate::test_support::{answer, hex_page, loads, oid, with_log};
+    use kika_git::path::RepoPath;
+    use kika_git::status::{EntryKind, FileEntry};
 
     fn press(state: &mut AppState, code: KeyCode) -> Vec<Effect> {
         state.update(AppIntent::Key(KeyPress::new(code, KeyModifiers::NONE)))

@@ -5,10 +5,10 @@
 use super::remotes::RemotesList;
 use super::tags::{PendingTag, TagsList};
 use crate::filtered_list::{FilteredList, Row};
-use crate::git::branches::{Branch, BranchName, LogRow};
-use crate::git::commit_files::CommitId;
-use crate::git::safe_text::terminal_safe;
 use crate::intent::Scroll;
+use kika_git::branches::{Branch, BranchName, LogRow};
+use kika_git::commit_files::CommitId;
+use kika_git::safe_text::terminal_safe;
 
 /// Which list the Branches panel shows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -164,8 +164,8 @@ impl BranchLog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::branches::Track;
     use crate::test_support::load_list;
+    use kika_git::branches::Track;
 
     fn branch(name: &str) -> Branch {
         Branch {

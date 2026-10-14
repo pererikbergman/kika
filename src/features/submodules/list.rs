@@ -3,8 +3,8 @@
 //! the model loads it and moves the cursor.
 
 use crate::filtered_list::{FilteredList, Row};
-use crate::git::path::RepoPath;
-use crate::git::submodule::Submodule;
+use kika_git::path::RepoPath;
+use kika_git::submodule::Submodule;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubmoduleList {
@@ -44,8 +44,8 @@ impl SubmoduleList {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::submodule::SubmoduleState;
     use crate::test_support::load_list;
+    use kika_git::submodule::SubmoduleState;
 
     fn sub(path: &str) -> Submodule {
         Submodule {

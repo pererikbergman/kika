@@ -13,11 +13,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::external_diff::{self, ExternalRenderer, LIMITS, Limits, MAX_BYTES};
-use crate::git::diff::{DiffRequest, DiffSide};
-use crate::git::error::GitError;
-use crate::git::path::RepoPath;
-use crate::git::runner::{GitCommand, GitRunner};
 use crate::worktree_file;
+use kika_git::diff::{DiffRequest, DiffSide};
+use kika_git::error::GitError;
+use kika_git::path::RepoPath;
+use kika_git::runner::{GitCommand, GitRunner};
 
 /// Run `renderer`, a tool, on the old and new contents of `request`'s
 /// file at `cols` columns, in `workdir`, within the renderer caps.
@@ -337,11 +337,11 @@ mod tests {
 
     use super::*;
     use crate::features::diff::renderers::external_diff::RendererKind;
-    #[cfg(unix)]
-    use crate::git::fake::fail;
-    use crate::git::fake::{FakeRunner, TempDir, ok};
-    use crate::git::runner::EnvProfile;
     use crate::test_support::{STANDARD_ENV, env_list};
+    #[cfg(unix)]
+    use kika_git::fake::fail;
+    use kika_git::fake::{FakeRunner, TempDir, ok};
+    use kika_git::runner::EnvProfile;
 
     fn tool(argv: &[&str]) -> ExternalRenderer {
         ExternalRenderer {
@@ -662,7 +662,7 @@ mod tests {
         let message = out.unwrap_err();
         assert!(!message.contains('\x1b'), "{message:?}");
         assert!(!message.contains("-p"), "{message:?}");
-        let shown = crate::git::path::RepoPath::from(path).display().to_string();
+        let shown = kika_git::path::RepoPath::from(path).display().to_string();
         assert_eq!(
             message,
             format!("git ls-files gave a bad object id for {shown}; the repository may be damaged")
