@@ -30,6 +30,7 @@ use crate::git::bisect::{BisectMark, BisectState};
 use crate::git::branches::{Branch, BranchName, Track};
 use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
 use crate::git::diff::{DiffChunk, DiffLine, DiffRequest, LineKind};
+pub(crate) use crate::git::fake::{STANDARD_ENV, env_list};
 use crate::git::log::{CommitRow, LogPage, LogQuery};
 use crate::git::patch::{self, FilePatch};
 use crate::git::path::RepoPath;
@@ -1306,7 +1307,7 @@ pub(crate) fn commit_reflog(head: char) -> Reflog {
         head_ref: Some(b"refs/heads/main".to_vec()),
         branch_entries: vec![],
         entries: crate::features::commits::reflog::git::parse_records(include_bytes!(
-            "git/fixtures/reflog/commit.bin"
+            "features/commits/reflog/fixtures/commit.bin"
         )),
     }
 }
@@ -1594,20 +1595,6 @@ pub(crate) fn argv(cmd: &GitCommand) -> Vec<String> {
         .iter()
         .map(|a| a.to_string_lossy().into_owned())
         .collect()
-}
-
-/// The whole env of a read: the `Standard` profile's vars, spelled out so
-/// a test pins them rather than repeating the profile table.
-pub(crate) const STANDARD_ENV: [(&str, &str); 3] = [
-    ("LC_ALL", "C"),
-    ("GIT_OPTIONAL_LOCKS", "0"),
-    ("GIT_LITERAL_PATHSPECS", "1"),
-];
-
-/// `pairs` as `GitCommand::process_env` and `FakeRunner::process_envs`
-/// list them, to compare a command's whole env.
-pub(crate) fn env_list(pairs: &[(&str, &str)]) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
-    pairs.iter().map(|(k, v)| (k.into(), v.into())).collect()
 }
 
 /// A repository on `main` with one commit, and `origin`: a local bare

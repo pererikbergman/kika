@@ -103,9 +103,9 @@ pub fn check(runner: &dyn GitRunner) -> Result<Option<GitVersion>, String> {
 mod tests {
     use super::*;
     use crate::git::fake::{FakeRunner, fail, ok};
+    use crate::git::fake::{STANDARD_ENV, env_list};
     use crate::git::runner::EnvProfile;
     use crate::git::runner::{GitChild, GitOutput};
-    use crate::test_support::{STANDARD_ENV, env_list};
 
     fn v(major: u32, minor: u32, patch: u32) -> GitVersion {
         GitVersion {

@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn the_tab_lists_each_entry_with_its_id_label_and_message() {
-        let state = showing(include_bytes!("../../../git/fixtures/reflog/checkout.bin"));
+        let state = showing(include_bytes!("fixtures/checkout.bin"));
         let rows = buffer_rows(&draw(&state, 100, 20));
         line_with(&rows, "ccccccc checkout moving from main to side");
         line_with(&rows, "ccccccc commit second");
@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn the_selected_row_is_reversed_and_follows_the_cursor() {
-        let mut state = showing(include_bytes!("../../../git/fixtures/reflog/commit.bin"));
+        let mut state = showing(include_bytes!("fixtures/commit.bin"));
         state.commits.reflog.list.selected = 1;
         let buffer = draw(&state, 100, 20);
         let rows = buffer_rows(&buffer);
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn a_hostile_message_draws_sanitised_and_a_bad_id_as_a_question_mark() {
         let mut bytes = b"zz 11 commit: \x1b[2J\r\xe2\x80\xaeevil\0".to_vec();
-        bytes.extend_from_slice(include_bytes!("../../../git/fixtures/reflog/hostile.bin"));
+        bytes.extend_from_slice(include_bytes!("fixtures/hostile.bin"));
         let state = showing(&bytes);
         let rows = buffer_rows(&draw(&state, 100, 20));
         line_with(&rows, "? commit \u{FFFD}[2J");
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn a_filter_shows_only_matching_rows_and_draws_sanitised_in_the_title() {
-        let mut state = showing(include_bytes!("../../../git/fixtures/reflog/checkout.bin"));
+        let mut state = showing(include_bytes!("fixtures/checkout.bin"));
         state.commits.reflog.list.set_filter("aaa".into());
         let rows = buffer_rows(&draw(&state, 100, 20));
         line_with(&rows, "aaaaaaa commit (initial) root");
@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn small_and_tiny_screens_draw_without_panicking_and_cut_with_an_ellipsis() {
-        let mut state = showing(include_bytes!("../../../git/fixtures/reflog/checkout.bin"));
+        let mut state = showing(include_bytes!("fixtures/checkout.bin"));
         let rows = buffer_rows(&draw(&state, 80, 24));
         line_with(&rows, "ccccccc checkout moving from main to side");
         for (w, h) in [(20, 5), (1, 1), (3, 3)] {

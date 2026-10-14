@@ -234,7 +234,7 @@ fn cut_line(line: String) -> String {
 mod tests {
     use super::*;
     use crate::git::askpass::SOCKET_ENV;
-    use crate::sequence_editor::PLAN_ENV;
+    use crate::git::rebase_plan::PLAN_ENV;
 
     fn cmd(args: &[&str]) -> GitCommand {
         let (first, rest) = args.split_first().unwrap();
@@ -551,42 +551,6 @@ mod tests {
         ];
         for (args, want) in cases {
             assert_eq!(display_line(&cmd(args)), *want, "{args:?}");
-        }
-    }
-
-    /// Every message and URL Kika passes in argv today, with a secret in
-    /// the parts that must never show.
-    #[test]
-    fn no_command_kika_builds_shows_a_secret() {
-        use crate::git::commit_files::CommitId;
-        use crate::op::{GitOp, op_command};
-
-        let oid = "0123456789abcdef0123456789abcdef01234567";
-        let ops = [
-            GitOp::Commit {
-                message: Some("subj\n\nSECRET body".into()),
-                stage_all: true,
-                amend: false,
-                no_verify: false,
-                fixup: None,
-            },
-            GitOp::CreateTag {
-                name: "v1".into(),
-                target: CommitId::parse(oid).unwrap(),
-                message: Some("subj\r\nSECRET body".into()),
-            },
-            GitOp::AddRemote {
-                name: "o".into(),
-                url: "https://u:SECRET pw@h/r".into(),
-            },
-            GitOp::ApplyCached {
-                patch: b"SECRET patch".to_vec(),
-                reverse: false,
-            },
-        ];
-        for op in &ops {
-            let line = display_line(&op_command(op));
-            assert!(!line.contains("SECRET"), "{op:?}: {line}");
         }
     }
 

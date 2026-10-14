@@ -85,8 +85,8 @@ pub fn in_progress(git_dir: &Path) -> Vec<Operation> {
 mod tests {
     use super::*;
     use crate::git::fake::TempDir;
+    use crate::git::fake::{STANDARD_ENV, env_list};
     use crate::git::runner::EnvProfile;
-    use crate::test_support::{STANDARD_ENV, env_list};
 
     #[test]
     fn resumable_is_the_first_of_rebase_merge_and_cherry_pick_never_bisect() {

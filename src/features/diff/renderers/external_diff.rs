@@ -199,7 +199,7 @@ pub fn run_renderer(
 }
 
 /// The renderer's process, not yet started: its argv, then `extra_args`,
-/// with the program found by [`crate::program::resolve`] and the pane
+/// with the program found by [`crate::git::program::resolve`] and the pane
 /// width in `COLUMNS` and `DFT_WIDTH` (a tool that ignores `COLUMNS` when
 /// piped reads that).
 /// No shell is involved.
@@ -213,7 +213,8 @@ fn command(
         .argv
         .split_first()
         .ok_or_else(|| format!("{label} has no command"))?;
-    let mut command = crate::program::command(program).map_err(|_| format!("{label} not found"))?;
+    let mut command =
+        crate::git::program::command(program).map_err(|_| format!("{label} not found"))?;
     command
         .args(args)
         .args(extra_args)
@@ -600,7 +601,7 @@ mod tests {
         let command = command(&tool, &extra, 61).unwrap();
         assert_eq!(
             Some(command.get_program()),
-            crate::program::resolve(OsStr::new("sh"))
+            crate::git::program::resolve(OsStr::new("sh"))
                 .as_deref()
                 .ok()
                 .map(Path::as_os_str)

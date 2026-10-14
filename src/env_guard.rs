@@ -4,17 +4,18 @@
 
 use std::path::{Path, PathBuf};
 
-/// The vars only [`EnvProfile`](super::runner::EnvProfile) may set.
+/// The vars only [`EnvProfile`](crate::git::runner::EnvProfile) may set.
 const STANDARD_VARS: [&str; 3] = ["LC_ALL", "GIT_OPTIONAL_LOCKS", "GIT_LITERAL_PATHSPECS"];
 
 /// Files the guard does not read: end-to-end tests and shared test
 /// builders spell the vars out to pin them, the runner owns them, and this
 /// file names them to find them.
-const SKIPPED: [&str; 4] = [
+const SKIPPED: [&str; 5] = [
     "src/e2e/",
     "src/test_support.rs",
+    "src/git/fake.rs",
     "src/git/runner.rs",
-    "src/git/env_guard.rs",
+    "src/env_guard.rs",
 ];
 
 /// The only hand-set vars left, each with why a profile does not fit.

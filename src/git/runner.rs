@@ -251,7 +251,7 @@ pub trait ChildHandle: Send + Sync {
 /// inherited by a git child: the one command that needs one sets it.
 const HIDDEN_MODE_ENV: [&str; 2] = [
     crate::git::askpass::SOCKET_ENV,
-    crate::sequence_editor::PLAN_ENV,
+    crate::git::rebase_plan::PLAN_ENV,
 ];
 
 /// The real runner: spawns the `git` binary in a working directory.
@@ -299,6 +299,13 @@ impl CliRunner {
         self
     }
 
+    /// [`Self::command`], for tests outside this module that check the
+    /// process a command becomes.
+    #[cfg(test)]
+    pub fn test_process(&self, cmd: &GitCommand) -> io::Result<Command> {
+        self.command(cmd)
+    }
+
     /// The process for `cmd`, or `NotFound` when no absolute `PATH` entry
     /// holds `git`. A release build runs a command with no profile with
     /// only its own vars rather than stop the user.
@@ -308,7 +315,7 @@ impl CliRunner {
             "git command with no env profile: {:?}",
             cmd.args()
         );
-        let mut command = crate::program::command(OsStr::new("git"))?;
+        let mut command = crate::git::program::command(OsStr::new("git"))?;
         // Each hidden mode's key reaches only the command that sets it.
         for key in HIDDEN_MODE_ENV
             .iter()
@@ -818,7 +825,7 @@ mod tests {
     #[test]
     fn a_hidden_mode_s_key_reaches_only_the_command_that_sets_it() {
         use crate::git::askpass::SOCKET_ENV;
-        use crate::sequence_editor::PLAN_ENV;
+        use crate::git::rebase_plan::PLAN_ENV;
 
         let runner = CliRunner::new("/r");
         let plain = runner
@@ -841,78 +848,6 @@ mod tests {
         assert_eq!(env_of(&rebase, SOCKET_ENV), Some(None));
         assert_eq!(env_of(&fetch, SOCKET_ENV), Some(Some("/s".into())));
         assert_eq!(env_of(&fetch, PLAN_ENV), Some(None));
-    }
-
-    /// `run` and `spawn` both build their process here, so every command
-    /// kind runs in the runner's workdir with its argv untouched.
-    #[test]
-    fn every_command_kind_runs_in_the_workdir() {
-        use crate::git::diff::{DiffRequest, DiffSide, diff_command, patch_diff_command};
-        use crate::git::path::RepoPath;
-        use crate::git::repo_state::git_dir_command;
-        use crate::git::status::status_command;
-        use crate::op::{GitOp, op_command};
-        use std::path::Path;
-
-        let top = Path::new("/r/top");
-        let runner = CliRunner::new(top);
-        let request = |side| DiffRequest {
-            path: RepoPath::from("a.txt"),
-            orig_path: None,
-            side,
-            options: Default::default(),
-            commit: None,
-        };
-        let tracked = request(DiffSide::Worktree);
-        let staged = request(DiffSide::Index);
-        let untracked = request(DiffSide::Untracked);
-        let paths = vec![RepoPath::from("a.txt")];
-        let ops = [
-            GitOp::Stage(paths.clone()),
-            GitOp::Unstage(paths),
-            GitOp::StageAll,
-            GitOp::UnstageAll,
-            GitOp::ApplyCached {
-                patch: b"patch".to_vec(),
-                reverse: false,
-            },
-            GitOp::ApplyCached {
-                patch: b"patch".to_vec(),
-                reverse: true,
-            },
-            GitOp::Commit {
-                message: Some("msg".into()),
-                stage_all: false,
-                amend: false,
-                no_verify: false,
-                fixup: None,
-            },
-            GitOp::ApplyEdited {
-                patch: b"patch".to_vec(),
-            },
-            GitOp::SubmoduleInit(RepoPath::from("sub")),
-            GitOp::SubmoduleUpdate(RepoPath::from("sub")),
-        ];
-        let commands = [
-            status_command(),
-            diff_command(&tracked),
-            diff_command(&staged),
-            diff_command(&untracked),
-            patch_diff_command(&tracked),
-            patch_diff_command(&staged),
-            patch_diff_command(&untracked),
-            git_dir_command(),
-            crate::git::submodule::status_command(),
-        ]
-        .into_iter()
-        .chain(ops.iter().map(op_command));
-
-        for cmd in commands {
-            let process = runner.command(&cmd).unwrap();
-            assert_eq!(process.get_current_dir(), Some(top), "{cmd:?}");
-            let argv: Vec<_> = process.get_args().collect();
-            assert_eq!(argv, cmd.args(), "{cmd:?}");
-        }
     }
 
     #[test]

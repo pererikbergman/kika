@@ -207,8 +207,8 @@ fn parse(stdout: &[u8]) -> Result<Vec<CommitFile>, String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::git::fake::{STANDARD_ENV, env_list};
     use crate::git::runner::EnvProfile;
-    use crate::test_support::{STANDARD_ENV, env_list};
 
     use super::*;
     use crate::git::fake::{FakeRunner, fail, ok};

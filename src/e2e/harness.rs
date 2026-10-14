@@ -358,7 +358,7 @@ pub(crate) fn is_idle(state: &AppState) -> bool {
 fn hidden_sequence_editor() {
     let (Some(todo), Some(_)) = (
         std::env::var_os("KIKA_E2E_TODO"),
-        std::env::var_os(crate::sequence_editor::PLAN_ENV),
+        std::env::var_os(crate::git::rebase_plan::PLAN_ENV),
     ) else {
         return;
     };
