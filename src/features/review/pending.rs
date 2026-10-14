@@ -15,7 +15,7 @@ use crate::intent::AppIntent;
 use crate::keymap::{KeyScope, Reason};
 use crate::model::AppState;
 use crate::popup::Popup;
-use kika_forge::anchor::GhLine;
+use kika_forge::anchor::{GhLine, GhSide};
 use kika_forge::pending::{
     MAX_BODY, MAX_COMMENTS, PendingComment, PendingError, PendingKey, PendingReview,
 };
@@ -93,8 +93,8 @@ impl CommentTarget {
 pub fn lines_label(start: Option<GhLine>, end: GhLine) -> String {
     let one = |l: GhLine| {
         let side = match l.side {
-            kika_forge::anchor::GhSide::Left => 'L',
-            kika_forge::anchor::GhSide::Right => 'R',
+            GhSide::Left => 'L',
+            GhSide::Right => 'R',
         };
         format!("{side}{}", l.line)
     };
@@ -450,7 +450,6 @@ pub(crate) mod tests {
     use crate::features::review::state::tests::{press, type_char};
     use crate::features::review::threads::tests::{chunk, files_with};
     use crate::keymap::KeyPress;
-    use kika_forge::anchor::GhSide;
     use kika_git::diff::{Classifier, DiffLine, EmojiZwj};
 
     pub(crate) const HEAD: &str = "1111111111111111111111111111111111111111";

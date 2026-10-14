@@ -57,7 +57,9 @@
 //!   `apply_plan` (`reload.rs`) for `Scope::PullRequests`;
 //! - pull_requests' `pick_select` calls `pick_check`, `pick_merge_method`
 //!   and `pick_review_commit`;
-//! - `files.rs` reads and writes `diff` and `diff_options` (diff);
+//! - `files.rs` reads and writes `diff` and `diff_options` (diff), and
+//!   `comment_pick.rs` reads the streamed lines of `diff` and moves its
+//!   scroll to keep the pick in view, which `pending_view.rs` draws;
 //! - `state.rs` reads `files` (files).
 
 mod comment_editor;

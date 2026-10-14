@@ -10,11 +10,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Padding, Paragraph};
 
 use super::comment_editor::{CommentEditor, Composer};
-use super::comment_pick::CommentPick;
+use super::comment_pick::{CommentPick, live_pick};
 use super::files::{PrFiles, ReviewView};
 use super::pending::{PendingSlot, lines_label};
 use super::state::ReviewState;
 use super::threads_view::{CommentMarks, clip_line, dim};
+use crate::model::AppState;
 use crate::view::{centered, width_of};
 use kika_forge::anchor::{RowNumber, row_in, to_line_id};
 use kika_forge::discussion::PrDiscussion;
@@ -32,11 +33,6 @@ pub fn no_discussion() -> PrDiscussion {
         conversation_total: 0,
         conversation_capped: false,
     }
-}
-
-/// The pick, while it still belongs to the diff shown.
-fn shown_pick(state: &crate::model::AppState) -> Option<&CommentPick> {
-    super::comment_pick::live_pick(state)
 }
 
 /// The pending comments on the selected file, in the whole pull
@@ -60,18 +56,14 @@ fn file_comments<'a>(review: &'a ReviewState, files: &PrFiles) -> Vec<&'a Pendin
 }
 
 /// Whether the diff has a pick or a pending comment to mark.
-pub fn has_comment_marks(state: &crate::model::AppState, files: &PrFiles) -> bool {
-    shown_pick(state).is_some() || !file_comments(&state.review, files).is_empty()
+pub fn has_comment_marks(state: &AppState, files: &PrFiles) -> bool {
+    live_pick(state).is_some() || !file_comments(&state.review, files).is_empty()
 }
 
 /// The marks on the shown diff, whose rows are numbered `numbers`.
-pub fn comment_marks(
-    state: &crate::model::AppState,
-    files: &PrFiles,
-    numbers: &[RowNumber],
-) -> CommentMarks {
+pub fn comment_marks(state: &AppState, files: &PrFiles, numbers: &[RowNumber]) -> CommentMarks {
     let mut marks = CommentMarks {
-        picked: shown_pick(state).map(CommentPick::span),
+        picked: live_pick(state).map(CommentPick::span),
         ..CommentMarks::default()
     };
     for comment in file_comments(&state.review, files) {
@@ -111,13 +103,11 @@ pub fn render_pending(review: &ReviewState, frame: &mut Frame, area: Rect) {
     }
 }
 
-/// `path:R10-R14`, made safe to draw.
-fn where_label(path: &str, comment: &Composer) -> String {
-    let path = sanitize(path.as_bytes());
-    format!(
-        "{path}:{}",
-        lines_label(comment.target.start, comment.target.end)
-    )
+/// `path:R10-R14` of the comment being written, made safe to draw.
+fn where_label(composer: &Composer) -> String {
+    let target = &composer.target;
+    let path = sanitize(target.path.as_bytes());
+    format!("{path}:{}", lines_label(target.start, target.end))
 }
 
 fn render_composer(composer: &Composer, frame: &mut Frame, area: Rect) {
@@ -127,10 +117,7 @@ fn render_composer(composer: &Composer, frame: &mut Frame, area: Rect) {
     } else {
         "Comment"
     };
-    let title = format!(
-        " {verb} on {} ",
-        where_label(&composer.target.path, composer)
-    );
+    let title = format!(" {verb} on {} ", where_label(composer));
     let block = frame_block(clip_title(&title, popup.width));
     let inner = block.inner(popup);
     let lines = editor_lines(
