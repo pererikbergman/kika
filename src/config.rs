@@ -555,20 +555,21 @@ mod tests {
         apply_repo(text, &Keymap::default())
     }
 
+    /// An environment holding only `pairs`, for `global_path`.
+    fn env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
+        move |name: &str| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| OsString::from(v))
+        }
+    }
+
+    // Unix paths such as /home/me are not absolute on Windows; the Windows
+    // lookup has its own test below.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "uses Unix paths such as /home/me, which are not absolute on Windows"
-    )]
+    #[cfg(not(windows))]
     fn the_global_file_sits_in_the_xdg_config_dir_and_the_repo_file_at_the_root() {
-        let env = |pairs: &'static [(&str, &str)]| {
-            move |name: &str| {
-                pairs
-                    .iter()
-                    .find(|(k, _)| *k == name)
-                    .map(|(_, v)| OsString::from(v))
-            }
-        };
         let home = global_path(env(&[("HOME", "/home/me")]), false);
         assert_eq!(home, Some("/home/me/.config/kika/config.toml".into()));
         let xdg = env(&[("HOME", "/home/me"), ("XDG_CONFIG_HOME", "/xdg")]);
@@ -579,11 +580,6 @@ mod tests {
         let relative = env(&[("HOME", "/home/me"), ("XDG_CONFIG_HOME", "rel")]);
         assert_eq!(global_path(relative, false), home);
         assert_eq!(global_path(env(&[]), false), None);
-        #[cfg(windows)]
-        assert_eq!(
-            global_path(env(&[("APPDATA", r"C:\Users\me\AppData")]), true),
-            Some(r"C:\Users\me\AppData\kika\config.toml".into())
-        );
 
         let paths = ConfigPaths::new(home.clone(), Some(Path::new("/work/repo")));
         assert_eq!(
@@ -594,6 +590,28 @@ mod tests {
             }
         );
         assert_eq!(ConfigPaths::new(home, None).repo, None);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn on_windows_the_global_file_sits_in_appdata() {
+        let appdata = global_path(env(&[("APPDATA", r"C:\Users\me\AppData")]), true);
+        assert_eq!(
+            appdata,
+            Some(r"C:\Users\me\AppData\kika\config.toml".into())
+        );
+        assert_eq!(global_path(env(&[("APPDATA", "AppData")]), true), None);
+        let unix_vars = env(&[("HOME", r"C:\Users\me"), ("XDG_CONFIG_HOME", r"C:\xdg")]);
+        assert_eq!(global_path(unix_vars, true), None);
+
+        let paths = ConfigPaths::new(appdata.clone(), Some(Path::new(r"C:\work\repo")));
+        assert_eq!(
+            paths,
+            ConfigPaths {
+                global: appdata,
+                repo: Some(r"C:\work\repo\.kika.toml".into()),
+            }
+        );
     }
 
     #[test]
