@@ -35,6 +35,7 @@ mod popup;
 mod popup_view;
 mod prompts;
 mod range_delete;
+mod reason_fit;
 mod refresh;
 mod reload;
 mod remote_run;

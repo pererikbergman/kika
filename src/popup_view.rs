@@ -16,6 +16,7 @@ use crate::menu::{self, MenuId};
 use crate::model::AppState;
 use crate::pick_list::PickList;
 use crate::popup::{CredentialPrompt, ErrorPopup, LineInput, Popup};
+use crate::reason_fit::fit_reason;
 use crate::view::{
     COMMIT_WIDTH, centered, clip, elide_left, elide_right, render_question, tail, width_of, wrap,
 };
@@ -80,7 +81,8 @@ fn nudge(area: Rect, depth: usize) -> Rect {
 /// cut. A menu below the top has no cursor. A disabled item is dimmed and
 /// italic, not only grey, and says why after its label. A row wider than
 /// the screen ends in `…`, as the bar's notice does: the reason gives way
-/// first, so the label stays whole while it fits.
+/// first, so the label stays whole while it fits. A reason ending in a
+/// path keeps the file name (`fit_reason`).
 fn render_menu(state: &AppState, id: MenuId, cursor: Option<usize>, frame: &mut Frame, area: Rect) {
     let title = format!(" {} ", id.title());
     let room = usize::from(area.width.saturating_sub(2));
@@ -90,7 +92,7 @@ fn render_menu(state: &AppState, id: MenuId, cursor: Option<usize>, frame: &mut 
             Some(reason) => {
                 let head = format!(" {}  ", item.label);
                 let left = room.saturating_sub(width_of(&head) + 1);
-                let row = format!("{head}{} ", elide_right(&reason, left));
+                let row = format!("{head}{} ", fit_reason(&reason, left));
                 (elide_right(&row, room), true)
             }
             None => (elide_right(&format!(" {} ", item.label), room), false),
@@ -608,37 +610,74 @@ mod tests {
         row[..end].to_string()
     }
 
-    #[test]
-    fn a_long_stash_refusal_is_cut_with_an_ellipsis_inside_the_menu() {
-        let old = "src/features/stash/push.rs";
-        let taken = FileEntry {
-            path: old.into(),
+    fn untracked(path: &str) -> FileEntry {
+        FileEntry {
+            path: path.into(),
             orig_path: None,
             index: '?',
             worktree: '?',
             kind: EntryKind::Untracked,
-        };
-        let path_taken = stash_menu_over(vec![renamed("new.rs", old), taken]);
+        }
+    }
+
+    #[test]
+    fn a_long_stash_refusal_is_cut_with_an_ellipsis_inside_the_menu() {
+        let label = " Stash selected files…  ";
+        // A reason ending in a path keeps the file name: the path is cut
+        // from the left, the words before it from the right.
+        let old = "src/features/stash/push.rs";
+        let path_taken = stash_menu_over(vec![renamed("new.rs", old), untracked(old)]);
+        for width in [80, 40] {
+            let (_, rows) = draw(&path_taken, width, 24);
+            let row = menu_row(&rows, " Stash selected files…");
+            assert!(row.starts_with(label), "{width}: {rows:#?}");
+            let shown = row[label.len()..].trim_end();
+            if width == 80 {
+                assert!(
+                    row.starts_with(" Stash selected files…  A file now sits at"),
+                    "{rows:#?}"
+                );
+                assert!(shown.ends_with("…/push.rs"), "{shown:?}");
+            } else {
+                assert!(shown.ends_with("push.rs"), "{width}: {shown:?}");
+                assert!(shown.starts_with('…'), "{width}: {shown:?}");
+            }
+        }
+        // Any other reason is cut at its end.
         let case_only = stash_menu_over(vec![renamed("old.txt", "Old.txt")]);
-        let cases = [
-            (path_taken, "A file now sits at"),
-            (case_only, "This rename only changes"),
-        ];
-        for (state, start) in &cases {
-            let reason = crate::features::stash::keys::stash_file_disabled(state).unwrap();
-            for width in [80, 40] {
-                let (_, rows) = draw(state, width, 24);
-                let row = menu_row(&rows, " Stash selected files…");
-                let label = " Stash selected files…  ";
-                assert!(row.starts_with(label), "{width}: {rows:#?}");
-                let shown = row[label.len()..].trim_end();
-                // Cut, not clipped: the end of the reason gives way to `…`.
-                assert!(shown.ends_with('…'), "{width}: {shown:?}");
-                let kept = shown.trim_end_matches('…');
-                assert!(reason.starts_with(kept), "{width}: {shown:?}");
-                if width == 80 {
-                    assert!(kept.starts_with(start), "{shown:?}");
-                }
+        let reason = crate::features::stash::keys::stash_file_disabled(&case_only).unwrap();
+        for width in [80, 40] {
+            let (_, rows) = draw(&case_only, width, 24);
+            let row = menu_row(&rows, " Stash selected files…");
+            assert!(row.starts_with(label), "{width}: {rows:#?}");
+            let shown = row[label.len()..].trim_end();
+            // Cut, not clipped: the end of the reason gives way to `…`.
+            assert!(shown.ends_with('…'), "{width}: {shown:?}");
+            let kept = shown.trim_end_matches('…');
+            assert!(reason.starts_with(kept), "{width}: {shown:?}");
+            if width == 80 {
+                assert!(kept.starts_with("This rename only changes"), "{shown:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_taken_path_with_wide_chars_and_a_marker_keeps_its_file_name_whole() {
+        let old = "日本/a\u{202E}b/語c\u{200B}d.rs";
+        let state = stash_menu_over(vec![renamed("new.rs", old), untracked(old)]);
+        for width in [80, 40] {
+            let (_, rows) = draw(&state, width, 24);
+            let row = menu_row(&rows, " Stash selected files…");
+            let shown = row.trim_end();
+            assert!(shown.ends_with("<U+200B>d.rs"), "{width}: {rows:#?}");
+            if width == 80 {
+                assert!(shown.ends_with("…/語c<U+200B>d.rs"), "{rows:#?}");
+            }
+            for (i, _) in shown.match_indices("<U+") {
+                assert!(
+                    shown[i..].starts_with("<U+200B>") || shown[i..].starts_with("<U+202E>"),
+                    "{width}: {shown:?}"
+                );
             }
         }
     }
