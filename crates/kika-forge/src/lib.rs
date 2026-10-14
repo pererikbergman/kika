@@ -17,6 +17,7 @@ pub mod remote;
 pub mod review;
 pub mod task;
 pub mod url;
+pub mod viewed;
 
 use std::collections::HashMap;
 

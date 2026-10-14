@@ -95,6 +95,21 @@ impl ForgeContext {
             .ok_or(CreateError::Status(ForgeStatus::Failed))?
             .merge_pull(repo, number, method, head_oid)
     }
+
+    /// Mark `path` viewed or not; see [`Gh::set_file_viewed`]. A
+    /// repository [`Self::gh`] refuses fails without a call.
+    pub fn set_file_viewed(
+        &self,
+        host: &ForgeHost,
+        repo: &ForgeRepo,
+        node_id: &str,
+        path: &str,
+        viewed: bool,
+    ) -> Result<(), CreateError> {
+        self.gh(host, repo, self.now())
+            .ok_or(CreateError::Status(ForgeStatus::Failed))?
+            .set_file_viewed(node_id, path, viewed)
+    }
 }
 
 #[cfg(test)]
@@ -250,6 +265,36 @@ mod tests {
         let ctx = context(Arc::new(FakeGh::new()), None);
         let glab = ctx.glab(&host, &gitlab_repo(), 5).unwrap();
         assert_eq!((glab.cwd, glab.now), (std::env::temp_dir(), 5));
+    }
+
+    #[test]
+    fn a_viewed_mark_reaches_gh_only_for_an_allowed_repository_on_the_host() {
+        let runner = Arc::new(FakeGh::new());
+        let ctx = context(runner.clone(), None);
+        let failed = Err(CreateError::Status(ForgeStatus::Failed));
+        let left_out = ForgeHost::parse("github.com")
+            .unwrap()
+            .with_allow(vec![AllowRule::parse("someone-else").unwrap()]);
+        let elsewhere = ForgeHost::parse("gitlab.example").unwrap();
+        for host in [&left_out, &elsewhere] {
+            for viewed in [true, false] {
+                assert_eq!(
+                    ctx.set_file_viewed(host, &repo(), "PR_kwDOA1", "src/a.rs", viewed),
+                    failed
+                );
+            }
+        }
+        assert!(runner.calls().is_empty());
+
+        let marked = "HTTP/2.0 200 OK\r\n\r\n{\"data\":{\"markFileAsViewed\":{}}}";
+        let runner = Arc::new(FakeGh::new().reply(answer(marked)));
+        let ctx = context(runner.clone(), None);
+        let github = ForgeHost::parse("github.com").unwrap();
+        assert_eq!(
+            ctx.set_file_viewed(&github, &repo(), "PR_kwDOA1", "src/a.rs", true),
+            Ok(())
+        );
+        assert_eq!(runner.calls().len(), 1);
     }
 
     #[test]
