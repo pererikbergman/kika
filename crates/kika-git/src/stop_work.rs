@@ -5,13 +5,20 @@
 //! rebase `edit` or `break` stop git merged nothing, so there any staged
 //! change is the user's (rule 4).
 
+use std::io::Read;
 use std::path::Path;
 use std::time::SystemTime;
 
+use super::git_dir_file::{OpenError, open_regular};
 use super::path::RepoPath;
 use super::repo_state::{Operation, git_dir_command, git_dir_from};
 use super::runner::{GitCommand, GitRunner};
 use super::status::{EntryKind, FileEntry, parse_status, status_command, stdout_of};
+
+/// The most of a rebase's `done` file that is read. A line is about a
+/// hundred bytes, so this holds thousands of commits; a longer file is an
+/// error, so Skip asks, rather than a memory risk.
+const DONE_MAX: u64 = 1 << 20;
 
 /// List the index's resolve-undo records: one per conflict resolved in
 /// the index (`git add` or `git rm`) since the stop. A read with no
@@ -95,7 +102,7 @@ pub fn staged_tracked_change(files: &[FileEntry]) -> bool {
 
 /// Whether the rebase in `git_dir` stopped on an `edit` or a `break`.
 /// Only the merge backend has those commands, so no `rebase-merge/` is
-/// `false`. A missing `done` or any other read failure is an `Err`.
+/// `false`. Any failure to read `done` is an `Err`.
 fn edit_or_break_stop(git_dir: &Path) -> Result<bool, String> {
     let state = git_dir.join("rebase-merge");
     match std::fs::symlink_metadata(&state) {
@@ -104,9 +111,27 @@ fn edit_or_break_stop(git_dir: &Path) -> Result<bool, String> {
         Err(e) => return Err(e.to_string()),
     }
     let amend = modified(&state.join("amend"))?.is_some();
-    let done = std::fs::read(state.join("done"))
-        .map_err(|e| format!("Could not read the rebase's done list: {e}"))?;
+    let done = read_done(&state.join("done"))?;
     Ok(edit_or_break(amend, &done))
+}
+
+/// The rebase's `done` file, opened only as a regular file
+/// ([`open_regular`]). Missing, not regular, unreadable or over
+/// [`DONE_MAX`] is an `Err`.
+fn read_done(path: &Path) -> Result<Vec<u8>, String> {
+    let fail = |why: &str| format!("Could not read the rebase's done list: {why}");
+    let file = open_regular(path).map_err(|e| match e {
+        OpenError::NotRegular => fail("not a regular file"),
+        OpenError::Unreadable(e) => fail(&e.to_string()),
+    })?;
+    let mut done = Vec::new();
+    file.take(DONE_MAX + 1)
+        .read_to_end(&mut done)
+        .map_err(|e| fail(&e.to_string()))?;
+    if done.len() as u64 > DONE_MAX {
+        return Err(fail("too long"));
+    }
+    Ok(done)
 }
 
 /// Whether skipping `op`'s stopped commit would lose work done since the
@@ -460,7 +485,10 @@ mod tests {
     /// removed so they cannot override the config. git exits 0 at an
     /// `edit` or `break` stop, so the rebase must still be in progress.
     fn rebase_todo(dir: &Path, upstream: &str, scripts: &[&str], editor: &str) {
-        let quoted: Vec<String> = scripts.iter().map(|s| format!("-e '{s}'")).collect();
+        let quoted: Vec<String> = scripts
+            .iter()
+            .map(|s| format!("-e {}", sh_quoted(s)))
+            .collect();
         let sequence = format!("sequence.editor=sed -i.bak {}", quoted.join(" "));
         let core = format!("core.editor={editor}");
         std::process::Command::new("git")
@@ -480,6 +508,24 @@ mod tests {
             dir.join(".git/rebase-merge").is_dir(),
             "the rebase did not stop"
         );
+    }
+
+    /// `text` as one shell word: git runs the editor through the shell, so
+    /// each sed script is quoted whole, any `'` closed, escaped and reopened.
+    fn sh_quoted(text: &str) -> String {
+        format!("'{}'", text.replace('\'', r"'\''"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_sed_script_reaches_the_shell_as_one_word() {
+        for text in ["1{p;s/.*/break/;}", "s/'a b'/$x \\/", "''"] {
+            let out = std::process::Command::new("sh")
+                .args(["-c", &format!("printf %s {}", sh_quoted(text))])
+                .output()
+                .unwrap();
+            assert_eq!(out.stdout, text.as_bytes(), "{text}");
+        }
     }
 
     /// `linear`, rebased with `one` marked `edit`, stopped clean on it.
@@ -568,6 +614,57 @@ mod tests {
         assert!(!state.join("amend").exists());
         stage_b(&tmp);
         assert_eq!(check(&tmp, Operation::Rebase), Ok(false));
+    }
+
+    /// `edit_stopped` with a staged change, and `done` swapped for what
+    /// `replace` puts at its path.
+    fn edit_stopped_with_done(label: &str, replace: impl FnOnce(&Path)) -> TempDir {
+        let tmp = edit_stopped(label);
+        stage_b(&tmp);
+        let done = tmp.path().join(".git/rebase-merge/done");
+        std::fs::remove_file(&done).unwrap();
+        replace(&done);
+        tmp
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_done_file_fails_closed() {
+        let tmp = edit_stopped_with_done("stop-done-link", |done| {
+            let elsewhere = done.with_file_name("elsewhere");
+            std::fs::write(&elsewhere, "pick a # x\n").unwrap();
+            std::os::unix::fs::symlink(&elsewhere, done).unwrap();
+        });
+        let result = check(&tmp, Operation::Rebase);
+        assert!(matches!(result, Err(_) | Ok(true)), "{result:?}");
+    }
+
+    #[test]
+    fn a_directory_in_place_of_the_done_file_fails_closed() {
+        let tmp = edit_stopped_with_done("stop-done-dir", |done| {
+            std::fs::create_dir(done).unwrap();
+        });
+        let result = check(&tmp, Operation::Rebase);
+        assert!(matches!(result, Err(_) | Ok(true)), "{result:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_in_place_of_the_done_file_fails_closed_and_never_blocks() {
+        let tmp = edit_stopped_with_done("stop-done-fifo", crate::git_dir_file::mkfifo);
+        let result = check(&tmp, Operation::Rebase);
+        assert!(matches!(result, Err(_) | Ok(true)), "{result:?}");
+    }
+
+    #[test]
+    fn a_done_file_over_the_cap_fails_closed() {
+        let tmp = edit_stopped_with_done("stop-done-long", |done| {
+            let mut text = vec![b'#'; DONE_MAX as usize];
+            text.extend_from_slice(b"\npick a # x\n");
+            std::fs::write(done, text).unwrap();
+        });
+        let result = check(&tmp, Operation::Rebase);
+        assert!(matches!(result, Err(_) | Ok(true)), "{result:?}");
     }
 
     #[test]
