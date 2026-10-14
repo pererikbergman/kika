@@ -774,6 +774,39 @@ mod tests {
         assert_eq!(text, ask.text, "{rows:#?}");
     }
 
+    #[test]
+    fn the_skip_question_wraps_whole_inside_a_narrow_terminal() {
+        use crate::features::operation::{skip_question, skip_question_unchecked};
+        use crate::git::repo_state::Operation;
+
+        let mut state = workspace(&["a.rs"]);
+        let ask = skip_question(Operation::Rebase, None).unwrap();
+        state.popups = vec![Popup::Question(ask.clone())];
+        let (_, rows) = draw(&state, 40, 12);
+        for needle in [" Skip rebase commit ", "Skip the commit", "(y/n)"] {
+            assert!(contains(&rows, needle), "{needle}: {rows:#?}");
+        }
+        assert!(rows[11].starts_with(" y skip  n keep"), "{rows:#?}");
+        assert_eq!(
+            box_text(&rows, " Skip rebase commit "),
+            ask.text,
+            "{rows:#?}"
+        );
+
+        // The longest title and text, roomy and cramped: drawn whole, or
+        // at least without a panic.
+        let ask = skip_question_unchecked(Operation::CherryPick, None).unwrap();
+        state.popups = vec![Popup::Question(ask.clone())];
+        let (_, rows) = draw(&state, 80, 24);
+        assert_eq!(
+            box_text(&rows, " Skip cherry-pick commit "),
+            ask.text,
+            "{rows:#?}"
+        );
+        assert!(rows[23].starts_with(" y skip  n keep"), "{rows:#?}");
+        draw(&state, 20, 6);
+    }
+
     /// The text inside the popup box titled `title`, row by row, every
     /// row closed by the right border.
     fn box_text(rows: &[String], title: &str) -> String {

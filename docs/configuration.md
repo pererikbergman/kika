@@ -1074,7 +1074,9 @@ branch. Pushing is the only key here that reaches the network.
 
 These act on the merge, rebase, cherry-pick or revert the Status panel shows
 in progress. `cherry-pick --skip` and `revert --skip` need git 2.23 or newer;
-an older git refuses them and changes nothing.
+an older git refuses them and changes nothing. `s` first checks for work done
+since the stop, and asks before skipping when it finds some (see "Skip the
+stopped commit?" below).
 
 While only a bisect is in progress, the panel shows its good, bad and skipped
 counts, the commit being tested, where the bisect started and, once git names
@@ -1657,6 +1659,20 @@ and resetting a bisect drops its marks, so `enter` does not answer it.
 | `abort_confirm.yes` | `y` | Yes, abort the operation | locked |
 | `abort_confirm.no` | `n`, `esc` | No, keep the operation going | locked |
 | `abort_confirm.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Skip the stopped commit?
+
+Skipping a rebase, cherry-pick or revert commit loses the conflict resolution
+done since the stop, so `enter` does not answer it. It is only asked when
+there is such work: a conflict resolved in the index, a conflicted file
+edited, or, in a rebase, an unstaged change to a tracked file. If Kika cannot
+tell, it asks. With no work since the stop, `s` skips right away.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `skip_confirm.yes` | `y` | Yes, skip the commit and lose the work since the stop | locked |
+| `skip_confirm.no` | `n`, `esc` | No, keep the work and the stop | locked |
+| `skip_confirm.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Fold every fixup! commit?
 

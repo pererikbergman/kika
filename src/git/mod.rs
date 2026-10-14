@@ -32,6 +32,7 @@ pub mod retry;
 pub mod runner;
 pub mod safe_text;
 pub mod status;
+pub mod stop_work;
 pub mod submodule;
 pub mod tags;
 pub mod version;

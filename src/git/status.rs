@@ -95,7 +95,11 @@ pub fn read_status(runner: &dyn GitRunner) -> Result<RepoStatus, String> {
 }
 
 /// The stdout of `cmd`, or git's stderr (else `fallback`) when it fails.
-fn stdout_of(runner: &dyn GitRunner, cmd: &GitCommand, fallback: &str) -> Result<Vec<u8>, String> {
+pub(super) fn stdout_of(
+    runner: &dyn GitRunner,
+    cmd: &GitCommand,
+    fallback: &str,
+) -> Result<Vec<u8>, String> {
     runner
         .run_checked(cmd)
         .map(|output| output.stdout)

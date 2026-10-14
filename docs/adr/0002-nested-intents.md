@@ -44,7 +44,7 @@ Seven intents shared by features, under `// --- core: shared by features ---`:
 | Intent | Why it stays core |
 |---|---|
 | `ContinueOperation` | Bound only in `operation/keys.rs`; the core arm reads core `bisect::continue_disabled` and calls operation's `resume`. Kept beside Skip and Abort as a trio, as the owner decided (see Decided below). |
-| `SkipOperation` | Bound in `operation/keys.rs`. The core arm sends it to `commits/bisect` while only a bisect runs, otherwise to operation's `resume`. Two features, so point 5 keeps it core. |
+| `SkipOperation` | Bound in `operation/keys.rs`. The core arm sends it to `commits/bisect` while only a bisect runs, otherwise to operation's `skip`. Two features, so point 5 keeps it core. |
 | `AbortOperation` | Bound in `operation/keys.rs`. The core arm asks the bisect reset while only a bisect runs, otherwise operation's `ask_abort`. Two features, as for Skip. |
 | `OpenRepo` | Handled by `repos::open_repo` and sent by both repos and worktrees, which may not build each other's intents. |
 | `Discard` | Bound in `files/keys.rs` and `diff/keys.rs`; core `ask_discard` picks the file, hunk or lines by focus. |
@@ -74,7 +74,7 @@ Binding ids and order did not change: `registry_order_is_pinned` passes unedited
 
 ### Security
 
-Destructive `GitOp`s are reached only through a confirm question (`src/confirm_question.rs`) or the range question, never by a feature's `update` returning the run effect directly. Skip (`GitOp::Skip`) is the one deliberate exception: it is treated as a step of the running operation and runs without a question. The security reviews of #390, #391 and #392 a/b/c confirmed this, so Decision 2's rule holds with that one exception. #424 follows up with a confirm question for Skip, asked only when the worktree or index holds conflict-resolution changes since the stop.
+Destructive `GitOp`s are reached only through a confirm question (`src/confirm_question.rs`) or the range question, never by a feature's `update` returning the run effect directly. Skip (`GitOp::Skip`) first checks, as an effect when it is pressed, for conflict-resolution work done since the stop: a conflict resolved in the index, a conflicted file edited, or, in a rebase, an unstaged change to a tracked file. If the check finds such work, or fails, Skip asks a `y`-only confirm question (#424). Otherwise it runs without one, as a step of the running operation, since there is nothing to lose. The security reviews of #390, #391 and #392 a/b/c confirmed the earlier no-question Skip; with #424, Decision 2's rule holds without an exception for work that can be lost.
 
 ### Deviations kept
 
