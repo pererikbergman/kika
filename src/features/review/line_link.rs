@@ -9,7 +9,8 @@ use super::state::{NO_BROWSER, NO_FORGE};
 use crate::effect::Effect;
 use crate::keymap::Reason;
 use crate::model::AppState;
-use kika_forge::anchor::{self, Placement};
+use crate::notice::Notice;
+use kika_forge::anchor::{self, GhLine, GhSide, Placement};
 use kika_forge::url::pr_line_url;
 use kika_git::patch::LineId;
 
@@ -52,8 +53,28 @@ fn target_line(state: &AppState, files: &PrFiles) -> Option<LineId> {
     })
 }
 
-/// The URL `o` opens, or why there is none, in the order the guard says.
-fn line_url(state: &AppState) -> Result<String, Reason> {
+/// What `o` opens: the page's URL, and the file and line it points at.
+struct LineLink<'a> {
+    url: String,
+    path: &'a str,
+    line: GhLine,
+}
+
+impl LineLink<'_> {
+    /// The bar's word on it: the side and line first, as the URL names
+    /// them, then the file, so a narrow bar cuts the path, not the line.
+    fn notice(&self) -> Notice {
+        let side = match self.line.side {
+            GhSide::Left => 'L',
+            GhSide::Right => 'R',
+        };
+        let lead = format!("Opening {side}{} on GitHub: ", self.line.line);
+        Notice::with_path(&lead, self.path)
+    }
+}
+
+/// The page `o` opens, or why there is none, in the order the guard says.
+fn line_link(state: &AppState) -> Result<LineLink<'_>, Reason> {
     let files = files_screen(state)
         .filter(|f| f.stage == FilesStage::Ready && state.review_files_shown())
         .ok_or(NOT_READY)?;
@@ -80,14 +101,9 @@ fn line_url(state: &AppState) -> Result<String, Reason> {
                 .oid,
         ),
     };
-    pr_line_url(
-        &repo,
-        files.number,
-        commit,
-        path,
-        anchor::from_line_id(line),
-    )
-    .ok_or_else(|| NOT_LINKABLE.into())
+    let line = anchor::from_line_id(line);
+    let url = pr_line_url(&repo, files.number, commit, path, line).ok_or(NOT_LINKABLE)?;
+    Ok(LineLink { url, path, line })
 }
 
 /// Why `o` cannot open the line on GitHub: the files are not shown, no
@@ -95,14 +111,14 @@ fn line_url(state: &AppState) -> Result<String, Reason> {
 /// is not UTF-8, no numbered line is in view, or the address will not
 /// make a URL.
 pub(crate) fn open_line_disabled(state: &AppState) -> Option<Reason> {
-    line_url(state).err()
+    line_link(state).err()
 }
 
 impl AppState {
     /// `o` on the files screen: start the browser on the line in view.
     pub(crate) fn open_review_line(&mut self) -> Vec<Effect> {
-        let url = match line_url(self) {
-            Ok(url) => url,
+        let (url, notice) = match line_link(self) {
+            Ok(link) => (link.url.clone(), link.notice()),
             Err(reason) => {
                 self.notice = Some(reason);
                 return vec![];
@@ -111,10 +127,10 @@ impl AppState {
         let Some(mut argv) = self.browser.clone() else {
             return vec![];
         };
-        // Its own argument, last: never joined into another one. Every
-        // part of it was checked, so the notice is safe to draw.
-        argv.push(url.clone().into());
-        self.notice = Some(format!("Opening {url}").into());
+        // Its own argument, last: never joined into another one. The bar
+        // gets the short form; the whole URL goes only to the browser.
+        argv.push(url.into());
+        self.notice = Some(notice);
         vec![Effect::OpenUrl { argv }]
     }
 }
@@ -207,7 +223,11 @@ mod tests {
         );
         assert_eq!(
             state.notice.as_deref(),
-            Some(format!("Opening {url}").as_str())
+            Some("Opening R12 on GitHub: src/main.rs")
+        );
+        assert_eq!(
+            state.notice.as_ref().and_then(|n| n.path_split()),
+            Some(("Opening R12 on GitHub: ", "src/main.rs"))
         );
         // With the keys on the diff too.
         press(&mut state, KeyCode::Tab);
@@ -306,6 +326,29 @@ mod tests {
         let mut state = shown(&["src/main.rs"], fixture_discussion(), main_diff());
         state.forge.repo.as_mut().unwrap().owner = "a/b".into();
         refused(&mut state, NOT_LINKABLE);
+    }
+
+    #[test]
+    fn the_bar_shows_the_side_and_line_opened_at_80_columns() {
+        use crate::test_support::screen::draw;
+        let mut state = shown(&["src/main.rs"], fixture_discussion(), main_diff());
+        state.size = (80, 24);
+        state.diff.scroll = 5;
+        opened(&mut state);
+        let rows = draw(&state, 80, 24);
+        let bar = &rows[23];
+        assert!(
+            bar.contains("Opening L10 on GitHub: src/main.rs"),
+            "{rows:#?}"
+        );
+        assert!(!bar.contains("https://"), "{bar}");
+        // A long path is what gives way, not the line.
+        let long = format!("src/{}/main.rs", "deep/".repeat(20));
+        let mut state = shown(&[long.as_str()], fixture_discussion(), main_diff());
+        state.size = (80, 24);
+        opened(&mut state);
+        let bar = &draw(&state, 80, 24)[23];
+        assert!(bar.contains("Opening R12 on GitHub: src/deep"), "{bar}");
     }
 
     #[cfg(unix)]
