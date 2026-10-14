@@ -430,6 +430,7 @@ mod tests {
         let client = || {
             Some(ForgeContext {
                 gh: gh.clone(),
+                glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
                 sink: CommandSink::new(),
                 cache_dir: None,
             })
