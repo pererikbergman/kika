@@ -19,8 +19,8 @@ use crate::features::diff::{self, DiffStreamer};
 use crate::features::stash::StashEntry;
 use crate::features::sync::SyncIntent;
 use crate::features::{
-    blame, commit, conflicts, custom_commands, files, pull_requests, repos, review, stash,
-    submodules, sync, worktrees,
+    blame, commit, conflicts, custom_commands, files, operation, pull_requests, repos, review,
+    stash, submodules, sync, worktrees,
 };
 use crate::forge::merge::MergeMethod;
 use crate::forge::task::ForgeContext;
@@ -36,6 +36,7 @@ use crate::git::recording::{CommandEvent, CommandOutcome, CommandSink};
 use crate::git::refs::read_refs;
 use crate::git::remote::{AskpassEnv, RemoteOp};
 use crate::git::remotes::RemoteName;
+use crate::git::repo_state::Operation;
 use crate::git::safe_text::terminal_safe;
 use crate::handoff::HandOff;
 use crate::intent::AppIntent;
@@ -467,6 +468,16 @@ pub enum Effect {
         op: GitOp,
         head: CommitId,
         target: CommitId,
+    },
+
+    // --- operation ---
+    /// Look for work done since `operation` stopped, before a Skip drops
+    /// it; `head` is the detached `HEAD` Skip was pressed from. Always
+    /// answered by one `OperationIntent::StopWorkChecked`.
+    CheckStopWork {
+        tag: Tag,
+        operation: Operation,
+        head: Option<CommitId>,
     },
 
     // --- commits/copy ---
@@ -1083,6 +1094,11 @@ impl Runtime {
                 head,
                 target,
             } => rewrite::effects::check_left_behind(runner, tx, tag, op, head, target),
+            Effect::CheckStopWork {
+                tag,
+                operation: op,
+                head,
+            } => operation::effects::check_stop_work(runner, tx, tag, op, head),
             // Where git runs now, inside an entered submodule too.
             Effect::AppendIgnore { tag, line } => {
                 files::effects::ignore(self.runner.workdir(), tx, tag, line)

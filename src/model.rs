@@ -28,6 +28,7 @@ use crate::features::diff::renderers::external_diff::map_rows;
 use crate::features::diff::renderers::{ExternalRenderer, RenderedDiff, RendererKind};
 use crate::features::files::{self, IgnoreDraft};
 use crate::features::operation;
+use crate::features::operation::StopWorkCheck;
 use crate::features::pull_requests::{self, PrCreating, PrDraft};
 use crate::features::repos::{self, ParkedRepo};
 use crate::features::review::{self, PrMerging};
@@ -201,6 +202,9 @@ pub struct AppState {
     /// The left-behind check in flight; one at a time, so a second press
     /// cannot stack a second question.
     pub left_behind_check: Option<LeftBehindCheck>,
+    /// The check for work since the stop that a Skip waits on; one at a
+    /// time, so a second press cannot stack a second question.
+    pub skip_check: Option<StopWorkCheck>,
     /// The running commit has the terminal, so Ctrl+C goes to git, not Kika.
     pub commit_on_terminal: bool,
     /// From the global `[commit] hooks_detached`: the user's hooks never ask
@@ -333,6 +337,7 @@ impl AppState {
             expanded: SidePanel::Files,
             screen_mode: ScreenMode::Normal,
             left_behind_check: None,
+            skip_check: None,
             commit_on_terminal: false,
             commit_hooks_detached: false,
             status_selection: Selection::KeepPath,
@@ -593,7 +598,7 @@ impl AppState {
                     BisectIntent::MarkHead(BisectMark::Skip),
                 )));
             }
-            AppIntent::SkipOperation => return self.resume(keymap::skip_disabled, GitOp::Skip),
+            AppIntent::SkipOperation => return self.skip(),
             AppIntent::AbortOperation if bisect::bisect_only(self) => self.ask_bisect_reset(),
             AppIntent::AbortOperation => self.ask_abort(),
             AppIntent::CopyFailed(why) => {
@@ -937,6 +942,7 @@ impl AppState {
             }
             KeyScope::Confirm => self.answer_question(scope, Answer::YOrEnter),
             KeyScope::AbortConfirm
+            | KeyScope::SkipConfirm
             | KeyScope::AutosquashConfirm
             | KeyScope::PatchConfirm
             | KeyScope::DropRangeConfirm => self.answer_question(scope, Answer::YOnly),
@@ -4294,7 +4300,25 @@ mod tests {
         let (tag, op) = attached_of(&press_char(&mut state, 'c'));
         assert_eq!(op, GitOp::Continue(Operation::Revert));
         state.update(finished(tag, op, Ok(())));
-        let (tag, op) = attached_of(&press_char(&mut state, 's'));
+        // Skip checks for work since the stop first; with none, it skips.
+        let check = press_char(&mut state, 's');
+        let [
+            Effect::CheckStopWork {
+                tag,
+                operation,
+                head,
+            },
+        ] = check.as_slice()
+        else {
+            panic!("expected one CheckStopWork, got {check:?}");
+        };
+        let checked = state.update(AppIntent::Operation(OperationIntent::StopWorkChecked {
+            tag: *tag,
+            operation: *operation,
+            head: head.clone(),
+            result: Ok(false),
+        }));
+        let (tag, op) = attached_of(&checked);
         assert_eq!(op, GitOp::Skip(Operation::Revert));
         state.update(finished(tag, op, Ok(())));
         press_char(&mut state, 'a');
