@@ -9,10 +9,12 @@ impl AppState {
     /// Whether the guard the key that opened the question uses for `op`
     /// now refuses it; if so, its reason goes in the bar. A reset waits
     /// for any operation in progress, a checkout only for a bisect, as
-    /// their keys do.
+    /// their keys do. A pull request checkout waits for any, as `b` does.
     pub(crate) fn confirm_refused(&mut self, op: &GitOp) -> bool {
         let reason = match op {
-            GitOp::Reset { .. } => crate::keymap::in_progress_disabled(self),
+            GitOp::Reset { .. } | GitOp::CheckoutPrBranch { .. } => {
+                crate::keymap::in_progress_disabled(self)
+            }
             GitOp::CheckoutCommit(_) => crate::bisect::head_move_disabled(self),
             _ => None,
         };
@@ -68,6 +70,27 @@ mod tests {
         let mut state = merging();
         assert!(!state.confirm_refused(&checkout));
         assert_eq!(state.notice, None);
+    }
+
+    #[test]
+    fn a_pull_request_checkout_is_refused_while_any_operation_is_in_progress() {
+        let checkout = GitOp::CheckoutPrBranch {
+            number: 7,
+            branch: "pr/7".into(),
+            head: cid("c1"),
+            old: None,
+            current: false,
+        };
+        let mut state = merging();
+        assert!(state.confirm_refused(&checkout));
+        assert_eq!(
+            state.notice,
+            Some("Finish or abort the operation in progress".into())
+        );
+        let mut state = bisecting();
+        assert!(state.confirm_refused(&checkout));
+        assert_eq!(state.notice, Some(RESET_FIRST.into()));
+        assert!(!on_commit().confirm_refused(&checkout));
     }
 
     #[test]

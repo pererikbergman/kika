@@ -422,6 +422,7 @@ pub(crate) fn failure_title(op: &GitOp) -> &'static str {
         GitOp::DeleteTags(_) => "Could not delete every tag",
         GitOp::BisectMark { .. } => "Could not mark the commit",
         GitOp::BisectReset => "Could not reset the bisect",
+        GitOp::CheckoutPrBranch { .. } => "Could not check out the pull request",
         GitOp::Travel {
             direction: reflog::Direction::Undo,
             ..
