@@ -496,6 +496,15 @@ pull request, then to the queue, then to the workspace.
   `thread 2/5` after a jump; a `+` there means GitHub has more threads
   than were read. At most 100 threads, 50 comments in each, and 200
   conversation items (100 comments and 100 reviews) are read.
+- `o` on the files screen opens the line in view on GitHub's page of the
+  pull request, with `browser`. The line is the selected thread's (after
+  `]` or `[`) while its row is in view, else the first numbered row at the
+  top of the diff. The page is
+  `https://<host>/<owner>/<name>/pull/<n>/files#diff-<sha256 of the path><L|R><line>`,
+  or `…/pull/<n>/commits/<id>#diff-…` in a commit's view; `L` is the old
+  side and `R` the new. It asks GitHub nothing: the address is built
+  locally. It is off, saying why, with no `browser`, no numbered line in
+  view, or a file whose name is not UTF-8.
 
 - GitHub is asked only when you enter review mode, open a pull request
   (which reads its viewed marks in up to 10 calls), press `r` or answer
@@ -1828,6 +1837,7 @@ diff, `esc` goes back to the pull request.
 | `review_files.commit` | `c` | Review the whole pull request or one of its commits | |
 | `review_files.next_thread` | `]` | Go to the next unresolved review thread | |
 | `review_files.prev_thread` | `[` | Go to the previous unresolved review thread | |
+| `review_files.open_line` | `o` | Open the line in view on GitHub's pull request page | locked |
 | `review_diff.down` | `j`, `down` | Scroll the diff down a line | |
 | `review_diff.up` | `k`, `up` | Scroll the diff up a line | |
 | `review_diff.page_down` | `pgdn` | Scroll the diff down a page | |

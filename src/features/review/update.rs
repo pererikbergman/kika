@@ -43,6 +43,7 @@ pub(crate) fn update(state: &mut AppState, intent: ReviewIntent) -> Vec<Effect> 
         ReviewIntent::ToggleViewed => return state.toggle_viewed(),
         ReviewIntent::NextThread => return state.step_review_thread(false),
         ReviewIntent::PrevThread => return state.step_review_thread(true),
+        ReviewIntent::OpenLineOnForge => return state.open_review_line(),
         ReviewIntent::DiscussionLoaded {
             tag,
             number,

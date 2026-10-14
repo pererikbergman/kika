@@ -100,6 +100,9 @@ pub(crate) enum ReviewIntent {
     /// across the files.
     NextThread,
     PrevThread,
+    /// Open the line in view on GitHub's page of the pull request, in the
+    /// browser. Nothing is asked of GitHub.
+    OpenLineOnForge,
     /// Pull request `number`'s review threads and conversation, `None`
     /// when GitHub has no such pull request, or why they could not be
     /// read; `repo` as for the queues.

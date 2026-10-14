@@ -3,7 +3,8 @@
 //! (`files.rs`), the whole pull request or one of its commits
 //! (`commit_view.rs`), marking a file viewed on GitHub (`viewed.rs`),
 //! its review threads placed on the diff and `]`/`[` between them
-//! (`threads.rs`, drawn by `threads_view.rs`), merging it from the detail
+//! (`threads.rs`, drawn by `threads_view.rs`), opening the line in view
+//! on GitHub (`line_link.rs`), merging it from the detail
 //! (`merge.rs`), the markdown renderer for its body (`markdown.rs`), and
 //! the local git reads behind the files screen (`git.rs`). The feature
 //! also owns its key bindings (`keys.rs`), its screen (`view.rs`) and the
@@ -17,8 +18,8 @@
 //! Its intents are nested (ADR-0002): core wraps [`ReviewIntent`] in
 //! `AppIntent::Review`, and its one `update` arm calls [`update`] here.
 //! `update.rs` holds only that function; it dispatches to the handlers in
-//! `state.rs`, `files.rs`, `commit_view.rs`, `viewed.rs`, `threads.rs`
-//! and `merge.rs`.
+//! `state.rs`, `files.rs`, `commit_view.rs`, `viewed.rs`, `threads.rs`,
+//! `line_link.rs` and `merge.rs`.
 //! The review guards on core arms (`ScrollDiff`, `OpenSearch`,
 //! `DiffEscape`) stay in core.
 //!
@@ -30,8 +31,8 @@
 //! - the guards `queue_keys_disabled` and `review_diff_focused`, which core
 //!   focus uses, and those in `keys.rs`;
 //! - the handlers in `state.rs`, `files.rs`, `commit_view.rs`, `viewed.rs`,
-//!   `threads.rs` and `merge.rs` that `update` calls, including the
-//!   `review_files_shown` guard;
+//!   `threads.rs`, `line_link.rs` and `merge.rs` that `update` calls,
+//!   including the `review_files_shown` guard and `open_line_disabled`;
 //! - `review_jump_landed` (`threads.rs`), which core's `AppIntent::Diff`
 //!   arm calls after each diff chunk, so a thread `]`/`[` waits for is
 //!   scrolled to once its row streams in;
@@ -55,6 +56,7 @@ mod files;
 mod git;
 mod intent;
 pub(crate) mod keys;
+mod line_link;
 mod markdown;
 mod merge;
 mod state;

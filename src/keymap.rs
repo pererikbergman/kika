@@ -627,6 +627,7 @@ pub const REPO_LOCKED: &[&str] = &[
     "review.back",
     "review.files",
     "review_files.viewed",
+    "review_files.open_line",
     "create_pull_request.yes",
     "create_pull_request.no",
     "create_pull_request.quit",
@@ -5137,6 +5138,8 @@ mod tests {
                     | Review(ReviewIntent::OpenFiles)
                     // A viewed mark reaches GitHub.
                     | Review(ReviewIntent::ToggleViewed)
+                    // It starts the browser.
+                    | Review(ReviewIntent::OpenLineOnForge)
                     | PullRequests(PullRequestsIntent::PickSelect)
                     // Esc falls through to quit without it.
                     | Review(ReviewIntent::CloseDetail)
@@ -5263,6 +5266,7 @@ mod tests {
                 "review.back",
                 "review.files",
                 "review_files.viewed",
+                "review_files.open_line",
                 "merge_pr.yes",
             ]
         );
@@ -5768,6 +5772,7 @@ mod tests {
         "review_files.commit",
         "review_files.next_thread",
         "review_files.prev_thread",
+        "review_files.open_line",
         "review_diff.down",
         "review_diff.up",
         "review_diff.page_down",

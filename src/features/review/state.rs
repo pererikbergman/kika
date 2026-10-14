@@ -21,7 +21,7 @@ use ratatui::text::Line;
 
 pub const NO_FORGE: &str =
     "The remote is on no forge host in the global config, or not in [forge.allow]";
-const NO_BROWSER: &str = "Set forge.browser in the global config";
+pub(super) const NO_BROWSER: &str = "Set forge.browser in the global config";
 const NO_FAILING_CHECK: &str = "No failing check has a details page";
 const NO_PR_OPEN: &str = "No pull request is open";
 const NO_PR_SELECTED: &str = "No pull request selected";
