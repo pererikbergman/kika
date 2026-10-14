@@ -6,6 +6,7 @@ use std::io::Read;
 use std::path::Path;
 
 use super::commit_files::CommitId;
+use super::git_dir_file::{OpenError, open_regular};
 use super::safe_text::{sanitize, terminal_safe};
 
 /// The most of any one bisect file that is read. A real log is a few
@@ -195,30 +196,14 @@ struct NotRegular;
 
 /// Read at most [`MAX_FILE`] bytes of `path`: `Ok(None)` when it is missing
 /// or cannot be read. Only a regular file is opened, never through a
-/// symlink: a FIFO would block the status load and a link would show
-/// another file's text. On unix the open itself refuses a link and does
-/// not wait on a FIFO swapped in after the check.
+/// symlink ([`open_regular`]): a FIFO would block the status load and a
+/// link would show another file's text.
 fn read_capped(path: &Path) -> Result<Option<Vec<u8>>, NotRegular> {
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
-        return Ok(None);
+    let file = match open_regular(path) {
+        Ok(file) => file,
+        Err(OpenError::NotRegular) => return Err(NotRegular),
+        Err(OpenError::Unreadable(_)) => return Ok(None),
     };
-    if !meta.is_file() {
-        return Err(NotRegular);
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    let Ok(file) = options.open(path) else {
-        return Ok(None);
-    };
-    // It may have been swapped since the check; ask the open handle.
-    if !file.metadata().is_ok_and(|m| m.is_file()) {
-        return Err(NotRegular);
-    }
     let mut bytes = Vec::new();
     match file.take(MAX_FILE).read_to_end(&mut bytes) {
         Ok(_) => Ok(Some(bytes)),
@@ -239,6 +224,8 @@ pub fn elide(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::fake::TempDir;
+    #[cfg(unix)]
+    use crate::git_dir_file::mkfifo;
 
     const A: &str = "1111111111111111111111111111111111111111";
     const B: &str = "2222222222222222222222222222222222222222";
@@ -421,14 +408,6 @@ mod tests {
         assert_eq!(parse_terms(b""), None);
         assert_eq!(parse_terms(b"bad\n"), None);
         assert_eq!(parse_terms(b"\ngood\n"), None);
-    }
-
-    #[cfg(unix)]
-    fn mkfifo(path: &Path) {
-        use std::os::unix::ffi::OsStrExt;
-        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
-        // SAFETY: `c` is a valid NUL-terminated path for the call.
-        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
     }
 
     #[cfg(unix)]

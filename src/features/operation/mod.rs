@@ -2,7 +2,7 @@
 //! merging the selected branch or rebasing onto it; and continuing,
 //! skipping or aborting the merge, rebase, cherry-pick or revert in
 //! progress, with the abort question. Skip first checks, as an effect,
-//! for conflict-resolution work done since the stop
+//! for work done since the stop
 //! (`git::stop_work::read_stop_work`), and asks the skip question when
 //! it finds some or the check fails; otherwise it skips right away. Its
 //! git ops run through the core op slot.
