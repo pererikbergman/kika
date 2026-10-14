@@ -15,6 +15,8 @@ use crate::intent::AppIntent;
 use crate::keymap::{KeyScope, Reason};
 use crate::model::AppState;
 use crate::popup::Popup;
+use std::path::{Path, PathBuf};
+
 use kika_forge::anchor::{GhLine, GhSide};
 use kika_forge::pending::{
     MAX_BODY, MAX_COMMENTS, PendingComment, PendingError, PendingKey, PendingReview,
@@ -41,8 +43,9 @@ pub enum PendingLoad {
     /// Being read under this tag; any other answer is dropped.
     Loading(Tag),
     Ready(PendingReview),
-    /// The stored file could not be read; it is never written.
-    Unreadable(PendingError),
+    /// The stored file, at this path when known, could not be read; it is
+    /// never written.
+    Unreadable(PendingError, Option<PathBuf>),
 }
 
 /// The pending review of pull request `number`, kept while its detail is
@@ -104,10 +107,18 @@ pub fn lines_label(start: Option<GhLine>, end: GhLine) -> String {
     }
 }
 
-fn unreadable(number: u64, why: PendingError) -> String {
-    format!(
+/// Why comments are off, naming the file so the user can remove it.
+fn unreadable(number: u64, why: PendingError, file: Option<&Path>) -> Reason {
+    let lead = format!(
         "The saved pending review for #{number} could not be read ({why}); it was left as it is"
-    )
+    );
+    match file {
+        Some(file) => Reason::with_path(
+            &format!("{lead}. To start again, remove "),
+            &file.to_string_lossy(),
+        ),
+        None => lead.into(),
+    }
 }
 
 /// Why the pending review cannot be changed now, from its slot.
@@ -115,7 +126,7 @@ fn slot_disabled(state: &AppState) -> Result<&PendingReview, Reason> {
     let slot = state.review.pending.as_ref().ok_or(NO_PLACE)?;
     match &slot.load {
         PendingLoad::Loading(_) => Err(LOADING.into()),
-        PendingLoad::Unreadable(why) => Err(unreadable(slot.number, *why).into()),
+        PendingLoad::Unreadable(why, file) => Err(unreadable(slot.number, *why, file.as_deref())),
         PendingLoad::Ready(review) => Ok(review),
     }
 }
@@ -223,6 +234,7 @@ impl AppState {
         &mut self,
         tag: Tag,
         result: Result<Option<PendingReview>, PendingError>,
+        file: Option<PathBuf>,
     ) {
         let Some(slot) = self.review.pending.as_mut() else {
             return;
@@ -233,8 +245,8 @@ impl AppState {
         slot.load = match result {
             Ok(found) => PendingLoad::Ready(found.unwrap_or_default()),
             Err(why) => {
-                self.notice = Some(unreadable(slot.number, why).into());
-                PendingLoad::Unreadable(why)
+                self.notice = Some(unreadable(slot.number, why, file.as_deref()));
+                PendingLoad::Unreadable(why, file)
             }
         };
     }
@@ -525,6 +537,7 @@ pub(crate) mod tests {
         state.update(AppIntent::Review(ReviewIntent::PendingLoaded {
             tag,
             result,
+            file: Some(PathBuf::from("/s/kika/reviews/0123456789abcdef.json")),
         }))
     }
 
@@ -758,19 +771,28 @@ pub(crate) mod tests {
         let (mut state, tag) = loading();
         let why = PendingError::Unreadable("it is a symbolic link");
         assert_eq!(loaded(&mut state, tag, Err(why)), []);
-        let reason = unreadable(12, why);
-        assert!(reason.starts_with("The saved pending review for #12 could not be read"));
-        assert!(reason.ends_with("it was left as it is"));
-        assert_eq!(state.notice.as_deref(), Some(reason.as_str()));
+        let file = "/s/kika/reviews/0123456789abcdef.json";
+        let reason = unreadable(12, why, Some(Path::new(file)));
+        assert_eq!(
+            &*reason,
+            "The saved pending review for #12 could not be read (it is a symbolic link); \
+             it was left as it is. To start again, remove /s/kika/reviews/0123456789abcdef.json"
+        );
+        // The path is marked, so a narrow bar keeps the file's name.
+        assert_eq!(reason.path_split().map(|(_, path)| path), Some(file));
+        assert_eq!(state.notice.as_ref(), Some(&reason));
         for key in ['a', 'P'] {
             assert_eq!(type_char(&mut state, key), [], "{key}");
-            assert_eq!(state.notice.as_deref(), Some(reason.as_str()), "{key}");
+            assert_eq!(state.notice.as_ref(), Some(&reason), "{key}");
         }
-        assert_eq!(comment_disabled(&state).as_deref(), Some(reason.as_str()));
-        assert_eq!(
-            pending_list_disabled(&state).as_deref(),
-            Some(reason.as_str())
-        );
+        assert_eq!(comment_disabled(&state), Some(reason.clone()));
+        assert_eq!(pending_list_disabled(&state), Some(reason.clone()));
+        // Without a store there is no file to name.
+        let bare = unreadable(12, why, None);
+        assert!(bare.ends_with("it was left as it is"));
+        // A hostile store path is drawn safe.
+        let hostile = unreadable(12, why, Some(Path::new("/s/\u{1b}[2J.json")));
+        assert!(!hostile.contains('\u{1b}'));
         // Nothing reaches the store, whatever asks.
         for intent in [ReviewIntent::DeletePending(1), ReviewIntent::SaveComment] {
             assert_eq!(state.update(AppIntent::Review(intent)), []);

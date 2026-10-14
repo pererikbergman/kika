@@ -2141,7 +2141,8 @@ mod tests {
 
         // As after a restart: another runtime on the same store.
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(Arc::new(FakeRunner::new()), tx).with_pending_store(Some(store));
+        let runtime =
+            Runtime::new(Arc::new(FakeRunner::new()), tx).with_pending_store(Some(store.clone()));
         runtime.spawn(Effect::LoadPendingReview {
             tag: tag(2),
             key: key.clone(),
@@ -2150,7 +2151,8 @@ mod tests {
             rx.recv().await,
             Some(AppIntent::Review(ReviewIntent::PendingLoaded {
                 tag: tag(2),
-                result: Ok(Some(review.clone()))
+                result: Ok(Some(review.clone())),
+                file: Some(store.join(key.file_name())),
             }))
         );
 
@@ -2165,7 +2167,8 @@ mod tests {
             rx.recv().await,
             Some(AppIntent::Review(ReviewIntent::PendingLoaded {
                 tag: tag(3),
-                result: Ok(None)
+                result: Ok(None),
+                file: None,
             }))
         );
         runtime.spawn(Effect::SavePendingReview {

@@ -518,7 +518,8 @@ pull request, then to the queue, then to the workspace.
   stays inside one hunk. An added or unchanged line takes the comment on
   the new side, a removed line on the old side. The comment is typed in a
   box over the screen, markdown, as many lines as you like: `enter` is a
-  new line, `q` and `?` are typed, `ctrl-s` keeps it and `esc` drops it
+  new line, `tab` types a tab (it does not move the focus), `q` and `?`
+  are typed, `ctrl-s` keeps it and `esc` drops it
   (asking first when it has text). `a` works in the whole pull request
   view only, not in a commit's (`c` goes back).
 - A comment is not posted. It goes into the pending review, which only you
@@ -533,13 +534,18 @@ pull request, then to the queue, then to the workspace.
   `$XDG_STATE_HOME/kika/reviews`, else
   `~/Library/Application Support/kika/reviews` (macOS),
   `~/.local/state/kika/reviews` (Linux) or `%LOCALAPPDATA%\kika\reviews`
-  (Windows). It holds the host, owner, repository name, number and path,
-  and each comment's file, lines, text and the head it was written on.
-  Only you can read it. A file there that Kika did not write (a link, too
-  large, malformed, of another version or for another pull request) is
-  never read or overwritten: comments on that pull request are off, the
-  bar says why, and you remove the file yourself. Writing comments asks
-  GitHub nothing and starts no other program.
+  (Windows). Each file is named by a hash, `<16 hex digits>.json`, and
+  inside it names the host, owner, repository name, pull request number
+  and path it belongs to, then each comment's file, lines, text and the
+  head it was written on. Only you can read it. A file there that Kika did
+  not write (a link, too large, malformed, of another version or for
+  another pull request) is never read or overwritten: comments on that
+  pull request are off, and Kika says why with the file's full path, so
+  you can remove it to start again. Writing comments asks GitHub nothing
+  and starts no other program.
+- Each change is written as soon as you make it, one write at a time. If
+  you quit while a write is still running and you changed something after
+  it started, that newest change can be lost.
 
 - GitHub is asked only when you enter review mode, open a pull request
   (which reads its viewed marks in up to 10 calls), press `r` or answer

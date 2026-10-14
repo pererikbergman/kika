@@ -298,9 +298,7 @@ pub fn ensure_dir(dir: &Path) -> io::Result<()> {
     builder.create(dir)?;
     let meta = fs::symlink_metadata(dir)?;
     if meta.file_type().is_symlink() || !meta.is_dir() {
-        return Err(io::Error::other(
-            "the cache directory is not a plain directory",
-        ));
+        return Err(io::Error::other("the directory is not a plain directory"));
     }
     #[cfg(unix)]
     {

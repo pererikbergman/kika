@@ -194,12 +194,20 @@ fn render_list(slot: &PendingSlot, cursor: usize, frame: &mut Frame, area: Rect)
         1 => "1 comment".to_string(),
         n => format!("{n} comments"),
     };
+    // Borders and no padding rows: the rows the list has.
+    let rows = usize::from(popup.height.saturating_sub(2)).max(1);
+    // Where the cursor is, when the list runs past the box.
+    let at = if comments.len() > rows {
+        format!(" · {}/{}", cursor + 1, comments.len())
+    } else {
+        String::new()
+    };
     let block = frame_block(clip_title(
-        &format!(" Pending review #{} · {count} ", slot.number),
+        &format!(" Pending review #{} · {count}{at} ", slot.number),
         popup.width,
     ));
     let inner = block.inner(popup);
-    let (width, rows) = (usize::from(inner.width), usize::from(inner.height).max(1));
+    let width = usize::from(inner.width);
     let start = (cursor + 1).saturating_sub(rows);
     let lines: Vec<Line<'static>> = comments
         .iter()
@@ -248,7 +256,11 @@ mod tests {
     use kika_forge::pending::PendingReview;
 
     fn draw(state: &AppState) -> Buffer {
-        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        draw_at(state, 100, 30)
+    }
+
+    fn draw_at(state: &AppState, width: u16, height: u16) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| crate::view::render(state, frame))
             .unwrap();
@@ -384,5 +396,140 @@ mod tests {
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect();
         assert_eq!(text, ["efgh", "ij "]);
+    }
+
+    /// The composer with a long, wide and multi-line body, the list of
+    /// several comments, and a pick: each drawn at every size.
+    fn each_popup() -> Vec<(&'static str, AppState)> {
+        let long = format!("{} 日本語の長い行 😀\tend\nsecond", "word ".repeat(40));
+        let mut composer = commenting();
+        type_char(&mut composer, 'a');
+        press(&mut composer, KeyCode::Enter);
+        for c in long.chars() {
+            let key = match c {
+                '\n' => KeyCode::Enter,
+                '\t' => KeyCode::Tab,
+                c => KeyCode::Char(c),
+            };
+            press(&mut composer, key);
+        }
+        let mut list = with_review(PendingReview {
+            comments: (1..=12).map(|id| comment(id, right(1), &long)).collect(),
+        });
+        type_char(&mut list, 'P');
+        let mut pick = commenting();
+        type_char(&mut pick, 'a');
+        type_char(&mut pick, 'v');
+        type_char(&mut pick, 'j');
+        vec![("composer", composer), ("list", list), ("pick", pick)]
+    }
+
+    #[test]
+    fn the_popups_and_the_pick_draw_at_80x24_and_on_tiny_terminals() {
+        for (what, mut state) in each_popup() {
+            for (width, height) in [(80, 24), (40, 12), (24, 8), (10, 4), (3, 2), (1, 1), (5, 0)] {
+                state.size = (width, height);
+                let buffer = draw_at(&state, width, height);
+                let rows = buffer_rows(&buffer);
+                assert!(
+                    rows.iter().all(|r| width_of(r) <= usize::from(width)),
+                    "{what} {width}x{height}: {rows:#?}"
+                );
+            }
+            // At 80x24 each one still shows what it is about.
+            state.size = (80, 24);
+            let rows = buffer_rows(&draw_at(&state, 80, 24));
+            let want = match what {
+                "composer" => "second",
+                "list" => "Pending review #12 · 12 comments · 1/12",
+                _ => "+fn new() {}",
+            };
+            assert!(rows.iter().any(|r| r.contains(want)), "{what}: {rows:#?}");
+        }
+        // On a small panel the composer still has a row of text.
+        let (_, mut composer) = each_popup().remove(0);
+        composer.size = (40, 12);
+        let rows = buffer_rows(&draw_at(&composer, 40, 12));
+        assert!(rows.iter().any(|r| r.contains("second")), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_list_says_where_the_cursor_is_once_it_runs_past_the_box() {
+        let (_, mut list) = each_popup().remove(1);
+        list.size = (80, 24);
+        for _ in 0..11 {
+            type_char(&mut list, 'j');
+        }
+        let rows = buffer_rows(&draw_at(&list, 80, 24));
+        assert!(
+            rows.iter().any(|r| r.contains("12 comments · 12/12")),
+            "{rows:#?}"
+        );
+        // A list that fits says only its count.
+        let mut short = with_review(PendingReview {
+            comments: vec![comment(1, right(1), "one")],
+        });
+        type_char(&mut short, 'P');
+        let rows = buffer_rows(&draw(&short));
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("Pending review #12 · 1 comment ")),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn a_search_match_inside_the_pick_stays_marked() {
+        let mut state = commenting();
+        state.diff.set_search("fmt");
+        type_char(&mut state, 'a');
+        type_char(&mut state, 'v');
+        type_char(&mut state, 'j');
+        let buffer = draw(&state);
+        let rows = buffer_rows(&buffer);
+        let y = row_with(&rows, " use std::fmt;");
+        let col = rows[y][..rows[y].find("fmt;").unwrap()].chars().count();
+        let cell = &buffer[(col as u16, y as u16)];
+        // Reversed for the pick, and still bold and underlined for the match.
+        assert!(cell.modifier.contains(Modifier::REVERSED));
+        assert!(
+            cell.modifier
+                .contains(Modifier::BOLD | Modifier::UNDERLINED)
+        );
+    }
+
+    #[test]
+    fn wide_characters_and_tabs_wrap_with_the_cursor_on_its_cell() {
+        let text = |lines: &[Line<'static>]| -> Vec<String> {
+            lines
+                .iter()
+                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+                .collect()
+        };
+        let mut editor = CommentEditor::from_text("a😀b");
+        // A wide char that would cross the edge goes to the next row.
+        assert_eq!(text(&editor_lines(&editor, 2, 5)), ["a", "😀", "b "]);
+        assert_eq!(text(&editor_lines(&editor, 3, 5)), ["a😀", "b "]);
+        // The cursor on the wide char reverses that cell.
+        editor.edit(crate::keymap::KeyPress::new(
+            KeyCode::Left,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        editor.edit(crate::keymap::KeyPress::new(
+            KeyCode::Left,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        let lines = editor_lines(&editor, 3, 5);
+        let cursor: Vec<&str> = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .filter(|s| s.style.add_modifier.contains(Modifier::REVERSED))
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(cursor, ["😀"]);
+        // A tab is drawn as spaces, its cell the cursor's when on it.
+        let tab = CommentEditor::from_text("\tx");
+        assert_eq!(text(&editor_lines(&tab, 10, 5)), ["    x "]);
+        assert_eq!(text(&editor_lines(&tab, 4, 5)), ["    ", "x "]);
     }
 }

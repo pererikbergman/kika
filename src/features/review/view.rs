@@ -1274,13 +1274,19 @@ mod tests {
     #[test]
     fn the_file_list_title_never_overflows_its_border() {
         let mut state = in_commit_view();
-        for width in 0..70 {
-            let title = files_title(state.review.files.as_ref().unwrap(), 0, width);
-            assert!(
-                width_of(&title) <= width.saturating_sub(2) || width < 4,
-                "{width}: {title:?}"
-            );
+        for pending in [0, 1, 500] {
+            for width in 0..70 {
+                let title = files_title(state.review.files.as_ref().unwrap(), pending, width);
+                assert!(
+                    width_of(&title) <= width.saturating_sub(2) || width < 4,
+                    "{pending} {width}: {title:?}"
+                );
+            }
         }
+        // The count gives way only to the short view label.
+        let files = state.review.files.as_ref().unwrap();
+        assert!(files_title(files, 3, 70).contains("· 3 pending"));
+        assert!(files_title(files, 3, 26).contains("3 pending"));
         for (width, height) in [(80, 24), (40, 10), (20, 5), (10, 3), (3, 2), (1, 1)] {
             state.size = (width, height);
             draw(&state, width, height);

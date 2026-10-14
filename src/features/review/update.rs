@@ -88,7 +88,9 @@ pub(crate) fn update(state: &mut AppState, intent: ReviewIntent) -> Vec<Effect> 
         ReviewIntent::AskDeletePending => state.ask_delete_pending(),
         ReviewIntent::DeletePending(id) => return state.delete_pending(id),
         ReviewIntent::ClosePendingList => state.close_pending_list(),
-        ReviewIntent::PendingLoaded { tag, result } => state.pending_loaded(tag, result),
+        ReviewIntent::PendingLoaded { tag, result, file } => {
+            state.pending_loaded(tag, result, file)
+        }
         ReviewIntent::PendingSaved { tag, result } => return state.pending_saved(tag, result),
     }
     Vec::new()

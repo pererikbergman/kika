@@ -3,6 +3,8 @@
 //! (see `docs/adr/0002-nested-intents.md`).
 
 use super::{CommitsHere, PrCommit, PrFileRow};
+use std::path::PathBuf;
+
 use crate::effect::Tag;
 use crate::intent::Scroll;
 use crate::keymap::KeyPress;
@@ -160,10 +162,11 @@ pub(crate) enum ReviewIntent {
     DeletePending(u64),
     ClosePendingList,
     /// The stored pending review, `None` when there is none, or why it
-    /// was not read.
+    /// was not read; `file` is where it is kept, when there is a store.
     PendingLoaded {
         tag: Tag,
         result: Result<Option<PendingReview>, PendingError>,
+        file: Option<PathBuf>,
     },
     /// The pending review was written, or why not.
     PendingSaved {

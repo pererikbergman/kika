@@ -6,7 +6,7 @@
 //! reaches the network.
 
 use std::ffi::OsString;
-use std::fs::{self, File};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -282,7 +282,18 @@ pub fn read(dir: &Path, key: &PendingKey) -> Result<Option<PendingReview>, Pendi
     if !meta.is_file() {
         return Err(PendingError::Unreadable("it is not a plain file"));
     }
-    let file = File::open(&path).map_err(|_| PendingError::Unreadable("it cannot be opened"))?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    // A link swapped in after the check is not followed, and a FIFO does
+    // not block the read.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(&path)
+        .map_err(|_| PendingError::Unreadable("it cannot be opened"))?;
     // It may have been swapped since the check; ask the open handle.
     if !file.metadata().is_ok_and(|m| m.is_file()) {
         return Err(PendingError::Unreadable("it is not a plain file"));
@@ -642,6 +653,21 @@ mod tests {
                 .file_type()
                 .is_symlink()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_in_the_files_place_is_refused_without_blocking() {
+        use std::os::unix::ffi::OsStrExt;
+        let tmp = TempDir::new("pending");
+        let path = std::ffi::CString::new(file_of(tmp.path()).as_os_str().as_bytes()).unwrap();
+        // SAFETY: `path` is a valid NUL-terminated path for the call.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        assert!(matches!(
+            read(tmp.path(), &key(12, "/r")),
+            Err(PendingError::Unreadable(_))
+        ));
+        assert!(write(tmp.path(), &key(12, "/r"), &review()).is_err());
     }
 
     fn env<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {

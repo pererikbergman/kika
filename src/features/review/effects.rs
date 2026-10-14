@@ -332,6 +332,7 @@ pub(crate) fn load_pending(
     tag: Tag,
     key: PendingKey,
 ) {
+    let file = store.as_ref().map(|dir| dir.join(key.file_name()));
     background::run(
         tx,
         move || match store {
@@ -339,7 +340,7 @@ pub(crate) fn load_pending(
             None => Ok(None),
         },
         |_| Err(PendingError::Unreadable("reading it crashed")),
-        move |result| AppIntent::Review(ReviewIntent::PendingLoaded { tag, result }),
+        move |result| AppIntent::Review(ReviewIntent::PendingLoaded { tag, result, file }),
     );
 }
 
