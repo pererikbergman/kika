@@ -7,6 +7,7 @@ use super::merge::merge_disabled;
 use super::state::{
     open_check_disabled, open_pr_disabled, queue_keys_disabled, refresh_review_disabled,
 };
+use super::viewed::review_viewed_disabled;
 use crate::confirm_question::Answer;
 use crate::features::review::ReviewIntent;
 use crate::intent::{AppIntent, Scroll};
@@ -151,6 +152,17 @@ pub(crate) static REVIEW_KEYS: &[Binding] = &[
         label: "list/diff",
         bar: true,
         disabled: never,
+    },
+    // Reaches GitHub, so a repository file may not move it.
+    Binding {
+        id: "review_files.viewed",
+        keys: &[KeyPattern::exact(KeyCode::Char('v'), NONE)],
+        scope: KeyScope::ReviewFiles,
+        intent: AppIntent::Review(ReviewIntent::ToggleViewed),
+        description: "Mark the selected file viewed on GitHub, or not viewed if it is",
+        label: "viewed",
+        bar: true,
+        disabled: review_viewed_disabled,
     },
     Binding {
         id: "review_diff.down",

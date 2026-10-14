@@ -450,11 +450,21 @@ pull request, then to the queue, then to the workspace.
   Kika says so and leaves it to you. A password or passphrase is asked as
   for a fetch from the workspace.
 - Viewed marks are read for the first 100 files; the rest, and a file
-  whose name is not UTF-8, show `?`. Marking files viewed is not done here.
+  whose name is not UTF-8, show `?`.
+- `v` on the files screen marks the selected file viewed on GitHub, or
+  not viewed when it is already. It is one
+  `gh api graphql --include --hostname <host> --input -` call, shown in
+  the Command log; the pull request's id and the file's path travel on its
+  input. It is asked only when you press `v`, only on an allowed `github`
+  host, and not while that host is rate limited. GitHub keeps the mark per
+  file for the whole pull request. While GitHub has not answered yet, the
+  file's mark shows a dim `…`. A file past the first 100 can still be
+  marked; its `?` turns to the mark once GitHub takes it. A file whose
+  name is not UTF-8 cannot be marked.
 
 - GitHub is asked only when you enter review mode, open a pull request,
-  press `r` or answer `y` to a merge; nothing refreshes by itself, and
-  nothing is cached on disk.
+  press `r` or answer `y` to a merge, or press `v` on the files screen;
+  nothing refreshes by itself, and nothing is cached on disk.
 - Only a `github` host is asked. With none, or with the remote on another
   host, review mode says so and asks nobody; a rate-limited host is not
   asked until its limit resets.
@@ -1776,6 +1786,7 @@ diff, `esc` goes back to the pull request.
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
 | `review_files.focus` | `tab` | Move the keys between the file list and the diff | |
+| `review_files.viewed` | `v` | Mark the selected file viewed on GitHub, or not viewed if it is | locked |
 | `review_diff.down` | `j`, `down` | Scroll the diff down a line | |
 | `review_diff.up` | `k`, `up` | Scroll the diff up a line | |
 | `review_diff.page_down` | `pgdn` | Scroll the diff down a page | |

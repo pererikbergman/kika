@@ -331,6 +331,18 @@ pub enum Effect {
         method: MergeMethod,
         head_oid: CommitId,
     },
+    /// Mark `path` of pull request `number` (GitHub's `node_id`) viewed or
+    /// not through `gh`, on the configured `host`; always answered by one
+    /// `ReviewIntent::ViewedSet`.
+    SetFileViewed {
+        tag: Tag,
+        host: ForgeHost,
+        repo: ForgeRepo,
+        node_id: String,
+        number: u64,
+        path: String,
+        viewed: bool,
+    },
     /// Read the review queues of the remote's repository: `repo` when an
     /// earlier load found it, else the remote is read and matched against
     /// `hosts`. A host in `limited` is not asked before its second has
@@ -1142,6 +1154,25 @@ impl Runtime {
                 number,
                 method,
                 head_oid,
+            ),
+            Effect::SetFileViewed {
+                tag,
+                host,
+                repo,
+                node_id,
+                number,
+                path,
+                viewed,
+            } => review::effects::set_file_viewed(
+                self.forge.clone(),
+                tx,
+                tag,
+                host,
+                repo,
+                node_id,
+                number,
+                path,
+                viewed,
             ),
             Effect::AnswerCredential(answer) => {
                 if let Some(answers) = lock(&self.credential).as_ref() {

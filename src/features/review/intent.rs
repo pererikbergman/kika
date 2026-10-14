@@ -5,7 +5,7 @@
 use super::{CommitsHere, PrFileRow};
 use crate::effect::Tag;
 use kika_forge::review::{PrDetail, Queues, ReviewError};
-use kika_forge::{CreateError, ForgeRepo};
+use kika_forge::{CreateError, ForgeHost, ForgeRepo};
 use kika_git::commit_files::CommitRange;
 
 // `PrDetailLoaded` carries the pull request as it did in `AppIntent`,
@@ -72,6 +72,19 @@ pub(crate) enum ReviewIntent {
     HeadFetched {
         tag: Tag,
         result: Result<(), String>,
+    },
+    /// Mark the selected file viewed on GitHub, or not viewed if it is.
+    ToggleViewed,
+    /// GitHub answered the viewed mark of `path` in pull request `number`,
+    /// or why not.
+    ViewedSet {
+        tag: Tag,
+        /// The host the mark went to, where a rate limit is recorded.
+        host: ForgeHost,
+        number: u64,
+        path: String,
+        viewed: bool,
+        result: Result<(), CreateError>,
     },
     /// The merge base to head range and its changed files, or why not.
     FilesLoaded {

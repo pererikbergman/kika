@@ -215,6 +215,9 @@ pub enum ViewedState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrDetail {
     pub number: u64,
+    /// GitHub's id for the pull request, which marking a file viewed
+    /// needs. Kept only when [`node_id_ok`]; never drawn.
+    pub node_id: Option<String>,
     pub title: String,
     pub author: String,
     /// Open, merged or closed; a draft is `Open` with `draft` set.
@@ -369,7 +372,7 @@ fn queues_body(repo: &ForgeRepo) -> Vec<u8> {
 const DETAIL_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!)\
 {repository(owner:$owner,name:$name){mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed \
 pullRequest(number:$number)\
-{number title body state isDraft mergeable mergeStateStatus baseRefName headRefName headRefOid baseRefOid \
+{id number title body state isDraft mergeable mergeStateStatus baseRefName headRefName headRefOid baseRefOid \
 author{login} files(first:100){totalCount nodes{path viewerViewedState}} \
 labels(first:20){nodes{name}} \
 reviewRequests(first:20){nodes{requestedReviewer{...on User{login} ...on Bot{login} \
@@ -480,6 +483,7 @@ struct DetailRepo {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PrNode {
+    id: Option<String>,
     number: u64,
     title: Option<String>,
     body: Option<String>,
@@ -692,6 +696,7 @@ fn read_detail(body: &[u8]) -> Result<Option<PrDetail>, ForgeStatus> {
             .and_then(CommitId::parse)
     };
     Ok(Some(PrDetail {
+        node_id: pr.id.filter(|id| node_id_ok(id)),
         number: pr.number,
         title: line(pr.title.as_deref().unwrap_or_default()),
         author: author_of(pr.author),
@@ -712,6 +717,15 @@ fn read_detail(body: &[u8]) -> Result<Option<PrDetail>, ForgeStatus> {
         viewed,
         files_total,
     }))
+}
+
+/// Whether `id` is fit to send back as a GraphQL node id: 1 to 128 ASCII
+/// letters, digits, `_`, `=` or `-`. Anything else is not one GitHub makes.
+pub fn node_id_ok(id: &str) -> bool {
+    (1..=128).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'=' | b'-'))
 }
 
 /// A check run or a commit status as one check; anything else is none.
@@ -1094,7 +1108,13 @@ pub(crate) mod tests {
             .unwrap()
             .to_string();
         let cap = format!("files(first:{MAX_FILES})");
-        for field in ["headRefOid", "baseRefOid", "viewerViewedState", &cap] {
+        for field in [
+            "{id ",
+            "headRefOid",
+            "baseRefOid",
+            "viewerViewedState",
+            &cap,
+        ] {
             assert!(query.contains(field), "{field} not asked: {query}");
         }
         assert_eq!(pr.head_oid, CommitId::parse(&"1".repeat(40)));
@@ -1182,6 +1202,37 @@ pub(crate) mod tests {
         assert_eq!(numbers(queues.get(QueueKind::Assigned)), [7]);
         assert_eq!(numbers(queues.get(QueueKind::ReviewRequested)), [15]);
         assert_eq!(numbers(queues.get(QueueKind::AllOpen)), [15, 9, 7]);
+    }
+
+    #[test]
+    fn the_detail_keeps_its_node_id_only_when_it_is_a_plain_token() {
+        let runner = FakeGh::new().reply(answer(DETAIL));
+        let pr = detail(&runner, 42).unwrap().unwrap();
+        let query = sent(&runner.calls()[0])["query"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(query.contains("pullRequest(number:$number){id "), "{query}");
+        assert_eq!(pr.node_id.as_deref(), Some("PR_kwDOA1"));
+
+        let longest = format!("PR_{}", "a".repeat(125));
+        let runner = FakeGh::new().reply(answer(&DETAIL.replace("PR_kwDOA1", &longest)));
+        assert_eq!(detail(&runner, 42).unwrap().unwrap().node_id, Some(longest));
+        let too_long = format!("PR_{}", "a".repeat(126));
+        for bad in [
+            "PR kwDOA1",
+            too_long.as_str(),
+            "",
+            "PR_\\u001b[31m",
+            "PR/../x",
+        ] {
+            let runner = FakeGh::new().reply(answer(&DETAIL.replace("PR_kwDOA1", bad)));
+            let pr = detail(&runner, 42).unwrap().unwrap();
+            assert_eq!(pr.node_id, None, "{bad:?}");
+        }
+        let gone = DETAIL.replace("\"id\":\"PR_kwDOA1\",", "");
+        let runner = FakeGh::new().reply(answer(&gone));
+        assert_eq!(detail(&runner, 42).unwrap().unwrap().node_id, None);
     }
 
     #[test]

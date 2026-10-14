@@ -14,7 +14,7 @@ use crate::popup::{MergePrConfirm, Popup};
 use kika_forge::merge::MergeMethod;
 use kika_forge::remote::{allowed, matches};
 use kika_forge::review::{CheckStatus, PrDetail, PrSummary, QueueKind, Queues, ReviewError};
-use kika_forge::{ForgeHost, ForgeRepo, ForgeStatus};
+use kika_forge::{ForgeHost, ForgeRepo, ForgeStatus, REFRESH_LIMITED};
 use kika_git::commit_files::CommitId;
 use ratatui::text::Line;
 
@@ -384,6 +384,30 @@ impl AppState {
         self.review.body = None;
         self.review.detail_scroll = 0;
         self.load_review_detail(number)
+    }
+
+    /// The host and repository a change made on GitHub (a merge, a viewed
+    /// mark) goes to, or why it may not: the repository review mode is on,
+    /// on a configured host whose `[forge.allow]` names it and that is not
+    /// rate limited now.
+    pub(super) fn review_forge_target(&self) -> Result<(ForgeHost, ForgeRepo), Reason> {
+        let repo = self.review_repo().ok_or(NO_FORGE)?;
+        // A repository `[forge.allow]` leaves out is never asked about.
+        let host = allowed(&repo, &self.forge.hosts).ok_or(NO_FORGE)?.clone();
+        self.review_host_allowed(&host)?;
+        Ok((host, repo))
+    }
+
+    /// `host` may be asked now: it is configured and not rate limited.
+    pub(super) fn review_host_allowed(&self, host: &ForgeHost) -> Result<(), Reason> {
+        if !self.forge.hosts.contains(host) {
+            return Err(NO_FORGE.into());
+        }
+        let limited = self.forge.limited.get(host.as_str());
+        if limited.is_some_and(|until| *until > self.now) {
+            return Err(REFRESH_LIMITED.into());
+        }
+        Ok(())
     }
 
     /// Whether an answer under `tag` is the one `fetch` waits for.
