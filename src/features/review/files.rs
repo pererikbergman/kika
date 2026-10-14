@@ -53,6 +53,14 @@ pub struct PrFile {
     pub viewed: Option<ViewedState>,
 }
 
+/// A viewed mark GitHub is asked for, kept until it answers. One at a time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewedMark {
+    pub seq: u64,
+    pub path: String,
+    pub viewed: bool,
+}
+
 /// The files screen of pull request `number`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrFiles {
@@ -70,6 +78,8 @@ pub struct PrFiles {
     pub fetched: bool,
     /// The stage's load in flight; any other answer is dropped.
     pub seq: Option<u64>,
+    /// The viewed mark in flight on GitHub, if any.
+    pub marking: Option<ViewedMark>,
 }
 
 impl PrFiles {
@@ -85,6 +95,7 @@ impl PrFiles {
             stage: FilesStage::Checking,
             fetched: false,
             seq: Some(seq),
+            marking: None,
         }
     }
 
@@ -128,7 +139,7 @@ fn with_viewed(rows: Vec<PrFileRow>, viewed: &[(String, ViewedState)]) -> Vec<Pr
         .collect()
 }
 
-fn files_screen(state: &AppState) -> Option<&PrFiles> {
+pub(super) fn files_screen(state: &AppState) -> Option<&PrFiles> {
     match state.review.screen {
         ReviewScreen::Files(_) => state.review.files.as_ref(),
         _ => None,

@@ -1,11 +1,12 @@
 //! Review mode: the pull-request queues and the open pull request's detail
 //! (`state.rs`), its check links, its changed files and their diff
-//! (`files.rs`), merging it from the detail (`merge.rs`), the markdown
-//! renderer for its body (`markdown.rs`), and the local git reads behind
-//! the files screen (`git.rs`). The feature also owns its key bindings
-//! (`keys.rs`), its screen (`view.rs`) and the I/O behind
-//! `LoadReviewQueues`, `LoadPrDetail`, `CheckReviewCommits`,
-//! `FetchReviewCommits`, `LoadReviewFiles` and `MergePullRequest`
+//! (`files.rs`), marking a file viewed on GitHub (`viewed.rs`), merging it
+//! from the detail (`merge.rs`), the markdown renderer for its body
+//! (`markdown.rs`), and the local git reads behind the files screen
+//! (`git.rs`). The feature also owns its key bindings (`keys.rs`), its
+//! screen (`view.rs`) and the I/O behind `LoadReviewQueues`,
+//! `LoadPrDetail`, `CheckReviewCommits`, `FetchReviewCommits`,
+//! `LoadReviewFiles`, `SetFileViewed` and `MergePullRequest`
 //! (`effects.rs`). The credential plumbing that `FetchReviewCommits`
 //! shares with sync and the merge question popup stay in core; the forge
 //! client is the `kika_forge` crate.
@@ -13,8 +14,8 @@
 //! Its intents are nested (ADR-0002): core wraps [`ReviewIntent`] in
 //! `AppIntent::Review`, and its one `update` arm calls [`update`] here.
 //! `update.rs` holds only that function; it dispatches to the handlers in
-//! `state.rs`, `files.rs` and `merge.rs`. The review guards on core arms
-//! (`ScrollDiff`, `OpenSearch`, `DiffEscape`) stay in core.
+//! `state.rs`, `files.rs`, `viewed.rs` and `merge.rs`. The review guards
+//! on core arms (`ScrollDiff`, `OpenSearch`, `DiffEscape`) stay in core.
 //!
 //! Its `pub(crate)` API:
 //! - the intent enum [`ReviewIntent`] and the free function [`update`];
@@ -23,12 +24,12 @@
 //!   carry;
 //! - the guards `queue_keys_disabled` and `review_diff_focused`, which core
 //!   focus uses, and those in `keys.rs`;
-//! - the handlers in `state.rs`, `files.rs` and `merge.rs` that `update`
-//!   calls, including the `review_files_shown` guard;
+//! - the handlers in `state.rs`, `files.rs`, `viewed.rs` and `merge.rs`
+//!   that `update` calls, including the `review_files_shown` guard;
 //! - the chunks `keys::{REVIEW_KEYS, REVIEW_MERGE_CONFIRM}`;
 //! - `view::render`;
 //! - `effects::{load_queues, load_detail, check_commits, fetch_commits,
-//!   load_files, merge}`.
+//!   load_files, set_file_viewed, merge}`.
 //!
 //! Kept cross-feature reads and calls:
 //! - `merge.rs` reloads the badges after a merge by asking core
@@ -48,6 +49,7 @@ mod merge;
 mod state;
 mod update;
 pub(crate) mod view;
+mod viewed;
 
 pub(crate) use files::review_diff_focused;
 pub(crate) use git::{CommitsHere, PrFileRow};

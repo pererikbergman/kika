@@ -924,6 +924,7 @@ mod tests {
             stage: FilesStage::Ready,
             fetched: false,
             seq: None,
+            marking: None,
         });
         state
     }

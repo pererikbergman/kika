@@ -73,6 +73,17 @@ pub(crate) enum ReviewIntent {
         tag: Tag,
         result: Result<(), String>,
     },
+    /// Mark the selected file viewed on GitHub, or not viewed if it is.
+    ToggleViewed,
+    /// GitHub answered the viewed mark of `path` in pull request `number`,
+    /// or why not.
+    ViewedSet {
+        tag: Tag,
+        number: u64,
+        path: String,
+        viewed: bool,
+        result: Result<(), CreateError>,
+    },
     /// The merge base to head range and its changed files, or why not.
     FilesLoaded {
         tag: Tag,

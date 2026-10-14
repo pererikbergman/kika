@@ -200,6 +200,45 @@ pub(crate) fn merge(
     );
 }
 
+/// Mark `path` of pull request `number` viewed or not through `gh`;
+/// always answered by one `ReviewIntent::ViewedSet`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn set_file_viewed(
+    forge: Option<ForgeContext>,
+    tx: UnboundedSender<AppIntent>,
+    tag: Tag,
+    host: ForgeHost,
+    repo: ForgeRepo,
+    node_id: String,
+    number: u64,
+    path: String,
+    viewed: bool,
+) {
+    let answer = move |path: String, result| {
+        AppIntent::Review(ReviewIntent::ViewedSet {
+            tag,
+            number,
+            path,
+            viewed,
+            result,
+        })
+    };
+    // No forge client: nothing may reach the network. The client itself
+    // refuses a repository `[forge.allow]` leaves out.
+    let Some(forge) = forge else {
+        let _ = tx.send(answer(path, Err(CreateError::Status(ForgeStatus::Failed))));
+        return;
+    };
+    let sent = path.clone();
+    background::run(
+        tx,
+        move || forge.set_file_viewed(&host, &repo, &node_id, &sent, viewed),
+        // A panic still answers, or the mark would stay in flight.
+        |_| Err(CreateError::Status(ForgeStatus::Failed)),
+        move |result| answer(path, result),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -374,5 +413,74 @@ mod tests {
         );
         git.assert_done();
         assert_eq!(gh.calls(), []);
+    }
+
+    #[tokio::test]
+    async fn a_viewed_mark_answers_once_and_reaches_gh_only_through_the_client() {
+        use kika_forge::allow::AllowRule;
+        use kika_forge::github::{FakeGh, GhCall, answer};
+
+        let git = Arc::new(FakeRunner::new());
+        let gh = Arc::new(FakeGh::new().reply(answer(
+            "HTTP/2.0 200 OK\r\n\r\n{\"data\":{\"unmarkFileAsViewed\":{\"clientMutationId\":null}}}",
+        )));
+        let client = || {
+            Some(ForgeContext {
+                gh: gh.clone(),
+                sink: CommandSink::new(),
+                cache_dir: None,
+            })
+        };
+        let mark = |host: ForgeHost| Effect::SetFileViewed {
+            tag: forge_tag(),
+            host,
+            repo: ForgeRepo {
+                host: "github.com".into(),
+                owner: "acme".into(),
+                name: "widgets".into(),
+            },
+            node_id: "PR_kwDOA1".into(),
+            number: 42,
+            path: "src/a.rs".into(),
+            viewed: false,
+        };
+        let answered = |result| {
+            Some(AppIntent::Review(ReviewIntent::ViewedSet {
+                tag: forge_tag(),
+                number: 42,
+                path: "src/a.rs".into(),
+                viewed: false,
+                result,
+            }))
+        };
+        let github = ForgeHost::parse("github.com").unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        Runtime::new(git.clone(), tx)
+            .with_forge(client())
+            .spawn(mark(github.clone()));
+        assert_eq!(rx.recv().await, answered(Ok(())));
+        let [call] = gh.calls().try_into().unwrap();
+        let GhCall::Graphql { body } = &call.kind else {
+            panic!("{call:?}");
+        };
+        let sent: serde_json::Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(sent["variables"]["path"], "src/a.rs");
+
+        // Without a forge client, or for a repository `[forge.allow]`
+        // leaves out, nothing is asked.
+        let failed = || answered(Err(CreateError::Status(ForgeStatus::Failed)));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        Runtime::new(git.clone(), tx).spawn(mark(github));
+        assert_eq!(rx.recv().await, failed());
+        let left_out = ForgeHost::parse("github.com")
+            .unwrap()
+            .with_allow(vec![AllowRule::parse("other").unwrap()]);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        Runtime::new(git.clone(), tx)
+            .with_forge(client())
+            .spawn(mark(left_out));
+        assert_eq!(rx.recv().await, failed());
+        assert_eq!(gh.calls().len(), 1);
+        git.assert_done();
     }
 }
