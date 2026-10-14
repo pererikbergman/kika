@@ -337,10 +337,12 @@ mod tests {
 
     use super::*;
     use crate::features::diff::renderers::external_diff::RendererKind;
+    #[cfg(unix)]
     use crate::test_support::{STANDARD_ENV, env_list};
     #[cfg(unix)]
     use kika_git::fake::fail;
     use kika_git::fake::{FakeRunner, TempDir, ok};
+    #[cfg(unix)]
     use kika_git::runner::EnvProfile;
 
     fn tool(argv: &[&str]) -> ExternalRenderer {
