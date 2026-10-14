@@ -483,12 +483,18 @@ pull request, then to the queue, then to the workspace.
   on, old or new side, with its author, time and whether it is resolved;
   this is in the whole pull request view only, and a commit's view shows
   the file's threads above its diff as "on the whole pull request".
-  Resolved threads are folded to one line. Outdated threads show at the
-  top of the file with the lines they were written on, as do comments on
-  the whole file and threads whose line is not in the diff. `]` and `[`
-  jump to the next and previous unresolved thread, across the files; they
-  stop at the first and last. At most 100 threads, 50 comments in each,
-  and 200 conversation items (100 comments and 100 reviews) are read.
+  Resolved threads are folded to one line; for now their text can be
+  read only on GitHub. Outdated threads show at the top of the file with
+  the lines they were written on, as do comments on the whole file and
+  threads whose line is not in the diff; that block takes at most half the
+  diff and counts the threads it has no room for. `]` and `[` jump to the
+  next and previous unresolved thread, across the files; they stop at the
+  first and last, and the thread jumped to is drawn first. The diff's
+  title says `threads loading…`, `threads unavailable` (go back with
+  `esc` and press `r` to try again), how many are unresolved, or
+  `thread 2/5` after a jump; a `+` there means GitHub has more threads
+  than were read. At most 100 threads, 50 comments in each, and 200
+  conversation items (100 comments and 100 reviews) are read.
 
 - GitHub is asked only when you enter review mode, open a pull request
   (which reads its viewed marks in up to 10 calls), press `r` or answer

@@ -12,7 +12,7 @@ use super::files::{FilesFocus, FilesStage, PrFile, PrFiles, ReviewView};
 use super::git::FileCounts;
 use super::markdown;
 use super::state::{NO_FORGE, ReviewProblem, ReviewScreen, ReviewState};
-use super::threads::ThreadScope;
+use super::threads::{ThreadScope, thread_note};
 use super::threads_view::thread_diff_body;
 use crate::diff_pane_view::{diff_pane_body, diff_position, found_note};
 use crate::model::AppState;
@@ -264,8 +264,14 @@ fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rec
     frame.render_widget(Paragraph::new(file_lines(files, list_inner)), list_inner);
 
     let stream = &state.diff;
+    // Without it, threads still loading or not read look like none.
+    let threads = if files.stage == FilesStage::Ready {
+        thread_note(state)
+    } else {
+        String::new()
+    };
     let tail = format!(
-        "{}{}",
+        "{}{}{threads}",
         diff_position(stream),
         found_note(stream.search.as_ref(), !stream.done)
     );
@@ -690,7 +696,7 @@ mod tests {
         let rows = draw(&state, 80, 30);
         let threads = rows
             .iter()
-            .position(|r| r.contains("Threads: 2 unresolved of 5 · 3 comments"))
+            .position(|r| r.contains("Threads: 2 unresolved of 5 · 3 conversation comments"))
             .unwrap_or_else(|| panic!("{rows:#?}"));
         // Right after the reviewers, which wrap to two lines here.
         assert!(rows[threads - 2].contains("Reviewers: "), "{rows:#?}");
@@ -707,7 +713,7 @@ mod tests {
         assert!(
             contains(
                 &rows,
-                "Threads: could not be read (No access to the repository with gh's login)"
+                "Threads: could not be read (No access to the repository with gh's login), r to"
             ),
             "{rows:#?}"
         );

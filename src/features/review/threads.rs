@@ -24,6 +24,7 @@ const NOT_READY: &str = "Open the files first";
 const THREADS_LOADING: &str = "Review threads are still loading";
 const THREADS_FAILED: &str = "Review threads could not be read";
 const NO_THREADS: &str = "No unresolved review threads";
+const NOT_LOADED: &str = "Review threads are not loaded";
 const NO_NEXT: &str = "No unresolved thread after this one";
 const NO_PREV: &str = "No unresolved thread before this one";
 
@@ -171,8 +172,37 @@ fn ready_threads(state: &AppState) -> Result<(&PrFiles, &PrDiscussion), Reason> 
     if fetch.error.is_some() {
         return Err(THREADS_FAILED.into());
     }
-    let discussion = state.review.discussion.as_ref().ok_or(NO_THREADS)?;
+    let discussion = state.review.discussion.as_ref().ok_or(NOT_LOADED)?;
     Ok((files, discussion))
+}
+
+/// The diff title's word on the threads: loading, unavailable, the
+/// position of the one `]`/`[` went to, or how many are unresolved. `+`
+/// when GitHub has more than were read. Empty with nothing asked.
+pub(crate) fn thread_note(state: &AppState) -> String {
+    let fetch = &state.review.discussion_fetch;
+    if fetch.loading {
+        return " · threads loading…".into();
+    }
+    if fetch.error.is_some() {
+        return " · threads unavailable (esc, r to retry)".into();
+    }
+    let (Some(files), Some(discussion)) = (files_screen(state), &state.review.discussion) else {
+        return String::new();
+    };
+    let order = nav_order(files, &ThreadScope::of(files, discussion));
+    let cut = if discussion.threads_total > discussion.threads.len() as u64 {
+        "+"
+    } else {
+        ""
+    };
+    match files
+        .thread
+        .and_then(|t| order.iter().position(|&(_, x)| x == t))
+    {
+        Some(at) => format!(" · thread {}/{}{cut}", at + 1, order.len()),
+        None => format!(" · {}{cut} unresolved", order.len()),
+    }
 }
 
 /// Why `]` and `[` cannot step: the files are not shown and listed, the
@@ -846,7 +876,7 @@ pub(crate) mod tests {
         assert_eq!(thread_nav_disabled(&only_docs).as_deref(), Some(NO_THREADS));
         let mut none = files_with(&["src/cache.rs"], fixture_discussion());
         none.review.discussion = None;
-        assert_eq!(thread_nav_disabled(&none).as_deref(), Some(NO_THREADS));
+        assert_eq!(thread_nav_disabled(&none).as_deref(), Some(NOT_LOADED));
     }
 
     #[test]

@@ -58,14 +58,15 @@ pub fn thread_summary(review: &ReviewState) -> Option<String> {
     }
     if let Some(problem) = error {
         return Some(format!(
-            "Threads: could not be read ({})",
+            "Threads: could not be read ({}), r to try again",
             problem_text(*problem).0
         ));
     }
     let discussion = review.discussion.as_ref()?;
     let unresolved = discussion.threads.iter().filter(|t| !t.resolved).count();
+    // Issue comments and review bodies: what is said off the lines.
     Some(format!(
-        "Threads: {unresolved} unresolved of {} · {} comments",
+        "Threads: {unresolved} unresolved of {} · {} conversation comments",
         discussion.threads_total,
         discussion.conversation.len()
     ))
@@ -203,9 +204,37 @@ fn context_line(text: &str, width: usize) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Every row of one thread at `width`, stopping at `room` rows; `top` as
-/// for [`header`].
+/// Every row of one thread at `width`, at most `room` of them; `top` as
+/// for [`header`]. Each is set in a column, so it reads as a note on the
+/// row above. A thread cut for room ends in a row that says so.
 fn thread_rows(
+    thread: &ReviewThread,
+    top: Option<Placement>,
+    selected: bool,
+    width: usize,
+    room: usize,
+) -> Vec<Line<'static>> {
+    let mut out = whole_thread(thread, top, selected, width.saturating_sub(INDENT), room);
+    if out.len() > room {
+        out.truncate(room);
+        if room >= 2 {
+            out[room - 1] = Line::from(vec![bar(), Span::styled("… (thread continues)", dim())]);
+        }
+    }
+    out.into_iter()
+        .map(|line| {
+            let mut spans = vec![Span::raw(" ".repeat(INDENT))];
+            spans.extend(line.spans);
+            Line::from(spans).style(line.style)
+        })
+        .collect()
+}
+
+/// Columns a thread is set in from the pane's edge.
+const INDENT: usize = 1;
+
+/// [`thread_rows`] before the cut: built only a row past `room`.
+fn whole_thread(
     thread: &ReviewThread,
     top: Option<Placement>,
     selected: bool,
@@ -214,7 +243,7 @@ fn thread_rows(
 ) -> Vec<Line<'static>> {
     let outdated = top == Some(Placement::Outdated);
     let mut out = vec![header(thread, top, selected)];
-    // Folded to its header: the reader shows the rest.
+    // Folded to its header; for now its text is read on GitHub.
     if thread.resolved {
         return out;
     }
@@ -223,7 +252,7 @@ fn thread_rows(
     }
     let inner = width.saturating_sub(2).max(1);
     for comment in thread.comments.iter().take(INLINE_COMMENTS) {
-        if out.len() >= room {
+        if out.len() > room {
             return out;
         }
         out.push(Line::from(vec![
@@ -260,6 +289,61 @@ fn thread_rows(
     out
 }
 
+/// The threads above the diff, in at most `rows`. The one `]`/`[` went to
+/// comes first, with all the room it needs, so it is never below the
+/// fold. Otherwise, with a diff to show, the block takes at most half the
+/// rows. Threads it has no room for are counted on its last row.
+fn top_block(
+    threads: &FileThreads,
+    scope: &ThreadScope,
+    selected: Option<usize>,
+    rows: usize,
+    has_diff: bool,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut order = threads.top.clone();
+    let picked = selected.and_then(|s| order.iter().position(|&t| t == s));
+    if let Some(at) = picked {
+        let t = order.remove(at);
+        order.insert(0, t);
+    }
+    let budget = if picked.is_some() || !has_diff {
+        rows
+    } else {
+        (rows / 2).max(1)
+    };
+    let mut out = Vec::new();
+    for (k, &t) in order.iter().enumerate() {
+        let after = order.len() - k - 1;
+        if k > 0 && out.len() + 1 >= budget {
+            let left = order.len() - k;
+            let more = if left == 1 { "thread" } else { "threads" };
+            out.truncate(budget.saturating_sub(1));
+            out.push(Line::styled(
+                format!("… {left} more {more} above the diff"),
+                dim(),
+            ));
+            break;
+        }
+        let (Some(thread), Some(placement)) = (scope.discussion.threads.get(t), scope.placement(t))
+        else {
+            continue;
+        };
+        // Leave the last row for the count when more threads follow.
+        let room = budget
+            .saturating_sub(out.len() + usize::from(after > 0))
+            .max(1);
+        out.extend(thread_rows(
+            thread,
+            Some(placement),
+            selected == Some(t),
+            width,
+            room,
+        ));
+    }
+    out
+}
+
 /// The files screen's diff with `threads` drawn in, at `inner`'s size.
 /// `numbers` are [`kika_forge::anchor::row_numbers`] of the shown diff;
 /// `selected` is the thread `]`/`[` went to. An error or a slow load
@@ -281,23 +365,14 @@ pub fn thread_diff_body(
     let start = diff.scroll.min(diff.lines.len());
     // The block above the diff belongs to its top.
     if start == 0 {
-        for &t in &threads.top {
-            if out.len() >= rows {
-                break;
-            }
-            let (Some(thread), Some(placement)) = (discussion.threads.get(t), scope.placement(t))
-            else {
-                continue;
-            };
-            let room = rows - out.len();
-            out.extend(thread_rows(
-                thread,
-                Some(placement),
-                selected == Some(t),
-                width,
-                room,
-            ));
-        }
+        out = top_block(
+            threads,
+            scope,
+            selected,
+            rows,
+            !diff.lines.is_empty(),
+            width,
+        );
     }
     if diff.done && diff.lines.is_empty() && out.len() < rows {
         out.push(Line::raw("No diff"));
@@ -510,10 +585,11 @@ mod tests {
         let mut state = cache_shown(fixture_discussion());
         state.review.files.as_mut().unwrap().view =
             crate::features::review::files::ReviewView::Commit(0);
-        let rows = draw(&state, 100, 30);
+        state.size = (100, 40);
+        let rows = draw(&state, 100, 40);
         let first = row_with(&rows, "on the whole pull request (c) · alice");
         // Its lines are real ones of the whole pull request: they show.
-        let wide = draw(&state, 160, 30);
+        let wide = draw(&state, 160, 40);
         let header = row_with(&wide, "on the whole pull request (c) · alice");
         assert!(wide[header].contains("unresolved · line 3"), "{wide:#?}");
         let second = row_with(&rows, "on the whole pull request (c) · carol");
@@ -521,6 +597,123 @@ mod tests {
         assert!(first < second && second < header, "{rows:#?}");
         let line3 = row_with(&rows, " let cache = 1;");
         assert!(!rows[line3 + 1].contains('┌'), "{rows:#?}");
+    }
+
+    /// The fixture plus `n` unresolved outdated threads on cache.rs, each
+    /// by `author{i}`.
+    fn busy_top(n: usize) -> PrDiscussion {
+        let mut discussion = fixture_discussion();
+        for i in 0..n {
+            let mut t = discussion.threads[3].clone();
+            t.path = "src/cache.rs".into();
+            t.comments[0].author = format!("author{i}");
+            discussion.threads.push(t);
+        }
+        discussion
+    }
+
+    #[test]
+    fn a_busy_top_block_takes_half_the_pane_and_counts_the_rest() {
+        let state = cache_shown(busy_top(4));
+        let rows = draw(&state, 100, 30);
+        let note = row_with(&rows, "more threads above the diff");
+        assert!(rows[note].contains("… 2 more threads"), "{rows:#?}");
+        // At most half the pane's rows.
+        assert!(note - 2 < 27 / 2 + 1, "{rows:#?}");
+        // The diff still starts in the pane.
+        let header = row_with(&rows, "diff --git a/src/cache.rs");
+        assert_eq!(header, note + 1, "{rows:#?}");
+        // The cut thread says so rather than stopping mid-way.
+        assert!(
+            rows[..note]
+                .iter()
+                .any(|r| r.contains("… (thread continues)"))
+                || rows[note - 1].contains('└'),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn the_selected_top_thread_comes_first_with_its_comments() {
+        let mut state = cache_shown(busy_top(4));
+        // `]` to the last of them: thread 8.
+        state.review.files.as_mut().unwrap().thread = Some(8);
+        let rows = draw(&state, 100, 30);
+        let picked = row_with(&rows, "▶ outdated · was line 7 (new) · author3");
+        assert_eq!(picked, 2, "{rows:#?}");
+        assert!(rows[picked + 1].contains("│  context5"), "{rows:#?}");
+        let body = row_with(&rows, "│ This name was wrong.");
+        assert!(body > picked, "{rows:#?}");
+        // The others follow it.
+        assert!(row_with(&rows, "author0") > body, "{rows:#?}");
+    }
+
+    #[test]
+    fn a_thread_cut_by_the_pane_says_it_continues() {
+        let mut state = cache_shown(fixture_discussion());
+        state.size = (100, 14);
+        state.diff.scroll = 6;
+        let rows = draw(&state, 100, 14);
+        let header = row_with(&rows, "┌ alice");
+        // The pane's last row: above its border, the panel's and the bar.
+        let last = rows.len() - 4;
+        assert!(header < last, "{rows:#?}");
+        assert!(rows[last].contains("│ … (thread continues)"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_diff_title_says_whether_threads_loaded_and_where_the_step_is() {
+        let mut state = cache_shown(fixture_discussion());
+        let title = |state: &AppState| draw(state, 120, 30)[1].clone();
+        assert!(
+            title(&state).contains("· 2 unresolved"),
+            "{}",
+            title(&state)
+        );
+        crate::features::review::state::tests::type_char(&mut state, ']');
+        assert!(title(&state).contains("· thread 1/2"), "{}", title(&state));
+        let mut cut = state.clone();
+        cut.review.discussion.as_mut().unwrap().threads_total = 300;
+        assert!(title(&cut).contains("· thread 1/2+"), "{}", title(&cut));
+        state.review.discussion_fetch.loading = true;
+        assert!(
+            title(&state).contains("· threads loading…"),
+            "{}",
+            title(&state)
+        );
+        state.review.discussion_fetch.loading = false;
+        state.review.discussion_fetch.error = Some(
+            crate::features::review::state::ReviewProblem::Status(kika_forge::ForgeStatus::Offline),
+        );
+        assert!(
+            title(&state).contains("· threads unavailable (esc, r to retry)"),
+            "{}",
+            title(&state)
+        );
+    }
+
+    #[test]
+    fn line_threads_and_the_top_block_read_at_80_by_24_and_40_by_20() {
+        let mut discussion = fixture_discussion();
+        discussion.threads[3].path = "src/cache.rs".into();
+        let mut state = cache_shown(discussion);
+        for (w, h) in [(80u16, 24u16), (40, 20)] {
+            state.size = (w, h);
+            state.diff.scroll = 0;
+            let rows = draw(&state, w, h);
+            let top = row_with(&rows, "┌ outdated");
+            let header = row_with(&rows, "diff --git");
+            assert!(top < header, "{w}x{h}: {rows:#?}");
+            // Scrolled to the hunk, a line thread sits under its row.
+            state.diff.scroll = 4;
+            let rows = draw(&state, w, h);
+            assert!(!rows.iter().any(|r| r.contains("outdated")), "{rows:#?}");
+            let line3 = row_with(&rows, "let cache");
+            assert!(rows[line3 + 1].contains("┌ alice"), "{w}x{h}: {rows:#?}");
+            for row in &rows {
+                assert!(crate::view::width_of(row) <= usize::from(w), "{row:?}");
+            }
+        }
     }
 
     #[test]
@@ -616,13 +809,13 @@ mod tests {
             Some(ReviewProblem::Status(kika_forge::ForgeStatus::Offline));
         assert_eq!(
             thread_summary(&review).as_deref(),
-            Some("Threads: could not be read (GitHub could not be reached)")
+            Some("Threads: could not be read (GitHub could not be reached), r to try again")
         );
         review.discussion_fetch.error = None;
         review.discussion = Some(fixture_discussion());
         assert_eq!(
             thread_summary(&review).as_deref(),
-            Some("Threads: 2 unresolved of 5 · 3 comments")
+            Some("Threads: 2 unresolved of 5 · 3 conversation comments")
         );
     }
 }

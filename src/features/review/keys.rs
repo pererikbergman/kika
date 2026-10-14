@@ -194,7 +194,7 @@ pub(crate) static REVIEW_KEYS: &[Binding] = &[
         scope: KeyScope::ReviewFiles,
         intent: AppIntent::Review(ReviewIntent::PrevThread),
         description: "Go to the previous unresolved review thread",
-        label: "",
+        label: "prev thread",
         bar: false,
         disabled: thread_nav_disabled,
     },
