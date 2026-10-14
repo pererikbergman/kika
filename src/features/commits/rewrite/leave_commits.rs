@@ -75,7 +75,8 @@ impl AppState {
 
     /// Ask before leaving commits behind, or go on if there are none. A
     /// result for a `HEAD` that has since moved, for a user who has since
-    /// moved to another popup or input, or a failed read, runs nothing.
+    /// moved to another popup or input, one whose guard now refuses the
+    /// op, or a failed read, runs nothing.
     pub(crate) fn left_behind_checked(
         &mut self,
         tag: Tag,
@@ -97,6 +98,12 @@ impl AppState {
         }
         if self.popups != check.popups || self.key_focus() != check.focus {
             self.notice = Some("Not asked: focus moved; try again".into());
+            return vec![];
+        }
+        // A bisect or another operation may have started while the check
+        // ran; ask the opening key's guard again before anything opens or
+        // runs.
+        if self.confirm_refused(&op) {
             return vec![];
         }
         let left = match result {
@@ -145,18 +152,173 @@ mod tests {
     use crate::features::commits::rewrite::RewriteIntent;
     use crossterm::event::KeyCode;
 
+    use crate::bisect::RESET_FIRST;
     use crate::confirm_question::quit_question;
-    use crate::effect::Tag;
+    use crate::effect::{Effect, Tag};
     use crate::features::commits::{checkout_question, reset_hard_question};
     use crate::intent::AppIntent;
     use crate::keymap::KeyScope;
-    use crate::op::ResetMode;
+    use crate::model::AppState;
+    use crate::op::{GitOp, ResetMode};
     use crate::popup::{ErrorPopup, LeaveCommitsConfirm, Popup};
     use crate::test_support::{
         check_of, checked, cid, detached_on_commit, ids, moves, on_branch, on_commit, op_of, press,
-        press_char, reset_op,
+        press_char, reset_op, start_bisecting, start_merging,
     };
+    use kika_git::commit_files::CommitId;
+    use kika_git::repo_state::Operation;
     use kika_git::status::Head;
+
+    /// `detached_on_commit` after `intent`'s check, with `start` run on
+    /// the state before the check answers `result`; `HEAD` stays on `c0`.
+    fn answered_after(
+        intent: AppIntent,
+        start: impl FnOnce(&mut AppState),
+        result: Result<Vec<CommitId>, String>,
+    ) -> (AppState, Vec<Effect>, u32) {
+        let mut state = detached_on_commit();
+        let busy = state.busy_count();
+        let (tag, op) = check_of(&state.update(intent));
+        start(&mut state);
+        let effects = state.update(AppIntent::Commits(CommitsIntent::Rewrite(
+            RewriteIntent::LeftBehindChecked {
+                tag,
+                op,
+                head: cid("c0"),
+                result,
+            },
+        )));
+        (state, effects, busy)
+    }
+
+    /// `operation` started outside Kika, as git leaves it.
+    fn start_operation(operation: Operation) -> impl FnOnce(&mut AppState) {
+        move |state| match operation {
+            Operation::Bisect => start_bisecting(state),
+            Operation::Merge => start_merging(state),
+            operation => state.branch.as_mut().unwrap().in_progress.push(operation),
+        }
+    }
+
+    const OPERATIONS: [Operation; 4] = [
+        Operation::Rebase,
+        Operation::Merge,
+        Operation::CherryPick,
+        Operation::Revert,
+    ];
+
+    #[test]
+    fn a_bisect_started_during_the_check_refuses_every_move() {
+        for (intent, _) in moves() {
+            for result in [Ok(ids(2)), Ok(vec![])] {
+                let case = format!("{intent:?} {result:?}");
+                let (state, effects, busy) =
+                    answered_after(intent.clone(), start_bisecting, result);
+                assert_eq!(effects, vec![], "{case}");
+                assert_eq!(state.popups, [], "{case}");
+                assert_eq!(state.held_seq(), None, "{case}");
+                assert_eq!(state.busy_count(), busy, "{case}");
+                assert_eq!(state.notice, Some(RESET_FIRST.into()), "{case}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_operation_started_during_the_check_refuses_every_reset() {
+        for mode in [ResetMode::Soft, ResetMode::Mixed, ResetMode::Hard] {
+            for operation in OPERATIONS {
+                for result in [Ok(ids(2)), Ok(vec![])] {
+                    let case = format!("{mode:?} {operation:?} {result:?}");
+                    let (state, effects, busy) = answered_after(
+                        AppIntent::Commits(CommitsIntent::ResetTo(mode)),
+                        start_operation(operation),
+                        result,
+                    );
+                    assert_eq!(effects, vec![], "{case}");
+                    assert_eq!(state.popups, [], "{case}");
+                    assert_eq!(state.held_seq(), None, "{case}");
+                    assert_eq!(state.busy_count(), busy, "{case}");
+                    assert_eq!(
+                        state.notice,
+                        Some("Finish or abort the operation in progress".into()),
+                        "{case}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_checkout_still_goes_on_during_an_operation() {
+        for operation in OPERATIONS {
+            let (state, effects, _) = answered_after(
+                AppIntent::Commits(CommitsIntent::Checkout),
+                start_operation(operation),
+                Ok(ids(2)),
+            );
+            assert_eq!(effects, vec![], "{operation:?}");
+            assert_eq!(state.notice, None, "{operation:?}");
+            assert_eq!(
+                state.popups,
+                [Popup::Question(
+                    LeaveCommitsConfirm {
+                        op: GitOp::CheckoutCommit(cid("c1")),
+                        head: cid("c0"),
+                        head_short_oid: "c0".into(),
+                        short_oid: "c1".into(),
+                        left: vec!["a0".into(), "a1".into()],
+                    }
+                    .into_question()
+                )],
+                "{operation:?}"
+            );
+
+            let (state, effects, _) = answered_after(
+                AppIntent::Commits(CommitsIntent::Checkout),
+                start_operation(operation),
+                Ok(vec![]),
+            );
+            assert_eq!(effects, vec![], "{operation:?}");
+            assert_eq!(state.notice, None, "{operation:?}");
+            assert_eq!(
+                state.popups,
+                [Popup::Question(checkout_question(
+                    "c1".into(),
+                    cid("c1"),
+                    Some(cid("c0"))
+                ))],
+                "{operation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn soft_and_mixed_resets_with_nothing_left_behind_do_not_run_when_refused() {
+        for mode in [ResetMode::Soft, ResetMode::Mixed] {
+            for operation in [Operation::Bisect].into_iter().chain(OPERATIONS) {
+                let (state, effects, _) = answered_after(
+                    AppIntent::Commits(CommitsIntent::ResetTo(mode)),
+                    start_operation(operation),
+                    Ok(vec![]),
+                );
+                assert!(
+                    !effects.iter().any(|e| matches!(e, Effect::RunOp { .. })),
+                    "{mode:?} {operation:?}: {effects:?}"
+                );
+                assert_eq!(state.held_seq(), None, "{mode:?} {operation:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn after_a_refused_answer_the_next_press_checks_again() {
+        for (intent, _) in moves() {
+            let (mut state, _, _) = answered_after(intent.clone(), start_bisecting, Ok(ids(2)));
+            assert!(state.left_behind_check.is_none(), "{intent:?}");
+            state.branch.as_mut().unwrap().in_progress.clear();
+            check_of(&state.update(intent.clone()));
+        }
+    }
 
     #[test]
     fn a_detached_head_checks_for_commits_left_behind_before_anything_else() {
