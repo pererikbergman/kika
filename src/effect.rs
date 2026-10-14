@@ -27,6 +27,7 @@ use crate::handoff::HandOff;
 use crate::intent::AppIntent;
 use crate::op::{GitOp, run_op};
 use kika_forge::merge::MergeMethod;
+use kika_forge::pending::{PendingKey, PendingReview};
 use kika_forge::task::ForgeContext;
 use kika_forge::{ForgeHost, ForgeRepo, LoadSeq};
 use kika_git::GitRunner;
@@ -410,6 +411,18 @@ pub enum Effect {
     LoadReviewRange {
         tag: Tag,
         range: CommitRange,
+    },
+    /// Read the pending review stored for `key`. Local files only. Always answered by one `ReviewIntent::PendingLoaded`.
+    LoadPendingReview {
+        tag: Tag,
+        key: PendingKey,
+    },
+    /// Write the pending review for `key`; an empty one removes the file.
+    /// Local files only. Always answered by one `ReviewIntent::PendingSaved`.
+    SavePendingReview {
+        tag: Tag,
+        key: PendingKey,
+        review: PendingReview,
     },
 
     // --- branches ---
@@ -852,6 +865,9 @@ pub struct Runtime {
     clipboard_command: Option<Vec<OsString>>,
     /// Where programs Kika starts outside git are logged, as git's are.
     sink: CommandSink,
+    /// The directory pending reviews are kept in. `None` keeps none and
+    /// writes nothing, so only `main` touches the user's real one.
+    pending_store: Option<PathBuf>,
 }
 
 impl Runtime {
@@ -871,6 +887,15 @@ impl Runtime {
             clipboard: Arc::new(TerminalSink),
             clipboard_command: None,
             sink: CommandSink::new(),
+            pending_store: None,
+        }
+    }
+
+    /// Where pending reviews are kept, from `kika_forge::pending::default_dir`.
+    pub fn with_pending_store(self, pending_store: Option<PathBuf>) -> Self {
+        Self {
+            pending_store,
+            ..self
         }
     }
 
@@ -1275,6 +1300,12 @@ impl Runtime {
             }
             Effect::LoadReviewRange { tag, range } => {
                 review::effects::load_range_files(runner, tx, tag, range)
+            }
+            Effect::LoadPendingReview { tag, key } => {
+                review::effects::load_pending(self.pending_store.clone(), tx, tag, key)
+            }
+            Effect::SavePendingReview { tag, key, review } => {
+                review::effects::save_pending(self.pending_store.clone(), tx, tag, key, review)
             }
             Effect::LoadPullRequests {
                 tag,
@@ -2055,6 +2086,158 @@ mod tests {
                 list: vec![repo]
             }))
         );
+    }
+
+    #[tokio::test]
+    async fn a_saved_pending_review_is_read_back_by_a_fresh_runtime() {
+        use crate::features::review::ReviewIntent;
+        use kika_forge::anchor::{GhLine, GhSide};
+        use kika_forge::pending::{PendingComment, PendingKey};
+        use kika_git::fake::TempDir;
+
+        let tmp = TempDir::new("pending-store");
+        let store = tmp.path().join("kika").join("reviews");
+        let key = PendingKey {
+            host: "github.com".into(),
+            owner: "acme".into(),
+            repo: "widgets".into(),
+            number: 12,
+            top: "/r".into(),
+        };
+        let review = PendingReview {
+            comments: vec![PendingComment {
+                id: 1,
+                path: "src/cache.rs".into(),
+                start: None,
+                end: GhLine {
+                    side: GhSide::Right,
+                    line: 1,
+                },
+                body: "hi".into(),
+                head: "1".repeat(40),
+            }],
+        };
+        let tag = |seq| Tag {
+            generation: 0,
+            seq,
+            user: false,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime =
+            Runtime::new(Arc::new(FakeRunner::new()), tx).with_pending_store(Some(store.clone()));
+        runtime.spawn(Effect::SavePendingReview {
+            tag: tag(1),
+            key: key.clone(),
+            review: review.clone(),
+        });
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::Review(ReviewIntent::PendingSaved {
+                tag: tag(1),
+                result: Ok(())
+            }))
+        );
+        drop(runtime);
+
+        // As after a restart: another runtime on the same store.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(FakeRunner::new()), tx).with_pending_store(Some(store));
+        runtime.spawn(Effect::LoadPendingReview {
+            tag: tag(2),
+            key: key.clone(),
+        });
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::Review(ReviewIntent::PendingLoaded {
+                tag: tag(2),
+                result: Ok(Some(review.clone()))
+            }))
+        );
+
+        // With no store nothing is read, and a save says why.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(FakeRunner::new()), tx);
+        runtime.spawn(Effect::LoadPendingReview {
+            tag: tag(3),
+            key: key.clone(),
+        });
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::Review(ReviewIntent::PendingLoaded {
+                tag: tag(3),
+                result: Ok(None)
+            }))
+        );
+        runtime.spawn(Effect::SavePendingReview {
+            tag: tag(4),
+            key,
+            review,
+        });
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::Review(ReviewIntent::PendingSaved {
+                tag: tag(4),
+                result: Err("No place to keep the pending review".into())
+            }))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_older_pending_save_landing_last_never_puts_old_comments_back() {
+        use crate::features::review::ReviewIntent;
+        use kika_forge::pending::{self, PendingKey};
+        use kika_git::fake::TempDir;
+
+        let tmp = TempDir::new("pending-race");
+        let store = tmp.path().join("reviews");
+        let key = PendingKey {
+            host: "github.com".into(),
+            owner: "acme".into(),
+            repo: "widgets".into(),
+            number: 7,
+            top: "/r".into(),
+        };
+        let tag = |seq| Tag {
+            generation: 0,
+            seq,
+            user: false,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime =
+            Runtime::new(Arc::new(FakeRunner::new()), tx).with_pending_store(Some(store.clone()));
+        // The newer save (an empty review) runs first, then the older one.
+        for seq in [9, 4] {
+            let review = if seq == 9 {
+                PendingReview::default()
+            } else {
+                PendingReview {
+                    comments: vec![kika_forge::pending::PendingComment {
+                        id: 1,
+                        path: "a.rs".into(),
+                        start: None,
+                        end: kika_forge::anchor::GhLine {
+                            side: kika_forge::anchor::GhSide::Right,
+                            line: 1,
+                        },
+                        body: "old".into(),
+                        head: "1".repeat(40),
+                    }],
+                }
+            };
+            runtime.spawn(Effect::SavePendingReview {
+                tag: tag(seq),
+                key: key.clone(),
+                review,
+            });
+            assert_eq!(
+                rx.recv().await,
+                Some(AppIntent::Review(ReviewIntent::PendingSaved {
+                    tag: tag(seq),
+                    result: Ok(())
+                }))
+            );
+        }
+        assert_eq!(pending::read(&store, &key), Ok(None));
     }
 
     #[tokio::test]

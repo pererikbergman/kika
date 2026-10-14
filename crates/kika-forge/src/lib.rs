@@ -15,6 +15,7 @@ pub mod github;
 pub mod gitlab;
 pub mod head;
 pub mod merge;
+pub mod pending;
 pub mod remote;
 pub mod review;
 pub mod task;

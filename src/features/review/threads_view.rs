@@ -344,16 +344,36 @@ fn top_block(
     out
 }
 
+/// What the pending review adds to the diff: the rows picked for a
+/// comment, first and last, and under which rows a pending comment's
+/// first line goes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommentMarks {
+    pub picked: Option<(usize, usize)>,
+    pub under: BTreeMap<usize, Vec<String>>,
+}
+
+/// The row under a pending comment's line: its first line of text, made
+/// safe to draw.
+fn pending_row(first: &str) -> Line<'static> {
+    let text = kika_git::safe_text::sanitize(first.as_bytes());
+    Line::styled(
+        format!("{}✎ pending: {text}", " ".repeat(INDENT)),
+        Style::new().fg(Color::Cyan),
+    )
+}
+
 /// The files screen's diff with `threads` drawn in, at `inner`'s size.
 /// `numbers` are [`kika_forge::anchor::row_numbers`] of the shown diff;
-/// `selected` is the thread `]`/`[` went to. An error or a slow load
-/// shows as the plain diff pane does.
+/// `selected` is the thread `]`/`[` went to; `marks` the pending
+/// review's. An error or a slow load shows as the plain diff pane does.
 pub fn thread_diff_body(
     diff: &DiffPane,
     numbers: &[RowNumber],
     threads: &FileThreads,
     scope: &ThreadScope,
     selected: Option<usize>,
+    marks: &CommentMarks,
     inner: Rect,
 ) -> Paragraph<'static> {
     if diff.error.is_some() || diff.show_loading {
@@ -388,7 +408,19 @@ pub fn thread_diff_body(
         if out.len() >= rows {
             break;
         }
-        out.push(styled_diff_line(line, width, &marks_of(&diff.search, at)));
+        let mut drawn = styled_diff_line(line, width, &marks_of(&diff.search, at));
+        if marks
+            .picked
+            .is_some_and(|(first, last)| (first..=last).contains(&at))
+        {
+            drawn = drawn.patch_style(Style::new().add_modifier(Modifier::REVERSED));
+        }
+        out.push(drawn);
+        for first in marks.under.get(&at).into_iter().flatten() {
+            if out.len() < rows {
+                out.push(pending_row(first));
+            }
+        }
         for &t in under.get(&at).into_iter().flatten() {
             if out.len() >= rows {
                 break;

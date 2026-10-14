@@ -510,12 +510,42 @@ pull request, then to the queue, then to the workspace.
   `esc` closes it; `]` on the diff then goes on from the thread read
   last. Neither one asks GitHub anything: both show what was read with
   the pull request.
+- `a` on the files screen writes a comment on a line or a range of lines
+  of the diff, old or new side. It starts a pick on the first numbered line
+  in view: `j`/`k` move over the numbered lines (file and `@@` headers are
+  skipped), `v` starts a range at the line picked, `enter` (or `a` again)
+  writes the comment on the line or the range, and `esc` stops. A range
+  stays inside one hunk. An added or unchanged line takes the comment on
+  the new side, a removed line on the old side. The comment is typed in a
+  box over the screen, markdown, as many lines as you like: `enter` is a
+  new line, `q` and `?` are typed, `ctrl-s` keeps it and `esc` drops it
+  (asking first when it has text). `a` works in the whole pull request
+  view only, not in a commit's (`c` goes back).
+- A comment is not posted. It goes into the pending review, which only you
+  see until you submit it; under its line the diff shows
+  `✎ pending: <first line>`, and the file list's title counts the pending
+  comments. `P` lists them as `path:L12` or `path:R10-R14` with their first
+  line: `enter` or `e` edits one in the same box, `d` deletes one after a
+  question only `y` answers, and `esc` closes the list. At most 500
+  comments of up to 64 KiB each are kept per pull request.
+- The pending review is kept on disk, so it is still there after Kika
+  quits: one file per pull request and clone in
+  `$XDG_STATE_HOME/kika/reviews`, else
+  `~/Library/Application Support/kika/reviews` (macOS),
+  `~/.local/state/kika/reviews` (Linux) or `%LOCALAPPDATA%\kika\reviews`
+  (Windows). It holds the host, owner, repository name, number and path,
+  and each comment's file, lines, text and the head it was written on.
+  Only you can read it. A file there that Kika did not write (a link, too
+  large, malformed, of another version or for another pull request) is
+  never read or overwritten: comments on that pull request are off, the
+  bar says why, and you remove the file yourself. Writing comments asks
+  GitHub nothing and starts no other program.
 
 - GitHub is asked only when you enter review mode, open a pull request
   (which reads its viewed marks in up to 10 calls), press `r` or answer
   `y` to a merge, or press `v` on the files screen; opening a pull request
   or `r` asks for its detail, then its threads. Nothing refreshes by
-  itself, and nothing is cached on disk.
+  itself, and nothing GitHub sends is cached on disk.
 - Only a `github` host is asked. With none, or with the remote on another
   host, review mode says so and asks nobody; a rate-limited host is not
   asked until its limit resets.
@@ -1846,6 +1876,8 @@ diff, `esc` goes back to the pull request.
 | `review_files.next_thread` | `]` | Go to the next unresolved review thread | |
 | `review_files.prev_thread` | `[` | Go to the previous unresolved review thread | |
 | `review_files.thread` | `enter` | Read the selected review thread, or the file's first, with every comment in full | |
+| `review_files.comment` | `a` | Pick a diff line or range and write a comment on it, kept in the pending review | |
+| `review_files.pending` | `P` | List the pending review's comments, to edit or delete them | |
 | `review_diff.down` | `j`, `down` | Scroll the diff down a line | |
 | `review_diff.up` | `k`, `up` | Scroll the diff up a line | |
 | `review_diff.page_down` | `pgdn` | Scroll the diff down a page | |
@@ -1869,6 +1901,51 @@ diff, `esc` goes back to the pull request.
 | `review_thread.prev` | `[` | Read the file's previous review thread, resolved ones included | |
 | `review_thread.close` | `esc` | Close the thread and go back to the files | |
 | `review_thread.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Pick lines to comment on (`a` on the files screen)
+
+`q` and `?` do nothing here; `esc` stops picking.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `review_pick.down` | `j`, `down` | Move to the next numbered line | |
+| `review_pick.up` | `k`, `up` | Move to the previous numbered line | |
+| `review_pick.range` | `v` | Start a range at this line, or drop it | |
+| `review_pick.confirm` | `enter`, `a` | Write a comment on the line or range picked | |
+| `review_pick.cancel` | `esc` | Stop picking and go back to the files | |
+| `review_pick.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Pending comment (the comment being typed)
+
+Every other key is typed into the comment: `enter` is a new line, and `q`
+and `?` are typed.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `review_comment.save` | `ctrl-s` | Keep the comment in the pending review; nothing is posted | |
+| `review_comment.cancel` | `esc` | Close the comment, asking first when it has text | |
+| `review_comment.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Pending review (`P` on the files screen)
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `review_pending.down` | `j`, `down` | Select the next pending comment | |
+| `review_pending.up` | `k`, `up` | Select the previous pending comment | |
+| `review_pending.edit` | `enter`, `e` | Edit the selected comment | |
+| `review_pending.delete` | `d` | Delete the selected comment, after a question only y answers | |
+| `review_pending.close` | `esc` | Close the list | |
+| `review_pending.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Delete this comment? / Discard this comment?
+
+The comment is lost, so `enter` does not answer it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `review_comment_confirm.yes` | `y` | Yes, delete or discard the comment | locked |
+| `review_comment_confirm.no` | `n`, `esc` | No, keep the comment | locked |
+| `review_comment_confirm.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Submodule list
 

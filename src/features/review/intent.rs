@@ -5,7 +5,9 @@
 use super::{CommitsHere, PrCommit, PrFileRow};
 use crate::effect::Tag;
 use crate::intent::Scroll;
+use crate::keymap::KeyPress;
 use kika_forge::discussion::PrDiscussion;
+use kika_forge::pending::{PendingError, PendingReview};
 use kika_forge::review::{PrDetail, Queues, ReviewError};
 use kika_forge::{CreateError, ForgeHost, ForgeRepo};
 use kika_git::commit_files::CommitRange;
@@ -128,5 +130,44 @@ pub(crate) enum ReviewIntent {
     FilesLoaded {
         tag: Tag,
         result: Result<(CommitRange, Vec<PrFileRow>), String>,
+    },
+    /// Pick the diff line or lines a pending comment goes on.
+    StartComment,
+    /// Move the pick to the next numbered row (`true`) or the previous.
+    StepCommentPick(bool),
+    /// Anchor a range at the pick, or drop the anchor.
+    ToggleCommentRange,
+    /// Write a comment on the rows picked.
+    ConfirmCommentPick,
+    CancelCommentPick,
+    /// A key the composer's bindings left: typed into the comment.
+    TypeComment(KeyPress),
+    /// Keep the comment in the pending review.
+    SaveComment,
+    /// Close the composer, asking first when it holds text.
+    EscapeComment,
+    /// The yes of "Discard this comment?".
+    DiscardComment,
+    /// List the pending comments.
+    OpenPendingList,
+    /// Move the list's cursor by this many rows.
+    MovePendingList(isize),
+    /// Edit the comment under the list's cursor.
+    EditPending,
+    /// Ask before deleting the comment under the list's cursor.
+    AskDeletePending,
+    /// The yes of "Delete this comment?": delete pending comment `id`.
+    DeletePending(u64),
+    ClosePendingList,
+    /// The stored pending review, `None` when there is none, or why it
+    /// was not read.
+    PendingLoaded {
+        tag: Tag,
+        result: Result<Option<PendingReview>, PendingError>,
+    },
+    /// The pending review was written, or why not.
+    PendingSaved {
+        tag: Tag,
+        result: Result<(), String>,
     },
 }

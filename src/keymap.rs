@@ -239,6 +239,15 @@ pub enum KeyScope {
     ReviewDiff,
     /// One review thread read in full over the files screen.
     ReviewThread,
+    /// Picking the diff line or lines a pending comment goes on.
+    ReviewPick,
+    /// Typing a pending comment over the files screen.
+    ReviewComment,
+    /// The list of pending comments over the files screen.
+    ReviewPending,
+    /// "Delete this comment?" or "Discard this comment?" on top of the
+    /// popup stack.
+    ReviewCommentConfirm,
     Help,
     /// "Stage everything and commit?"
     CommitConfirm,
@@ -373,7 +382,11 @@ impl KeyScope {
             | KeyScope::PickList
             | KeyScope::CreatePullRequest
             | KeyScope::MergePullRequest
-            | KeyScope::ReviewThread => None,
+            | KeyScope::ReviewThread
+            | KeyScope::ReviewPick
+            | KeyScope::ReviewComment
+            | KeyScope::ReviewPending
+            | KeyScope::ReviewCommentConfirm => None,
         }
     }
 
@@ -400,6 +413,10 @@ impl KeyScope {
             KeyScope::ReviewFiles => "Pull request files",
             KeyScope::ReviewDiff => "Pull request diff",
             KeyScope::ReviewThread => "Review thread",
+            KeyScope::ReviewPick => "Pick lines to comment on",
+            KeyScope::ReviewComment => "Pending comment",
+            KeyScope::ReviewPending => "Pending review",
+            KeyScope::ReviewCommentConfirm => "Pending comment question",
             KeyScope::Help => "Help",
             KeyScope::CommitConfirm => "Stage all and commit",
             KeyScope::CommitEditor => "Commit message",
@@ -442,9 +459,10 @@ impl KeyScope {
     /// keys behave unlike everywhere else.
     pub fn bar_note(self) -> Option<&'static str> {
         match self {
-            KeyScope::CommitEditor | KeyScope::Credential | KeyScope::Input => {
-                Some("q and ? are typed")
-            }
+            KeyScope::CommitEditor
+            | KeyScope::Credential
+            | KeyScope::Input
+            | KeyScope::ReviewComment => Some("q and ? are typed"),
             _ => None,
         }
     }
@@ -639,6 +657,12 @@ pub const REPO_LOCKED: &[&str] = &[
     "merge_pr.no",
     "merge_pr.quit",
     "review_thread.quit",
+    "review_pick.quit",
+    "review_comment.quit",
+    "review_pending.quit",
+    "review_comment_confirm.yes",
+    "review_comment_confirm.no",
+    "review_comment_confirm.quit",
     "command_log.quit",
     "command_log.escape",
     "commits.paste",
@@ -2432,6 +2456,7 @@ static CHUNKS: &[&[Binding]] = &[
     command_log::keys::COMMAND_LOG_WORKSPACE,
     repos::keys::REPOS_WORKSPACE,
     review::keys::REVIEW_KEYS,
+    review::keys::REVIEW_COMMENT_KEYS,
     blame::keys::BLAME_FILES,
     diff::keys::DIFF_FILES,
     conflicts::keys::CONFLICTS_FILES,
@@ -2481,6 +2506,7 @@ static CHUNKS: &[&[Binding]] = &[
     repos::keys::REPOS_RECENT,
     pull_requests::keys::PULL_REQUESTS_PICK_CREATE,
     review::keys::REVIEW_MERGE_CONFIRM,
+    review::keys::REVIEW_COMMENT_CONFIRM,
     CORE_FILTER_SEARCH,
     commits::keys::COMMITS_LOG_FILTER,
     commits::compare::keys::COMPARE_COMMITS,
@@ -3930,6 +3956,41 @@ mod tests {
     }
 
     #[test]
+    fn only_y_deletes_or_discards_a_pending_comment_and_its_answers_are_locked() {
+        let state = AppState::new(Context::Workspace);
+        let resolve_in =
+            |scope, key| match resolve(registry(), &Keymap::default(), scope, &state, key) {
+                Resolution::Run(binding) => Some(binding.intent.clone()),
+                Resolution::Unbound => None,
+                other => panic!("{key:?}: {other:?}"),
+            };
+        let none = KeyModifiers::NONE;
+        let ask = KeyScope::ReviewCommentConfirm;
+        assert_eq!(resolve_in(ask, plain('y')), Some(AppIntent::ConfirmYes));
+        // Enter, a key meant for the list underneath, keeps the comment.
+        assert_eq!(resolve_in(ask, key(KeyCode::Enter, none)), None);
+        assert_eq!(resolve_in(ask, plain('q')), None);
+        assert_eq!(resolve_in(ask, plain('Y')), None);
+        assert_eq!(resolve_in(ask, plain('n')), Some(AppIntent::ConfirmNo));
+        assert_eq!(
+            resolve_in(ask, key(KeyCode::Esc, none)),
+            Some(AppIntent::ConfirmNo)
+        );
+        assert_eq!(
+            resolve_in(ask, key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(AppIntent::Quit)
+        );
+        assert_eq!(ask.parent(), None);
+        for id in [
+            "review_comment_confirm.yes",
+            "review_comment_confirm.no",
+            "review_comment_confirm.quit",
+        ] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+        }
+    }
+
+    #[test]
     fn undo_redo_and_the_travel_answers_are_locked() {
         for id in [
             "workspace.undo",
@@ -4599,6 +4660,10 @@ mod tests {
             KeyScope::ReviewFiles => "review_files",
             KeyScope::ReviewDiff => "review_diff",
             KeyScope::ReviewThread => "review_thread",
+            KeyScope::ReviewPick => "review_pick",
+            KeyScope::ReviewComment => "review_comment",
+            KeyScope::ReviewPending => "review_pending",
+            KeyScope::ReviewCommentConfirm => "review_comment_confirm",
             KeyScope::Help => "help",
             KeyScope::CommitConfirm => "commit_confirm",
             KeyScope::CommitEditor => "commit_editor",
@@ -5794,6 +5859,23 @@ mod tests {
         "review_thread.prev",
         "review_thread.close",
         "review_thread.quit",
+        "review_files.comment",
+        "review_files.pending",
+        "review_pick.down",
+        "review_pick.up",
+        "review_pick.range",
+        "review_pick.confirm",
+        "review_pick.cancel",
+        "review_pick.quit",
+        "review_comment.save",
+        "review_comment.cancel",
+        "review_comment.quit",
+        "review_pending.down",
+        "review_pending.up",
+        "review_pending.edit",
+        "review_pending.delete",
+        "review_pending.close",
+        "review_pending.quit",
         "files.blame",
         "files.hunks",
         "files.mergetool",
@@ -5992,6 +6074,9 @@ mod tests {
         "merge_pr.yes",
         "merge_pr.no",
         "merge_pr.quit",
+        "review_comment_confirm.yes",
+        "review_comment_confirm.no",
+        "review_comment_confirm.quit",
         "files.filter",
         "files.range",
         "files.escape",

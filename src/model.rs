@@ -31,7 +31,7 @@ use crate::features::operation;
 use crate::features::operation::StopWorkCheck;
 use crate::features::pull_requests::{self, PrCreating, PrDraft};
 use crate::features::repos::{self, ParkedRepo};
-use crate::features::review::{self, PrMerging};
+use crate::features::review::{self, PrMerging, ReviewIntent};
 use crate::features::stash::{self, StashDraft, StashList};
 use crate::features::submodules;
 use crate::features::sync;
@@ -431,6 +431,9 @@ impl AppState {
                         }
                         return self.apply_input();
                     }
+                    Resolution::Unbound if focus == KeyScope::ReviewComment => {
+                        return self.update(AppIntent::Review(ReviewIntent::TypeComment(key)));
+                    }
                     // Only a prompt or the editor takes text; elsewhere
                     // unbound keys are dropped. A popup over the editor
                     // keeps the keys from it.
@@ -729,7 +732,10 @@ impl AppState {
             (Context::Workspace, Focus::Blame(_)) => KeyScope::Blame,
             (Context::Workspace, Focus::Conflict(_)) => KeyScope::Conflict,
             (Context::Review { .. }, _) => match &self.review.files {
+                Some(_) if review::composer_open(self) => KeyScope::ReviewComment,
+                Some(_) if review::pending_list_open(self) => KeyScope::ReviewPending,
                 Some(_) if review::thread_reader_open(self) => KeyScope::ReviewThread,
+                Some(_) if review::comment_pick_open(self) => KeyScope::ReviewPick,
                 Some(_) if review::review_diff_focused(self) => KeyScope::ReviewDiff,
                 Some(_) if matches!(self.review.screen, review::ReviewScreen::Files(_)) => {
                     KeyScope::ReviewFiles
@@ -950,7 +956,8 @@ impl AppState {
             | KeyScope::SkipConfirm
             | KeyScope::AutosquashConfirm
             | KeyScope::PatchConfirm
-            | KeyScope::DropRangeConfirm => self.answer_question(scope, Answer::YOnly),
+            | KeyScope::DropRangeConfirm
+            | KeyScope::ReviewCommentConfirm => self.answer_question(scope, Answer::YOnly),
             _ => vec![],
         }
     }

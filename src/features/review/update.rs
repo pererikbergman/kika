@@ -73,6 +73,23 @@ pub(crate) fn update(state: &mut AppState, intent: ReviewIntent) -> Vec<Effect> 
             repo,
             result,
         } => return state.pr_detail_loaded(tag, number, repo, result),
+        ReviewIntent::StartComment => state.start_comment_pick(),
+        ReviewIntent::StepCommentPick(down) => return state.step_comment_pick(down),
+        ReviewIntent::ToggleCommentRange => state.toggle_comment_range(),
+        ReviewIntent::ConfirmCommentPick => state.confirm_comment_pick(),
+        ReviewIntent::CancelCommentPick => return state.end_comment_pick(),
+        ReviewIntent::TypeComment(key) => state.type_comment(key),
+        ReviewIntent::SaveComment => return state.save_comment(),
+        ReviewIntent::EscapeComment => state.escape_comment(),
+        ReviewIntent::DiscardComment => state.discard_comment(),
+        ReviewIntent::OpenPendingList => state.open_pending_list(),
+        ReviewIntent::MovePendingList(delta) => state.move_pending_list(delta),
+        ReviewIntent::EditPending => state.edit_pending(),
+        ReviewIntent::AskDeletePending => state.ask_delete_pending(),
+        ReviewIntent::DeletePending(id) => return state.delete_pending(id),
+        ReviewIntent::ClosePendingList => state.close_pending_list(),
+        ReviewIntent::PendingLoaded { tag, result } => state.pending_loaded(tag, result),
+        ReviewIntent::PendingSaved { tag, result } => return state.pending_saved(tag, result),
     }
     Vec::new()
 }

@@ -6,6 +6,7 @@ use super::commit_view::review_commit_disabled;
 use super::conversation::{conversation_disabled, page_disabled};
 use super::files::{review_files_disabled, review_search_step_disabled};
 use super::merge::merge_disabled;
+use super::pending::{comment_disabled, pending_list_disabled};
 use super::reader::thread_reader_disabled;
 use super::state::{
     open_check_disabled, open_pr_disabled, queue_keys_disabled, refresh_review_disabled,
@@ -459,10 +460,242 @@ pub(crate) static REVIEW_MERGE_CONFIRM: &[Binding] = &[
     },
 ];
 
+// Chunk 27b: review comments
+pub(crate) static REVIEW_COMMENT_KEYS: &[Binding] = &[
+    // Local files only, so a repository file may move them.
+    Binding {
+        id: "review_files.comment",
+        keys: &[KeyPattern::exact(KeyCode::Char('a'), NONE)],
+        scope: KeyScope::ReviewFiles,
+        intent: AppIntent::Review(ReviewIntent::StartComment),
+        description: "Pick a diff line or range and write a comment on it, kept in the pending review",
+        label: "comment",
+        bar: true,
+        disabled: comment_disabled,
+    },
+    Binding {
+        id: "review_files.pending",
+        keys: &[KeyPattern::any(KeyCode::Char('P'))],
+        scope: KeyScope::ReviewFiles,
+        intent: AppIntent::Review(ReviewIntent::OpenPendingList),
+        description: "List the pending review's comments, to edit or delete them",
+        label: "pending",
+        bar: true,
+        disabled: pending_list_disabled,
+    },
+    Binding {
+        id: "review_pick.down",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::ReviewPick,
+        intent: AppIntent::Review(ReviewIntent::StepCommentPick(true)),
+        description: "Move to the next numbered line",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review_pick.up",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::ReviewPick,
+        intent: AppIntent::Review(ReviewIntent::StepCommentPick(false)),
+        description: "Move to the previous numbered line",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review_pick.range",
+        keys: &[KeyPattern::exact(KeyCode::Char('v'), NONE)],
+        scope: KeyScope::ReviewPick,
+        intent: AppIntent::Review(ReviewIntent::ToggleCommentRange),
+        description: "Start a range at this line, or drop it",
+        label: "range",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_pick.confirm",
+        keys: &[
+            KeyPattern::any(KeyCode::Enter),
+            KeyPattern::exact(KeyCode::Char('a'), NONE),
+        ],
+        scope: KeyScope::ReviewPick,
+        intent: AppIntent::Review(ReviewIntent::ConfirmCommentPick),
+        description: "Write a comment on the line or range picked",
+        label: "comment",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_pick.cancel",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::ReviewPick,
+        intent: AppIntent::Review(ReviewIntent::CancelCommentPick),
+        description: "Stop picking and go back to the files",
+        label: "cancel",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_pick.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::ReviewPick,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+    // Every other key is typed into the comment.
+    Binding {
+        id: "review_comment.save",
+        keys: &[KeyPattern::exact(KeyCode::Char('s'), KeyModifiers::CONTROL)],
+        scope: KeyScope::ReviewComment,
+        intent: AppIntent::Review(ReviewIntent::SaveComment),
+        description: "Keep the comment in the pending review; nothing is posted",
+        label: "save",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_comment.cancel",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::ReviewComment,
+        intent: AppIntent::Review(ReviewIntent::EscapeComment),
+        description: "Close the comment, asking first when it has text",
+        label: "cancel",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_comment.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::ReviewComment,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_pending.down",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::ReviewPending,
+        intent: AppIntent::Review(ReviewIntent::MovePendingList(1)),
+        description: "Select the next pending comment",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review_pending.up",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::ReviewPending,
+        intent: AppIntent::Review(ReviewIntent::MovePendingList(-1)),
+        description: "Select the previous pending comment",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review_pending.edit",
+        keys: &[
+            KeyPattern::any(KeyCode::Enter),
+            KeyPattern::exact(KeyCode::Char('e'), NONE),
+        ],
+        scope: KeyScope::ReviewPending,
+        intent: AppIntent::Review(ReviewIntent::EditPending),
+        description: "Edit the selected comment",
+        label: "edit",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_pending.delete",
+        keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
+        scope: KeyScope::ReviewPending,
+        intent: AppIntent::Review(ReviewIntent::AskDeletePending),
+        description: "Delete the selected comment, after a question only y answers",
+        label: "delete",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_pending.close",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::ReviewPending,
+        intent: AppIntent::Review(ReviewIntent::ClosePendingList),
+        description: "Close the list",
+        label: "close",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_pending.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::ReviewPending,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+];
+
+// Chunk 71c: review comments
+pub(crate) static REVIEW_COMMENT_CONFIRM: &[Binding] = &[
+    // The comment is lost, so Enter is left unbound.
+    Binding {
+        id: "review_comment_confirm.yes",
+        keys: Answer::YOnly.keys(),
+        scope: KeyScope::ReviewCommentConfirm,
+        intent: AppIntent::ConfirmYes,
+        description: "Yes, delete or discard the comment",
+        label: "yes",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_comment_confirm.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::ReviewCommentConfirm,
+        intent: AppIntent::ConfirmNo,
+        description: "No, keep the comment",
+        label: "no",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_comment_confirm.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::ReviewCommentConfirm,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keymap::{REPO_LOCKED, registry};
+    use crate::keymap::{KeyPress, REPO_LOCKED, registry};
 
     #[test]
     fn the_reader_and_conversation_keys_sit_in_their_scopes_unlocked_but_quit() {
@@ -540,5 +773,109 @@ mod tests {
             assert_eq!(binding.bar, bar, "{id}");
             assert!(!REPO_LOCKED.contains(&id), "{id}");
         }
+    }
+
+    /// The binding `key` reaches from `focus`, enabled or not, by id.
+    fn owner(focus: KeyScope, key: KeyPress) -> Option<&'static str> {
+        focus.chain().find_map(|scope| {
+            registry()
+                .iter()
+                .find(|b| b.scope == scope && b.matches(key))
+                .map(|b| b.id)
+        })
+    }
+
+    fn plain(c: char) -> KeyPress {
+        KeyPress::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn a_and_p_reach_the_files_and_the_diff_and_the_popups_keep_their_keys() {
+        for focus in [KeyScope::ReviewFiles, KeyScope::ReviewDiff] {
+            assert_eq!(owner(focus, plain('a')), Some("review_files.comment"));
+            let shift_p = KeyPress::new(KeyCode::Char('P'), KeyModifiers::SHIFT);
+            assert_eq!(owner(focus, shift_p), Some("review_files.pending"));
+        }
+        for focus in [
+            KeyScope::ReviewPick,
+            KeyScope::ReviewComment,
+            KeyScope::ReviewPending,
+        ] {
+            assert_eq!(focus.parent(), None, "{focus:?}");
+            for c in ['q', '?', ']', 'o'] {
+                assert_eq!(owner(focus, plain(c)), None, "{focus:?} {c}");
+            }
+            let quit = KeyPress::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+            let id = owner(focus, quit).unwrap();
+            assert!(id.ends_with(".quit") && REPO_LOCKED.contains(&id), "{id}");
+        }
+        // In the composer these are typed, and ctrl-e is left for later.
+        let comment = KeyScope::ReviewComment;
+        assert_eq!(comment.bar_note(), Some("q and ? are typed"));
+        let enter = KeyPress::new(KeyCode::Enter, KeyModifiers::NONE);
+        let ctrl_e = KeyPress::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        for key in [enter, plain('q'), plain('?'), plain('a'), ctrl_e] {
+            assert_eq!(owner(comment, key), None, "{key:?}");
+        }
+        let ctrl_s = KeyPress::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert_eq!(owner(comment, ctrl_s), Some("review_comment.save"));
+        assert_eq!(
+            owner(KeyScope::ReviewPick, plain('v')),
+            Some("review_pick.range")
+        );
+        assert_eq!(
+            owner(KeyScope::ReviewPick, enter),
+            Some("review_pick.confirm")
+        );
+        assert_eq!(
+            owner(KeyScope::ReviewPending, plain('d')),
+            Some("review_pending.delete")
+        );
+        assert_eq!(KeyScope::ReviewPick.title(), "Pick lines to comment on");
+        // Local files only: not locked, quitting aside.
+        for id in [
+            "review_files.comment",
+            "review_files.pending",
+            "review_pending.delete",
+        ] {
+            assert!(!REPO_LOCKED.contains(&id), "{id}");
+        }
+    }
+
+    #[test]
+    fn the_help_menu_gives_each_reason_a_is_off() {
+        use crate::features::review::files::ReviewView;
+        use crate::features::review::pending::tests::{commenting, loaded, loading};
+        use crate::keymap::available;
+        use kika_forge::pending::PendingError;
+        let help = |state: &crate::model::AppState| {
+            available(registry(), &state.keymap, KeyScope::ReviewFiles, state)
+                .into_iter()
+                .find(|(b, _)| b.id == "review_files.comment")
+                .and_then(|(_, reason)| reason)
+                .map(|r| r.to_string())
+        };
+        let mut states = Vec::new();
+        let (state, _) = loading();
+        states.push(state);
+        let (mut state, tag) = loading();
+        loaded(
+            &mut state,
+            tag,
+            Err(PendingError::Unreadable("it is too large")),
+        );
+        states.push(state);
+        let mut state = commenting();
+        state.review.files.as_mut().unwrap().view = ReviewView::Commit(0);
+        states.push(state);
+        let mut state = commenting();
+        state.diff.lines.truncate(4);
+        states.push(state);
+        for state in &states {
+            let reason = comment_disabled(state).map(|r| r.to_string());
+            assert!(reason.is_some());
+            assert_eq!(help(state), reason);
+        }
+        assert_eq!(help(&commenting()), None);
     }
 }
