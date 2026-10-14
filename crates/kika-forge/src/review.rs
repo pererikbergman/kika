@@ -1434,6 +1434,7 @@ pub(crate) mod tests {
     fn context(gh: Arc<FakeGh>) -> ForgeContext {
         ForgeContext {
             gh,
+            glab: Arc::new(crate::gitlab::FakeGlab::new()),
             sink: CommandSink::new(),
             cache_dir: None,
         }

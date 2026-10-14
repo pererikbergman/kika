@@ -8,8 +8,10 @@ use std::sync::Arc;
 
 use super::cache::{self, CacheKey, Cached};
 use super::github::{Answer, GhRunner, MAX_BRANCHES, Refusal};
+use super::gitlab::GlabRunner;
 use super::head::{Head, heads};
 use super::remote::{allowed, parse_remote};
+use super::url::ForgeKind;
 use super::{CiState, ForgeHost, ForgeRepo, ForgeStatus, PrBadge, PrState};
 use kika_git::GitRunner;
 use kika_git::branches::BranchName;
@@ -17,11 +19,13 @@ use kika_git::forge_remote::{read_remote_url, read_upstreams};
 use kika_git::recording::CommandSink;
 
 /// What the runtime needs to reach a forge. Only `main` builds one with
-/// the real `gh`; without one every load answers that no repository was
-/// found.
+/// the real `gh` and `glab`; without one every load answers that no
+/// repository was found.
 #[derive(Clone)]
 pub struct ForgeContext {
     pub gh: Arc<dyn GhRunner>,
+    /// Only asked about a repository on a GitLab-kind host.
+    pub glab: Arc<dyn GlabRunner>,
     pub sink: CommandSink,
     /// `None` when no cache directory is known: nothing is cached.
     pub cache_dir: Option<PathBuf>,
@@ -65,11 +69,12 @@ pub struct Load<'a> {
 /// Run `load`, sending each event as it is known: `RepoNone`, or
 /// `Cached` and then, on a refresh, `Fetched`.
 ///
-/// A refresh first probes, for free, whether the pull requests changed;
-/// when they did not and the cache is still good, no GraphQL query runs.
-/// A fork skips the probe: its own list says nothing of its parent's pull
-/// requests. A rate-limited host gets no call at all until its limit
-/// resets. Each branch is asked about by its head, read from local git.
+/// The host's kind picks the CLI: `gh` for GitHub, `glab` for GitLab.
+/// On GitHub a refresh first probes, for free, whether the pull requests
+/// changed; when they did not and the cache is still good, no GraphQL
+/// query runs. A fork skips the probe: its own list says nothing of its
+/// parent's pull requests. GitLab has no probe. A rate-limited host gets
+/// no call at all until its limit resets. Each branch is asked about by its head, read from local git.
 /// A repository its host's allow-list leaves out answers `RepoNone`.
 pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn Fn(LoadEvent)) {
     // Defence in depth: with no hosts nothing is read, run or written.
@@ -116,32 +121,46 @@ pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn
     if let Some(until) = until.filter(|until| *until > load.now) {
         return limited(until);
     }
-    // The client applies the same allow gate as above, so this is the
-    // allow-list miss's answer should the two ever disagree.
-    let Some(gh) = ctx.gh(host, &repo, load.now) else {
-        return send(LoadEvent::RepoNone);
-    };
     let branches = &load.branches[..load.branches.len().min(MAX_BRANCHES)];
-    let heads = heads(branches, &read_upstreams(git), &repo);
-    let sent = cached.as_ref().and_then(|c| c.etag.clone());
-    let forked = cached.as_ref().is_some_and(|c| c.forked);
-    let etag = if forked {
-        sent
-    } else {
-        match gh.probe(&repo, sent.as_deref()) {
-            Answer::Limited { until } => return limited(until),
-            // The cache is left as it is: its `fetched_at` stays the time of
-            // the last GraphQL answer, which bounds how long 304s may reuse it.
-            Answer::NotModified => match cached.filter(|c| reusable(c, &heads, load.now)) {
-                Some(cached) => return fetched(Ok(cached.badges), None),
-                None => sent,
-            },
-            Answer::Body { etag, .. } => etag,
-            // No worse than without a probe: ask anyway.
-            Answer::Failed(_) => None,
+    // The client applies the same allow gate as above, so a `None` is the
+    // allow-list miss's answer should the two ever disagree.
+    let (found, etag, heads) = match host.kind() {
+        ForgeKind::GitHub => {
+            let Some(gh) = ctx.gh(host, &repo, load.now) else {
+                return send(LoadEvent::RepoNone);
+            };
+            let heads = heads(branches, &read_upstreams(git), &repo);
+            let sent = cached.as_ref().and_then(|c| c.etag.clone());
+            let forked = cached.as_ref().is_some_and(|c| c.forked);
+            let etag = if forked {
+                sent
+            } else {
+                match gh.probe(&repo, sent.as_deref()) {
+                    Answer::Limited { until } => return limited(until),
+                    // The cache is left as it is: its `fetched_at` stays the
+                    // time of the last GraphQL answer, which bounds how long
+                    // 304s may reuse it.
+                    Answer::NotModified => match cached.filter(|c| reusable(c, &heads, load.now)) {
+                        Some(cached) => return fetched(Ok(cached.badges), None),
+                        None => sent,
+                    },
+                    Answer::Body { etag, .. } => etag,
+                    // No worse than without a probe: ask anyway.
+                    Answer::Failed(_) => None,
+                }
+            };
+            (gh.fetch_badges(&repo, &heads), etag, heads)
+        }
+        // GitLab has no probe: each refresh asks GraphQL.
+        ForgeKind::GitLab => {
+            let Some(glab) = ctx.glab(host, &repo, load.now) else {
+                return send(LoadEvent::RepoNone);
+            };
+            let heads = heads(branches, &read_upstreams(git), &repo);
+            (glab.fetch_badges(&repo, &heads), None, heads)
         }
     };
-    match gh.fetch_badges(&repo, &heads) {
+    match found {
         Ok(found) => {
             if let Some((dir, key)) = place {
                 let fresh = Cached {
@@ -239,6 +258,7 @@ mod tests {
     fn context(gh: Arc<FakeGh>, cache_dir: Option<PathBuf>) -> ForgeContext {
         ForgeContext {
             gh,
+            glab: Arc::new(crate::gitlab::FakeGlab::new()),
             sink: CommandSink::new(),
             cache_dir,
         }
@@ -819,6 +839,7 @@ mod tests {
         sink.connect(move |ev| keep.lock().unwrap().push(ev));
         let ctx = ForgeContext {
             gh: gh.clone(),
+            glab: Arc::new(crate::gitlab::FakeGlab::new()),
             sink,
             cache_dir: Some(cache_dir.clone()),
         };
@@ -962,6 +983,289 @@ mod tests {
                 !reusable(&cached, std::slice::from_ref(&head), NOW),
                 "{head:?}"
             );
+        }
+    }
+
+    mod gitlab {
+        use super::*;
+        use crate::gitlab::FakeGlab;
+        use crate::gitlab::fixtures::{RATE_LIMITED_429, STATES, UNAUTHORIZED_401};
+        use crate::url::ForgeKind;
+
+        fn hosts() -> Vec<ForgeHost> {
+            vec![
+                ForgeHost::parse("gitlab.example.com")
+                    .unwrap()
+                    .with_kind(ForgeKind::GitLab),
+            ]
+        }
+
+        fn repo() -> ForgeRepo {
+            ForgeRepo {
+                host: "gitlab.example.com".into(),
+                owner: "acme".into(),
+                name: "widgets".into(),
+            }
+        }
+
+        const URL: &[u8] = b"https://gitlab.example.com/acme/widgets.git";
+
+        /// A context whose `gh` must never be asked.
+        fn context(glab: &Arc<FakeGlab>, gh: &Arc<FakeGh>, dir: Option<PathBuf>) -> ForgeContext {
+            ForgeContext {
+                gh: gh.clone(),
+                glab: glab.clone(),
+                sink: CommandSink::new(),
+                cache_dir: dir,
+            }
+        }
+
+        #[test]
+        fn a_refresh_sends_the_cache_then_the_fetch_which_is_cached() {
+            let tmp = TempDir::new("forge-gitlab-load");
+            let dir = tmp.path().join("forge");
+            let glab = Arc::new(FakeGlab::new().reply(answer(STATES)));
+            let gh = Arc::new(FakeGh::new());
+            let ctx = context(&glab, &gh, Some(dir.clone()));
+            let (hosts, branches): (_, Vec<BranchName>) =
+                (hosts(), vec!["topic-0".into(), "topic-1".into()]);
+
+            let git = origin_refresh(URL);
+            let sent = sent(&git, &ctx, &refresh(&hosts, &branches, tmp.path()));
+            git.assert_done();
+            let want = HashMap::from([
+                (
+                    branches[0].clone(),
+                    badge(1, PrState::Open, Some(CiState::Success)),
+                ),
+                (
+                    branches[1].clone(),
+                    badge(2, PrState::Draft, Some(CiState::Pending)),
+                ),
+            ]);
+            assert_eq!(
+                sent,
+                [
+                    LoadEvent::Cached {
+                        repo: repo(),
+                        badges: None,
+                    },
+                    LoadEvent::Fetched {
+                        result: Ok(want.clone()),
+                        limited_until: None,
+                    },
+                ]
+            );
+            let [call] = glab.calls().try_into().unwrap();
+            assert_eq!(
+                (call.host.as_str(), call.cwd.as_path()),
+                ("gitlab.example.com", dir.as_path())
+            );
+            assert_eq!(gh.calls(), []);
+            let key = CacheKey::new(&repo(), tmp.path()).unwrap();
+            assert_eq!(
+                cache::read(&dir, &key),
+                Some(Cached {
+                    badges: want.clone(),
+                    etag: None,
+                    queried: heads(&branches, &HashMap::new(), &repo()),
+                    forked: false,
+                    fetched_at: NOW,
+                })
+            );
+
+            // Without a refresh, the cache answers and nothing runs.
+            let (git, known) = (FakeRunner::new(), repo());
+            let load = Load {
+                refresh: false,
+                known: Some(&known),
+                ..refresh(&hosts, &branches, tmp.path())
+            };
+            let sent = self::sent(&git, &ctx, &load);
+            git.assert_done();
+            assert_eq!(
+                sent,
+                [LoadEvent::Cached {
+                    repo: repo(),
+                    badges: Some(want),
+                }]
+            );
+            assert_eq!(glab.calls().len(), 1);
+            assert_eq!(gh.calls(), []);
+        }
+
+        #[test]
+        fn a_refusal_or_rate_limit_says_why_and_leaves_the_cache() {
+            let branches: Vec<BranchName> = vec!["topic-0".into()];
+            let cases = [
+                (
+                    answer(UNAUTHORIZED_401),
+                    Err(ForgeStatus::NotLoggedIn),
+                    None,
+                ),
+                (
+                    answer(RATE_LIMITED_429),
+                    Err(ForgeStatus::RateLimited),
+                    Some(NOW + 1200),
+                ),
+            ];
+            for (reply, result, limited_until) in cases {
+                let tmp = TempDir::new("forge-gitlab-refused");
+                let glab = Arc::new(FakeGlab::new().reply(reply));
+                let gh = Arc::new(FakeGh::new());
+                let dir = tmp.path().join("forge");
+                let ctx = context(&glab, &gh, Some(dir.clone()));
+                let (git, hosts) = (origin_refresh(URL), hosts());
+                let sent = sent(&git, &ctx, &refresh(&hosts, &branches, tmp.path()));
+                assert_eq!(
+                    sent.last(),
+                    Some(&LoadEvent::Fetched {
+                        result,
+                        limited_until
+                    })
+                );
+                assert!(!dir.exists() || std::fs::read_dir(&dir).unwrap().next().is_none());
+                assert_eq!(glab.calls().len(), 1);
+            }
+        }
+
+        #[test]
+        fn a_limited_host_gets_no_call_and_no_refresh_none() {
+            let tmp = TempDir::new("forge-gitlab-limited");
+            let (hosts, branches): (_, Vec<BranchName>) = (hosts(), vec!["main".into()]);
+            let glab = Arc::new(FakeGlab::new());
+            let gh = Arc::new(FakeGh::new());
+            let ctx = context(&glab, &gh, None);
+            let limited = [(hosts[0].clone(), NOW + 10)];
+            let known = repo();
+            for load in [
+                Load {
+                    limited: &limited,
+                    known: Some(&known),
+                    ..refresh(&hosts, &branches, tmp.path())
+                },
+                Load {
+                    refresh: false,
+                    known: Some(&known),
+                    ..refresh(&hosts, &branches, tmp.path())
+                },
+            ] {
+                let git = FakeRunner::new();
+                let sent = sent(&git, &ctx, &load);
+                git.assert_done();
+                assert!(matches!(sent[0], LoadEvent::Cached { .. }), "{sent:?}");
+                if load.refresh {
+                    assert_eq!(
+                        sent[1],
+                        LoadEvent::Fetched {
+                            result: Err(ForgeStatus::RateLimited),
+                            limited_until: Some(NOW + 10),
+                        }
+                    );
+                } else {
+                    assert_eq!(sent.len(), 1);
+                }
+            }
+            assert_eq!(glab.calls(), []);
+            assert_eq!(gh.calls(), []);
+        }
+
+        #[test]
+        fn with_no_hosts_nothing_is_read_run_or_written() {
+            let tmp = TempDir::new("forge-gitlab-off");
+            let dir = tmp.path().join("forge");
+            let glab = Arc::new(FakeGlab::new());
+            let gh = Arc::new(FakeGh::new());
+            let ctx = context(&glab, &gh, Some(dir.clone()));
+            let git = FakeRunner::new();
+            let branches = ["main".into()];
+            let known = repo();
+            let load = Load {
+                known: Some(&known),
+                ..refresh(&[], &branches, tmp.path())
+            };
+            assert_eq!(sent(&git, &ctx, &load), [LoadEvent::RepoNone]);
+            git.assert_done();
+            assert_eq!(glab.calls(), []);
+            assert!(!dir.exists());
+        }
+
+        #[test]
+        fn a_gitlab_remote_on_a_github_kind_host_never_reaches_glab() {
+            let glab = Arc::new(FakeGlab::new());
+            let gh = Arc::new(
+                FakeGh::new()
+                    .reply(answer(crate::github::fixtures::PROBE_200))
+                    .reply(answer(crate::github::fixtures::STATES)),
+            );
+            let ctx = context(&glab, &gh, None);
+            let hub = vec![ForgeHost::parse("gitlab.example.com").unwrap()];
+            let branches: Vec<BranchName> = vec!["main".into()];
+            let git = origin_refresh(URL);
+            sent(&git, &ctx, &refresh(&hub, &branches, Path::new("/r")));
+            assert_eq!(glab.calls(), []);
+            assert_eq!(gh.calls().len(), 2);
+        }
+
+        /// `glab` holds a token and prints it, on stderr and in a header;
+        /// none of it may reach the events, the log, the cache or what
+        /// Kika passes to `glab`.
+        #[test]
+        fn a_token_never_leaves_glab() {
+            use crate::gitlab::fixtures::{SECRET_TOKEN as SENTINEL, leaky_glab};
+            use crate::gitlab::{GLAB_ENV, GLAB_ENV_REMOVE};
+            let tmp = TempDir::new("forge-gitlab-secret");
+            let dir = tmp.path().join("forge");
+            let glab = Arc::new(leaky_glab());
+            let gh = Arc::new(FakeGh::new());
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let sink = CommandSink::new();
+            let keep = Arc::clone(&log);
+            sink.connect(move |ev| keep.lock().unwrap().push(ev));
+            let ctx = ForgeContext {
+                sink,
+                ..context(&glab, &gh, Some(dir.clone()))
+            };
+            let branches: Vec<BranchName> = vec!["topic-0".into()];
+            let hosts = hosts();
+            let mut forge = ForgeState::new(hosts.clone());
+            forge.set_branches(&branches);
+            let mut events = Vec::new();
+            for seq in [LoadSeq(1), LoadSeq(2)] {
+                forge.want_refresh();
+                assert!(forge.load(seq).is_some_and(|request| request.refresh));
+                let git = origin_refresh(b"https://x:pw_USERINFO@gitlab.example.com/acme/widgets");
+                let sent = sent(&git, &ctx, &refresh(&hosts, &branches, tmp.path()));
+                events.extend(sent.clone());
+                apply(&mut forge, seq, sent);
+            }
+            // The token was there to leak.
+            assert!(glab.saw_env("GITLAB_TOKEN", SENTINEL));
+            assert_eq!(forge.status, ForgeView::Problem(ForgeStatus::NotLoggedIn));
+            assert!(!forge.badges.is_empty());
+            assert_eq!(forge.kind(), Some(ForgeKind::GitLab));
+            let secrets = [SENTINEL, "glpat", "pw_USERINFO"];
+            let clean = |text: &str| secrets.iter().all(|s| !text.contains(s));
+            for event in &events {
+                assert!(clean(&format!("{event:?}")), "{event:?}");
+            }
+            for event in log.lock().unwrap().iter() {
+                assert!(clean(&format!("{event:?}")), "{event:?}");
+            }
+            assert!(clean(&format!("{forge:?}")), "state leaks");
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+                assert!(clean(&String::from_utf8_lossy(&bytes)));
+            }
+            let calls = glab.calls();
+            assert_eq!(calls.len(), 2);
+            for call in &calls {
+                let argv = format!("{:?} {}", call.args(), call.display_line());
+                assert!(clean(&argv), "{argv}");
+                assert!(clean(&String::from_utf8_lossy(&call.stdin())));
+            }
+            let env = format!("{GLAB_ENV:?} {GLAB_ENV_REMOVE:?}");
+            assert!(clean(&env), "{env}");
         }
     }
 }

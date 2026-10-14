@@ -32,8 +32,8 @@ const DRAIN: Duration = Duration::from_secs(2);
 const MAX_OUTPUT: u64 = 8 * 1024 * 1024;
 /// The shortest and longest wait after a rate limit, in seconds: a bad or
 /// hostile header can neither hammer GitHub nor silence Kika for long.
-const MIN_BACKOFF: i64 = 60;
-const MAX_BACKOFF: i64 = 3600;
+pub(crate) const MIN_BACKOFF: i64 = 60;
+pub(crate) const MAX_BACKOFF: i64 = 3600;
 /// The longest ETag kept or sent.
 const MAX_ETAG: usize = 256;
 /// The probe's media type header.
@@ -203,73 +203,83 @@ pub struct CliGh;
 impl GhRunner for CliGh {
     fn run(&self, cmd: &GhCommand) -> io::Result<GhOutput> {
         let mut command = kika_git::program::command(OsStr::new("gh"))?;
-        command
-            .args(cmd.args())
-            .current_dir(&cmd.cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        command.args(cmd.args());
         for (key, value) in GH_ENV {
             command.env(key, value);
         }
         for key in GH_ENV_REMOVE {
             command.env_remove(key);
         }
-        let mut child = command.spawn()?;
-        let stdin = child.stdin.take();
-        let body = cmd.stdin();
-        // Dropping the pipe after writing sends EOF. Never joined: a
-        // process that stops reading must not hold this call.
+        run_piped(command, &cmd.cwd, cmd.stdin(), cmd.timeout)
+    }
+}
+
+/// Run a forge CLI's `command` in `cwd` with `body` on stdin, killed after
+/// `timeout`, and keep at most [`MAX_OUTPUT`] of each output stream.
+pub(crate) fn run_piped(
+    mut command: std::process::Command,
+    cwd: &std::path::Path,
+    body: Vec<u8>,
+    timeout: Duration,
+) -> io::Result<GhOutput> {
+    command
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let stdin = child.stdin.take();
+    // Dropping the pipe after writing sends EOF. Never joined: a
+    // process that stops reading must not hold this call.
+    std::thread::spawn(move || {
+        if let Some(mut pipe) = stdin {
+            let _ = pipe.write_all(&body);
+        }
+    });
+    let reader = |pipe: Option<Box<dyn Read + Send>>| {
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            if let Some(mut pipe) = stdin {
-                let _ = pipe.write_all(&body);
+            let mut bytes = Vec::new();
+            if let Some(pipe) = pipe {
+                let _ = pipe.take(MAX_OUTPUT).read_to_end(&mut bytes);
             }
+            let _ = tx.send(bytes);
         });
-        let reader = |pipe: Option<Box<dyn Read + Send>>| {
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let mut bytes = Vec::new();
-                if let Some(pipe) = pipe {
-                    let _ = pipe.take(MAX_OUTPUT).read_to_end(&mut bytes);
-                }
-                let _ = tx.send(bytes);
-            });
-            rx
-        };
-        let stdout = reader(child.stdout.take().map(|p| Box::new(p) as _));
-        let stderr = reader(child.stderr.take().map(|p| Box::new(p) as _));
-        let deadline = Instant::now() + cmd.timeout;
-        let (status, timed_out) = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break (Some(status), false),
-                Ok(None) => {}
-                Err(e) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(e);
-                }
-            }
-            if Instant::now() >= deadline {
+        rx
+    };
+    let stdout = reader(child.stdout.take().map(|p| Box::new(p) as _));
+    let stderr = reader(child.stderr.take().map(|p| Box::new(p) as _));
+    let deadline = Instant::now() + timeout;
+    let (status, timed_out) = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break (Some(status), false),
+            Ok(None) => {}
+            Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                break (None, true);
+                return Err(e);
             }
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        // `gh` has ended, but a process it started could still hold the
-        // pipes open; wait for the output only so long, then go without.
-        let drained = Instant::now() + DRAIN;
-        let collect = |rx: std::sync::mpsc::Receiver<Vec<u8>>| {
-            let left = drained.saturating_duration_since(Instant::now());
-            rx.recv_timeout(left).unwrap_or_default()
-        };
-        Ok(GhOutput {
-            exit: status.and_then(|s| s.code()),
-            stdout: collect(stdout),
-            stderr: collect(stderr),
-            timed_out,
-        })
-    }
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break (None, true);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    // The CLI has ended, but a process it started could still hold the
+    // pipes open; wait for the output only so long, then go without.
+    let drained = Instant::now() + DRAIN;
+    let collect = |rx: std::sync::mpsc::Receiver<Vec<u8>>| {
+        let left = drained.saturating_duration_since(Instant::now());
+        rx.recv_timeout(left).unwrap_or_default()
+    };
+    Ok(GhOutput {
+        exit: status.and_then(|s| s.code()),
+        stdout: collect(stdout),
+        stderr: collect(stderr),
+        timed_out,
+    })
 }
 
 /// What one call came to, read from its status line and headers.
@@ -453,21 +463,37 @@ impl Gh<'_> {
             cwd: self.cwd.clone(),
             timeout: TIMEOUT,
         };
-        let id = self.sink.next_id();
-        self.sink.send(CommandEvent::Started {
-            id,
-            line: cmd.display_line(),
-            attached: false,
-        });
-        let start = Instant::now();
-        let result = read(self.runner.run(&cmd));
-        self.sink.send(CommandEvent::Finished {
-            id,
-            outcome: outcome(&result),
-            elapsed: start.elapsed(),
-        });
-        result
+        logged(
+            self.sink,
+            cmd.display_line(),
+            || read(self.runner.run(&cmd)),
+            outcome,
+        )
     }
+}
+
+/// Run `call`, shown in the Command log as `line` under its own id, with
+/// the outcome `outcome` reads from its result.
+pub(crate) fn logged<T>(
+    sink: &CommandSink,
+    line: String,
+    call: impl FnOnce() -> T,
+    outcome: impl FnOnce(&T) -> CommandOutcome,
+) -> T {
+    let id = sink.next_id();
+    sink.send(CommandEvent::Started {
+        id,
+        line,
+        attached: false,
+    });
+    let start = Instant::now();
+    let result = call();
+    sink.send(CommandEvent::Finished {
+        id,
+        outcome: outcome(&result),
+        elapsed: start.elapsed(),
+    });
+    result
 }
 
 /// What a create call came to. Rate limits, logins and the network are
@@ -664,7 +690,7 @@ struct Rollup {
 }
 
 /// Said on stderr when the network is the problem.
-const OFFLINE_MARKERS: [&str; 8] = [
+pub(crate) const OFFLINE_MARKERS: [&str; 8] = [
     "dial tcp",
     "no such host",
     "connection refused",
@@ -687,6 +713,15 @@ const READ_HEADERS: [&str; 4] = [
 /// (names lower-cased) and the body. Output without a status line is all
 /// body.
 pub fn split_include(stdout: &[u8]) -> (Option<u16>, Vec<(String, String)>, &[u8]) {
+    split_include_reading(stdout, &READ_HEADERS)
+}
+
+/// [`split_include`], keeping only the headers named in `read`
+/// (lower-case): each forge has its own rate-limit names.
+pub(crate) fn split_include_reading<'a>(
+    stdout: &'a [u8],
+    read: &[&str],
+) -> (Option<u16>, Vec<(String, String)>, &'a [u8]) {
     if !stdout.starts_with(b"HTTP/") {
         return (None, Vec::new(), stdout);
     }
@@ -706,8 +741,7 @@ pub fn split_include(stdout: &[u8]) -> (Option<u16>, Vec<(String, String)>, &[u8
         .filter_map(|line| {
             let (name, value) = line.split_once(':')?;
             let name = name.trim().to_ascii_lowercase();
-            READ_HEADERS
-                .contains(&name.as_str())
+            read.contains(&name.as_str())
                 .then(|| (name, value.trim().to_string()))
         })
         .collect();
