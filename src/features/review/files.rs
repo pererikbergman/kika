@@ -489,13 +489,15 @@ impl AppState {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crossterm::event::KeyCode;
 
     use super::*;
     use crate::diff_pane::{DIFF_PREFETCH, DiffPane};
     use crate::features::review::ReviewIntent;
-    use crate::features::review::state::tests::{github, in_detail, press, repo, type_char};
+    use crate::features::review::state::tests::{
+        github, in_detail, opened_on, paged_detail, press, repo, type_char,
+    };
     use crate::intent::AppIntent;
     use crate::keymap::KeyScope;
     use crate::test_support::diff_chunk;
@@ -596,6 +598,57 @@ mod tests {
             result: Ok((range(), rows())),
         }));
         (state, effects)
+    }
+
+    /// A pull request of 150 files whose marks came in two pages, open on
+    /// its files screen with every file listed: the second page answered
+    /// with `second`.
+    pub(crate) fn large_ready(second: String) -> AppState {
+        use kika_forge::review::fixtures::{detail_with_files, page_path};
+        let mut detail = paged_detail(&[detail_with_files(0..100, 150, Some("c1")), second]);
+        // The first queue row, which the detail answers.
+        detail.number = 12;
+        let mut state = opened_on(detail);
+        let tag = check_tag(&type_char(&mut state, 'f'));
+        state.update(AppIntent::Review(ReviewIntent::ObjectsChecked {
+            tag,
+            result: Ok(CommitsHere::All),
+        }));
+        let rows = (0..150)
+            .map(|i| row('M', &page_path(i), lines(1, 0)))
+            .collect();
+        state.update(AppIntent::Review(ReviewIntent::FilesLoaded {
+            tag,
+            result: Ok((range(), rows)),
+        }));
+        state
+    }
+
+    #[test]
+    fn a_file_past_the_first_hundred_shows_the_mark_its_later_page_gave() {
+        use kika_forge::review::fixtures::{files_page, page_state};
+        let state = large_ready(files_page(100..150, None));
+        assert_eq!(state.review.detail.as_ref().unwrap().viewed.len(), 150);
+        let files = state.review.files.as_ref().unwrap();
+        assert_eq!(files.rows.len(), 150);
+        assert_eq!(page_state(120), "VIEWED");
+        assert_eq!(files.rows[120].viewed, Some(ViewedState::Viewed));
+        assert_eq!(files.rows[121].viewed, Some(ViewedState::Dismissed));
+        assert_eq!(files.rows[149].viewed, Some(ViewedState::Unviewed));
+        assert!(files.rows.iter().all(|r| r.viewed.is_some()));
+    }
+
+    #[test]
+    fn a_later_page_rate_limited_leaves_its_files_unknown_and_v_waits() {
+        use kika_forge::REFRESH_LIMITED;
+        use kika_forge::github::fixtures::GRAPHQL_RATE_LIMITED;
+        let mut state = large_ready(GRAPHQL_RATE_LIMITED.to_string());
+        let files = state.review.files.as_ref().unwrap();
+        assert_eq!(files.rows[99].viewed, Some(ViewedState::Viewed));
+        assert_eq!(files.rows[120].viewed, None);
+        state.review.files.as_mut().unwrap().cursor = 120;
+        assert_eq!(type_char(&mut state, 'v'), []);
+        assert_eq!(state.notice.as_deref(), Some(REFRESH_LIMITED));
     }
 
     fn streamed(effects: &[Effect]) -> (&DiffRequest, usize) {
