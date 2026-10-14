@@ -15,31 +15,71 @@ pub const MAX_NOTICE_CHARS: usize = 200;
 
 /// A notice or a disabled-key reason. Literals stay as written; owned text
 /// is sanitised and capped when it is built, so nothing else has to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Notice(Cow<'static, str>);
+#[derive(Debug, Clone)]
+pub struct Notice {
+    text: Cow<'static, str>,
+    /// Where a path at the end of `text` starts, as a byte offset, so a
+    /// narrow row can cut the path from the left and keep the file name.
+    path_at: Option<usize>,
+}
 
 impl Notice {
     /// A trusted literal, kept as written.
     pub const fn fixed(text: &'static str) -> Self {
-        Self(Cow::Borrowed(text))
+        Self {
+            text: Cow::Borrowed(text),
+            path_at: None,
+        }
     }
 
     /// Text made at run time: control and invisible characters are escaped
     /// and anything past `MAX_NOTICE_CHARS` is cut with `…`.
     pub fn owned(text: String) -> Self {
         let safe = sanitize(text.as_bytes());
-        Self(Cow::Owned(cap(safe)))
+        Self {
+            text: Cow::Owned(cap(safe)),
+            path_at: None,
+        }
+    }
+
+    /// `lead` then `path`, stored as `owned` would store them joined, with
+    /// the path's start marked. Sanitising is per char, so the two halves
+    /// sanitise to the joined text. Capped text keeps no mark: its path
+    /// end is gone.
+    pub fn with_path(lead: &str, path: &str) -> Self {
+        let lead = sanitize(lead.as_bytes());
+        let at = lead.len();
+        let safe = lead + &sanitize(path.as_bytes());
+        let cut = safe.chars().nth(MAX_NOTICE_CHARS).is_some();
+        Self {
+            text: Cow::Owned(cap(safe)),
+            path_at: (!cut).then_some(at),
+        }
     }
 
     /// The literal, when the notice is one. Lets tests and callers tell
     /// fixed reasons from built ones.
     pub fn as_fixed(&self) -> Option<&'static str> {
-        match self.0 {
+        match self.text {
             Cow::Borrowed(text) => Some(text),
             Cow::Owned(_) => None,
         }
     }
+
+    /// The text before the path and the path, when the notice ends in one.
+    pub fn path_split(&self) -> Option<(&str, &str)> {
+        self.path_at.map(|at| self.text.split_at(at))
+    }
 }
+
+/// By the text only: the path mark is a display hint, not content.
+impl PartialEq for Notice {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text
+    }
+}
+
+impl Eq for Notice {}
 
 /// Keeps the start of `text`, ending in `…` when it had to cut.
 fn cap(text: String) -> String {
@@ -66,19 +106,19 @@ impl From<String> for Notice {
 
 impl From<Notice> for String {
     fn from(notice: Notice) -> Self {
-        notice.0.into_owned()
+        notice.text.into_owned()
     }
 }
 
 impl PartialEq<str> for Notice {
     fn eq(&self, other: &str) -> bool {
-        *self.0 == *other
+        *self.text == *other
     }
 }
 
 impl PartialEq<&str> for Notice {
     fn eq(&self, other: &&str) -> bool {
-        *self.0 == **other
+        *self.text == **other
     }
 }
 
@@ -86,13 +126,13 @@ impl Deref for Notice {
     type Target = str;
 
     fn deref(&self) -> &str {
-        &self.0
+        &self.text
     }
 }
 
 impl fmt::Display for Notice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.text)
     }
 }
 
@@ -134,6 +174,40 @@ mod tests {
         assert_eq!(&*notice, "Nothing\tto do");
         assert_eq!(notice.as_fixed(), Some("Nothing\tto do"));
         assert_eq!(Notice::fixed("x"), Notice::from("x"));
+    }
+
+    #[test]
+    fn a_path_notice_stores_what_the_joined_text_would() {
+        let lead = "Old path: ";
+        for path in ["src/a.rs", "a\tb/c.rs", "x\u{202E}y/z.rs", "d\x07e/f.rs"] {
+            let marked = Notice::with_path(lead, path);
+            let plain = Notice::owned(format!("{lead}{path}"));
+            assert_eq!(&*marked, &*plain, "{path:?}");
+            assert_eq!(marked, plain, "{path:?}");
+            let safe = sanitize(path.as_bytes());
+            assert_eq!(marked.path_split(), Some((lead, safe.as_str())), "{path:?}");
+            assert_eq!(plain.path_split(), None);
+        }
+    }
+
+    #[test]
+    fn a_path_notice_sanitises_its_lead_too() {
+        let marked = Notice::with_path("a\u{200B}: ", "p");
+        assert_eq!(marked.path_split(), Some(("a<U+200B>: ", "p")));
+    }
+
+    #[test]
+    fn a_capped_path_notice_loses_its_mark_and_keeps_todays_text() {
+        let path = "d/".repeat(MAX_NOTICE_CHARS);
+        let marked = Notice::with_path("Lead: ", &path);
+        assert_eq!(&*marked, &*Notice::owned(format!("Lead: {path}")));
+        assert_eq!(marked.path_split(), None);
+    }
+
+    #[test]
+    fn literals_and_owned_text_have_no_path() {
+        assert_eq!(Notice::fixed("a/b").path_split(), None);
+        assert_eq!(Notice::from("a/b".to_string()).path_split(), None);
     }
 
     #[test]
