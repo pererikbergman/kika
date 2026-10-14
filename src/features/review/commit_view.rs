@@ -169,6 +169,8 @@ impl AppState {
             files.cursor = 0;
             files.stage = FilesStage::Listing;
             files.seq = Some(tag.seq);
+            files.thread = None;
+            files.jump = None;
         }
         let mut effects = self.close_diff();
         effects.push(Effect::LoadReviewRange { tag, range });
@@ -342,6 +344,7 @@ mod tests {
                         | Effect::MergePullRequest { .. }
                         | Effect::LoadReviewQueues { .. }
                         | Effect::LoadPrDetail { .. }
+                        | Effect::LoadPrDiscussion { .. }
                         | Effect::FetchReviewCommits { .. }
                         | Effect::LoadPullRequests { .. }
                         | Effect::OpenUrl { .. }

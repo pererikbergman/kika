@@ -363,6 +363,16 @@ pub enum Effect {
         number: u64,
         limited: Vec<(ForgeHost, i64)>,
     },
+    /// Read pull request `number`'s review threads and conversation, found
+    /// as for `LoadReviewQueues`. Always answered by one
+    /// `ReviewIntent::DiscussionLoaded`.
+    LoadPrDiscussion {
+        tag: Tag,
+        hosts: Vec<ForgeHost>,
+        repo: Option<ForgeRepo>,
+        number: u64,
+        limited: Vec<(ForgeHost, i64)>,
+    },
     /// See whether a pull request's `head` and `base` commits are here;
     /// for missing ones, find the remote of `repo` on one of `hosts` to
     /// fetch them from. Local only. Always answered by one
@@ -1217,6 +1227,22 @@ impl Runtime {
                 number,
                 limited,
             } => review::effects::load_detail(
+                self.forge.clone(),
+                runner,
+                tx,
+                tag,
+                hosts,
+                repo,
+                number,
+                limited,
+            ),
+            Effect::LoadPrDiscussion {
+                tag,
+                hosts,
+                repo,
+                number,
+                limited,
+            } => review::effects::load_discussion(
                 self.forge.clone(),
                 runner,
                 tx,

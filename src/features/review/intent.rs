@@ -4,6 +4,7 @@
 
 use super::{CommitsHere, PrCommit, PrFileRow};
 use crate::effect::Tag;
+use kika_forge::discussion::PrDiscussion;
 use kika_forge::review::{PrDetail, Queues, ReviewError};
 use kika_forge::{CreateError, ForgeHost, ForgeRepo};
 use kika_git::commit_files::CommitRange;
@@ -94,6 +95,19 @@ pub(crate) enum ReviewIntent {
     CommitsLoaded {
         tag: Tag,
         result: Result<(Vec<PrCommit>, bool), String>,
+    },
+    /// Go to the next unresolved review thread, or the previous one,
+    /// across the files.
+    NextThread,
+    PrevThread,
+    /// Pull request `number`'s review threads and conversation, `None`
+    /// when GitHub has no such pull request, or why they could not be
+    /// read; `repo` as for the queues.
+    DiscussionLoaded {
+        tag: Tag,
+        number: u64,
+        repo: Option<ForgeRepo>,
+        result: Result<Option<PrDiscussion>, ReviewError>,
     },
     /// The range shown, merge base to head or one commit against its first
     /// parent, and its changed files, or why not.

@@ -103,6 +103,11 @@ pub struct PrFiles {
     pub seq: Option<u64>,
     /// The viewed mark in flight on GitHub, if any.
     pub marking: Option<ViewedMark>,
+    /// The review thread `]`/`[` went to, by index into the discussion's
+    /// threads.
+    pub thread: Option<usize>,
+    /// A thread whose row has not streamed in yet, scrolled to when it does.
+    pub jump: Option<usize>,
 }
 
 impl PrFiles {
@@ -123,6 +128,8 @@ impl PrFiles {
             fetched: false,
             seq: Some(seq),
             marking: None,
+            thread: None,
+            jump: None,
         }
     }
 
@@ -434,7 +441,7 @@ impl AppState {
     }
 
     /// Stream the selected file's diff over the range shown, from `start`.
-    fn review_file_diff(&mut self, start: DiffStart) -> Vec<Effect> {
+    pub(super) fn review_file_diff(&mut self, start: DiffStart) -> Vec<Effect> {
         let request = self.review.files.as_ref().and_then(|files| {
             let range = files.range.as_ref()?;
             let row = files.selected()?;
@@ -463,6 +470,8 @@ impl AppState {
             return vec![];
         }
         files.cursor = next;
+        files.thread = None;
+        files.jump = None;
         self.review_file_diff(DiffStart::Keep)
     }
 

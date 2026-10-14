@@ -93,6 +93,49 @@ pub(crate) fn load_detail(
     );
 }
 
+/// Read pull request `number`'s review threads and conversation; always
+/// answered by one `ReviewIntent::DiscussionLoaded`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn load_discussion(
+    forge: Option<ForgeContext>,
+    runner: Arc<dyn GitRunner>,
+    tx: UnboundedSender<AppIntent>,
+    tag: Tag,
+    hosts: Vec<ForgeHost>,
+    repo: Option<ForgeRepo>,
+    number: u64,
+    limited: Vec<(ForgeHost, i64)>,
+) {
+    background::run(
+        tx,
+        move || {
+            let Some(forge) = forge else {
+                // No forge client: nothing may reach the network.
+                return (None, Err(ReviewError::NoForgeHost));
+            };
+            let load = ReviewLoad {
+                hosts: &hosts,
+                known: repo.as_ref(),
+                limited: &limited,
+                now: forge.now(),
+            };
+            review::run(runner.as_ref(), &forge, &load, |gh, repo| {
+                gh.fetch_discussion(repo, number)
+            })
+        },
+        // A panic still answers, or the threads would stay loading.
+        |_| (None, Err(ReviewError::Status(ForgeStatus::Failed))),
+        move |(repo, result)| {
+            AppIntent::Review(ReviewIntent::DiscussionLoaded {
+                tag,
+                number,
+                repo,
+                result,
+            })
+        },
+    );
+}
+
 /// See whether `head` and `base` are here, and where to fetch the missing
 /// ones from. Local only; always answered by one `ReviewIntent::ObjectsChecked`.
 pub(crate) fn check_commits(
@@ -426,6 +469,80 @@ mod tests {
             }
         }
         assert_eq!(gh.calls(), []);
+        git.assert_done();
+    }
+
+    #[tokio::test]
+    async fn a_discussion_load_answers_once_and_reaches_gh_only_on_an_allowed_host() {
+        use kika_forge::allow::AllowRule;
+        use kika_forge::discussion::fixtures::DISCUSSION;
+        use kika_forge::github::{FakeGh, answer};
+
+        let github = ForgeHost::parse("github.com").unwrap();
+        let repo = ForgeRepo {
+            host: "github.com".into(),
+            owner: "acme".into(),
+            name: "widgets".into(),
+        };
+        let load = |hosts: Vec<ForgeHost>| Effect::LoadPrDiscussion {
+            tag: forge_tag(),
+            hosts,
+            repo: Some(repo.clone()),
+            number: 42,
+            limited: vec![],
+        };
+        let gh = Arc::new(FakeGh::new().reply(answer(DISCUSSION)));
+        let client = || {
+            Some(ForgeContext {
+                gh: gh.clone(),
+                glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
+                sink: CommandSink::new(),
+                cache_dir: None,
+            })
+        };
+        let git = Arc::new(FakeRunner::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        Runtime::new(git.clone(), tx)
+            .with_forge(client())
+            .spawn(load(vec![github.clone()]));
+        match rx.recv().await {
+            Some(AppIntent::Review(ReviewIntent::DiscussionLoaded {
+                tag,
+                number: 42,
+                repo: Some(found),
+                result: Ok(Some(discussion)),
+            })) => {
+                assert_eq!(tag, forge_tag());
+                assert_eq!(found, repo);
+                assert_eq!(discussion.threads.len(), 5);
+                assert_eq!(discussion.conversation.len(), 3);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(gh.calls().len(), 1);
+
+        // No forge client, no host, or a host whose allow-list leaves the
+        // repository out: nobody is asked.
+        let refused = Some(AppIntent::Review(ReviewIntent::DiscussionLoaded {
+            tag: forge_tag(),
+            number: 42,
+            repo: None,
+            result: Err(ReviewError::NoForgeHost),
+        }));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        Runtime::new(git.clone(), tx).spawn(load(vec![github.clone()]));
+        assert_eq!(rx.recv().await, refused);
+        let left_out = github
+            .clone()
+            .with_allow(vec![AllowRule::parse("other").unwrap()]);
+        for hosts in [vec![], vec![left_out]] {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            Runtime::new(git.clone(), tx)
+                .with_forge(client())
+                .spawn(load(hosts));
+            assert_eq!(rx.recv().await, refused);
+        }
+        assert_eq!(gh.calls().len(), 1);
         git.assert_done();
     }
 
