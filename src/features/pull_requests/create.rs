@@ -3,7 +3,6 @@
 //! or create one on GitHub. Every URL is built here from the remotes; only
 //! a create reaches the network, and only after a `y`.
 
-use std::borrow::Cow;
 use std::ffi::OsString;
 
 use crate::clipboard::CopyWhat;
@@ -135,7 +134,7 @@ pub(crate) fn create_disabled(state: &AppState) -> Option<Reason> {
         Some((ForgeKind::GitHub, repo)) => repo,
     };
     if let Some(badge) = state.forge.badges.get(&branch.name) {
-        return Some(Cow::Owned(format!(
+        return Some(Reason::from(format!(
             "The branch already has pull request #{}",
             badge.number
         )));
@@ -253,7 +252,7 @@ impl AppState {
         };
         // Its own argument, last: never joined into another one.
         argv.push(url.clone().into());
-        self.notice_text = Some(format!("Opening {url}"));
+        self.notice = Some(format!("Opening {url}").into());
         vec![Effect::OpenUrl { argv }]
     }
 
@@ -479,10 +478,13 @@ impl AppState {
         let head = head_ref(&draft, &target);
         let seq = self.take_seq();
         let tag = self.user_tag(seq);
-        self.notice_text = Some(format!(
-            "Creating the pull request on {}/{}…",
-            target.owner, target.name
-        ));
+        self.notice = Some(
+            format!(
+                "Creating the pull request on {}/{}…",
+                target.owner, target.name
+            )
+            .into(),
+        );
         self.pr_create = Some(PrCreating {
             seq,
             branch: draft.branch,
@@ -523,10 +525,9 @@ impl AppState {
                     .as_ref()
                     .is_some_and(|r| same_repo(r, target));
                 if !on_badge_repo {
-                    self.notice_text = Some(format!(
-                        "Created #{number} on {}/{}",
-                        target.owner, target.name
-                    ));
+                    self.notice = Some(
+                        format!("Created #{number} on {}/{}", target.owner, target.name).into(),
+                    );
                     return vec![];
                 }
                 let badge = PrBadge {
@@ -537,7 +538,7 @@ impl AppState {
                 // Loads from here on are asked after the create.
                 let known_from = self.next_seq;
                 self.forge.add_created(creating.branch, badge, known_from);
-                self.notice_text = Some(format!("Created pull request #{number}"));
+                self.notice = Some(format!("Created pull request #{number}").into());
                 self.forge.want_refresh();
                 self.load_pull_requests()
             }
@@ -688,7 +689,7 @@ mod tests {
             .flat_map(|id| menu::items(*id))
             .find(|item| item.label == label)
             .unwrap_or_else(|| panic!("no item {label}"));
-        (item.disabled)(state).map(Cow::into_owned)
+        (item.disabled)(state).map(String::from)
     }
 
     fn top_pick(state: &AppState) -> &PickList {
@@ -768,7 +769,7 @@ mod tests {
         let url = "https://github.com/acme/widgets/pull/7";
         assert_eq!(effects, [Effect::Clipboard(url.into())]);
         assert_eq!(
-            state.notice_text.as_deref(),
+            state.notice.as_deref(),
             Some(format!("Copied URL: {}", crate::clipboard::preview(url)).as_str())
         );
     }
@@ -820,11 +821,11 @@ mod tests {
         assert_eq!(effects, [Effect::Clipboard(url)]);
         assert!(
             state
-                .notice_text
+                .notice
                 .as_deref()
                 .is_some_and(|t| t.starts_with("Copied URL: https://")),
             "{:?}",
-            state.notice_text
+            state.notice
         );
 
         state.branches.remotes.list.rows.clear();
@@ -1214,7 +1215,7 @@ mod tests {
         assert_eq!(effects, vec![]);
         assert!(state.forge.badges.is_empty());
         assert_eq!(
-            state.notice_text.as_deref(),
+            state.notice.as_deref(),
             Some("Created #5 on acme-org/widgets")
         );
     }

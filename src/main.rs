@@ -29,6 +29,7 @@ mod list_filter;
 mod list_input;
 mod menu;
 mod model;
+mod notice;
 mod op;
 mod op_slot;
 mod pick_list;
