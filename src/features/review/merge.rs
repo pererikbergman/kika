@@ -32,6 +32,9 @@ pub struct PrMerging {
 /// Why `M` cannot start a merge: only from a loaded pull request's
 /// detail screen.
 pub(crate) fn merge_disabled(state: &AppState) -> Option<Reason> {
+    if let Some(reason) = super::conversation::on_conversation(state) {
+        return Some(reason);
+    }
     let shown = matches!(state.context, Context::Review { .. })
         && matches!(
             (state.review.screen, &state.review.detail),

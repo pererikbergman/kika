@@ -33,7 +33,9 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
         .map(|r| format!(" · {}/{}", r.owner, r.name))
         .unwrap_or_default();
     let number = match review.screen {
-        ReviewScreen::Detail(number) | ReviewScreen::Files(number) => format!(" #{number}"),
+        ReviewScreen::Detail(number)
+        | ReviewScreen::Files(number)
+        | ReviewScreen::Conversation(number) => format!(" #{number}"),
         ReviewScreen::Queue => String::new(),
     };
     let title = format!(" Review{repo}{number} ");
@@ -47,6 +49,7 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
             Some(files) => return files_screen(state, files, frame, inner),
             None => Vec::new(),
         },
+        ReviewScreen::Conversation(_) => super::conversation_view::conversation_view(review, inner),
     };
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -309,6 +312,10 @@ fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rec
         )),
     };
     frame.render_widget(body.block(block), diff);
+    if let Some(reader) = &files.reader {
+        let discussion = state.review.discussion.as_ref();
+        super::reader_view::render_reader(files, discussion, reader, frame, inner);
+    }
 }
 
 /// What the list shows, long and short: `whole pull request` or
@@ -1046,6 +1053,7 @@ mod tests {
             marking: None,
             thread: None,
             jump: None,
+            reader: None,
         });
         state
     }

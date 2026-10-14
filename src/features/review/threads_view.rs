@@ -73,7 +73,7 @@ pub fn thread_summary(review: &ReviewState) -> Option<String> {
 }
 
 /// `line` cut to `width` columns, ending in `…` when anything is cut.
-fn clip_line(line: Line<'static>, width: usize) -> Line<'static> {
+pub(super) fn clip_line(line: Line<'static>, width: usize) -> Line<'static> {
     if line.width() <= width {
         return line;
     }
@@ -108,12 +108,12 @@ fn clip_line(line: Line<'static>, width: usize) -> Line<'static> {
     Line::from(spans).style(style)
 }
 
-fn dim() -> Style {
+pub(super) fn dim() -> Style {
     Style::new().add_modifier(Modifier::DIM)
 }
 
 /// What the header of a thread above the diff says before its author.
-fn top_label(thread: &ReviewThread, placement: Placement) -> String {
+pub(super) fn top_label(thread: &ReviewThread, placement: Placement) -> String {
     match placement {
         Placement::File => "file comment".into(),
         Placement::OtherView => "on the whole pull request (c)".into(),
@@ -133,7 +133,7 @@ fn top_label(thread: &ReviewThread, placement: Placement) -> String {
 }
 
 /// Where a line thread sits: `line N` or `lines A–B`.
-fn span_label(thread: &ReviewThread) -> Option<String> {
+pub(super) fn span_label(thread: &ReviewThread) -> Option<String> {
     let (start, end) = thread_span(thread)?;
     Some(match start {
         Some(start) if start != end => format!("lines {}–{}", start.line, end.line),
@@ -188,7 +188,7 @@ fn bar() -> Span<'static> {
 }
 
 /// A context line of an outdated thread, coloured by its `+`/`-`.
-fn context_line(text: &str, width: usize) -> Line<'static> {
+pub(super) fn context_line(text: &str, width: usize) -> Line<'static> {
     let kind = match text.chars().next() {
         Some('+') => LineKind::Added,
         Some('-') => LineKind::Removed,
