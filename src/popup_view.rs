@@ -17,7 +17,7 @@ use crate::model::AppState;
 use crate::pick_list::PickList;
 use crate::popup::{CredentialPrompt, ErrorPopup, LineInput, Popup};
 use crate::view::{
-    COMMIT_WIDTH, centered, clip, elide_left, render_question, tail, width_of, wrap,
+    COMMIT_WIDTH, centered, clip, elide_left, elide_right, render_question, tail, width_of, wrap,
 };
 use kika_git::safe_text::sanitize;
 
@@ -78,14 +78,22 @@ fn nudge(area: Rect, depth: usize) -> Rect {
 /// A box of items with the `cursor` row reversed, scrolled so that row is
 /// in view on a short screen, with `▲`/`▼` on the border where rows are
 /// cut. A menu below the top has no cursor. A disabled item is dimmed and
-/// italic, not only grey, and says why after its label.
+/// italic, not only grey, and says why after its label. A row wider than
+/// the screen ends in `…`, as the bar's notice does: the reason gives way
+/// first, so the label stays whole while it fits.
 fn render_menu(state: &AppState, id: MenuId, cursor: Option<usize>, frame: &mut Frame, area: Rect) {
     let title = format!(" {} ", id.title());
+    let room = usize::from(area.width.saturating_sub(2));
     let rows: Vec<(String, bool)> = menu::items(id)
         .iter()
         .map(|item| match (item.disabled)(state) {
-            Some(reason) => (format!(" {}  {reason} ", item.label), true),
-            None => (format!(" {} ", item.label), false),
+            Some(reason) => {
+                let head = format!(" {}  ", item.label);
+                let left = room.saturating_sub(width_of(&head) + 1);
+                let row = format!("{head}{} ", elide_right(&reason, left));
+                (elide_right(&row, room), true)
+            }
+            None => (elide_right(&format!(" {} ", item.label), room), false),
         })
         .collect();
     let width = rows
@@ -563,6 +571,84 @@ mod tests {
             .skip(x as usize + row.chars().count())
             .collect();
         assert!(after.starts_with('│'), "{rows:#?}");
+    }
+
+    /// The Stash menu open over the Files panel, the cursor on the first
+    /// row of `files`.
+    fn stash_menu_over(files: Vec<FileEntry>) -> AppState {
+        let mut state = AppState::new(Context::Workspace);
+        state.files.loaded = true;
+        state.files.rows = files;
+        state.focus = crate::model::Focus::Files;
+        state.popups = vec![Popup::Menu {
+            id: MenuId::Stash,
+            cursor: 0,
+        }];
+        state
+    }
+
+    fn renamed(path: &str, old: &str) -> FileEntry {
+        FileEntry {
+            path: path.into(),
+            orig_path: Some(old.into()),
+            index: 'R',
+            worktree: '.',
+            kind: EntryKind::Renamed,
+        }
+    }
+
+    /// The text of the menu row starting at `label`, up to the box's right
+    /// border, which must be on the same screen row.
+    fn menu_row(rows: &[String], label: &str) -> String {
+        let (x, y) = find(rows, label);
+        let row: String = rows[y as usize].chars().skip(x as usize).collect();
+        let end = row
+            .find('│')
+            .unwrap_or_else(|| panic!("no border: {rows:#?}"));
+        row[..end].to_string()
+    }
+
+    #[test]
+    fn a_long_stash_refusal_is_cut_with_an_ellipsis_inside_the_menu() {
+        let old = "src/features/stash/push.rs";
+        let taken = FileEntry {
+            path: old.into(),
+            orig_path: None,
+            index: '?',
+            worktree: '?',
+            kind: EntryKind::Untracked,
+        };
+        let path_taken = stash_menu_over(vec![renamed("new.rs", old), taken]);
+        let case_only = stash_menu_over(vec![renamed("old.txt", "Old.txt")]);
+        let cases = [
+            (path_taken, "A file now sits at"),
+            (case_only, "This rename only changes"),
+        ];
+        for (state, start) in &cases {
+            let reason = crate::features::stash::keys::stash_file_disabled(state).unwrap();
+            for width in [80, 40] {
+                let (_, rows) = draw(state, width, 24);
+                let row = menu_row(&rows, " Stash selected files…");
+                let label = " Stash selected files…  ";
+                assert!(row.starts_with(label), "{width}: {rows:#?}");
+                let shown = row[label.len()..].trim_end();
+                // Cut, not clipped: the end of the reason gives way to `…`.
+                assert!(shown.ends_with('…'), "{width}: {shown:?}");
+                let kept = shown.trim_end_matches('…');
+                assert!(reason.starts_with(kept), "{width}: {shown:?}");
+                if width == 80 {
+                    assert!(kept.starts_with(start), "{shown:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_menu_too_narrow_for_a_label_cuts_the_whole_row() {
+        let state = stash_menu_over(vec![renamed("old.txt", "Old.txt")]);
+        let (_, rows) = draw(&state, 16, 24);
+        let row = menu_row(&rows, " Stash select");
+        assert!(row.trim_end().ends_with('…'), "{rows:#?}");
     }
 
     #[test]
@@ -1387,9 +1473,11 @@ mod tests {
         let (_, rows) = draw(&hard_reset_leaving_eight(), 80, 24);
         assert!(contains(&rows, "thrown away"), "{rows:#?}");
         assert!(contains(&rows, "and 3 more"), "{rows:#?}");
-        // The keep hint names the old HEAD; wrapping may split the command.
-        assert!(contains(&rows, "git branch <name>"), "{rows:#?}");
+        // The keep hint names the key and the old HEAD; wrapping may
+        // split it.
+        assert!(contains(&rows, "then N to"), "{rows:#?}");
         assert!(contains(&rows, "fedcba9 (y/n)"), "{rows:#?}");
+        assert!(!contains(&rows, "git branch"), "{rows:#?}");
     }
 
     #[test]

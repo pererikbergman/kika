@@ -7,6 +7,7 @@ use super::tags::{PendingTag, TagsList};
 use crate::filtered_list::{FilteredList, Row};
 use crate::intent::Scroll;
 use kika_git::branches::{Branch, BranchName, LogRow};
+use kika_git::commit_files::CommitId;
 use kika_git::safe_text::terminal_safe;
 
 /// Which list the Branches panel shows.
@@ -48,6 +49,9 @@ pub struct BranchesPanel {
     /// taken when the prompt opened, so a reload while the user types
     /// cannot change it.
     pub pending: Option<BranchName>,
+    /// The detached `HEAD` an open branch-at-HEAD prompt was asked from,
+    /// so the answer runs nothing once `HEAD` has moved.
+    pub pending_head: Option<CommitId>,
     pub tab: BranchesTab,
     pub remotes: RemotesList,
     pub tags: TagsList,

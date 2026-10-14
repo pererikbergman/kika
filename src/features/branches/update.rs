@@ -41,6 +41,10 @@ pub(crate) fn update(state: &mut AppState, intent: BranchesIntent) -> Vec<Effect
         }
         BranchesIntent::Delete => state.ask_delete_branch(),
         BranchesIntent::CreateNamed(text) => return state.create_branch_named(&text),
+        BranchesIntent::NewAtHead => state.ask_branch_at_head(),
+        BranchesIntent::CreateAtHeadNamed(text) => {
+            return state.create_branch_at_head_named(&text);
+        }
         BranchesIntent::RenameTo(text) => return state.rename_branch_to(&text),
         BranchesIntent::ConfirmDelete { force } => return state.confirm_delete_branch(force),
         BranchesIntent::Remotes(i) => return remotes::update(state, i),
@@ -222,16 +226,25 @@ impl AppState {
         let Some(branch) = self.branches.pending.take() else {
             return vec![];
         };
+        let Some(name) = self.branch_name_to_run(text) else {
+            return vec![];
+        };
+        self.start_op(Ok(Some(op(branch, name))))
+    }
+
+    /// A branch prompt's answer, trimmed, when an op may run with it now;
+    /// else `None`, saying why in the bar.
+    fn branch_name_to_run(&mut self, text: &str) -> Option<String> {
         let name = text.trim();
         if name.is_empty() {
             self.notice = Some("A branch needs a name".into());
-            return vec![];
+            return None;
         }
         if self.op_is_running() {
             self.notice = Some(keymap::OP_RUNNING.into());
-            return vec![];
+            return None;
         }
-        self.start_op(Ok(Some(op(branch, name.to_string()))))
+        Some(name.to_string())
     }
 
     /// Create the branch the prompt named, unless a bisect began while it
@@ -243,6 +256,38 @@ impl AppState {
             return vec![];
         }
         self.named_branch_op(text, |from, name| GitOp::CreateBranch { name, from })
+    }
+
+    /// Ask for a name, keeping the detached `HEAD` for the answer.
+    pub(crate) fn ask_branch_at_head(&mut self) {
+        if let Some(reason) = keys::branch_at_head_disabled(self) {
+            self.notice = Some(reason);
+            return;
+        }
+        self.branches.pending_head = self.detached_head();
+        self.popups.push(Popup::Prompt {
+            kind: PromptKind::NewBranchAtHead,
+            input: LineInput::default(),
+        });
+    }
+
+    /// Create the branch the prompt named at the `HEAD` kept when it
+    /// opened, and check it out. Runs nothing once `HEAD` has moved, or a
+    /// bisect began, while the prompt was open.
+    pub(crate) fn create_branch_at_head_named(&mut self, text: &str) -> Vec<Effect> {
+        let Some(head) = self.branches.pending_head.take() else {
+            return vec![];
+        };
+        if self.bisect_refuses() {
+            return vec![];
+        }
+        let Some(name) = self.branch_name_to_run(text) else {
+            return vec![];
+        };
+        if !self.head_still(Some(&head)) {
+            return vec![];
+        }
+        self.start_op(Ok(Some(GitOp::CreateBranchAt { name, at: head })))
     }
 
     /// Rename the branch kept when the prompt opened.
@@ -332,9 +377,18 @@ impl AppState {
         self.start_op(Ok(op))
     }
 
-    /// Closing a branch name or upstream prompt forgets the branch it was
-    /// asked for.
+    /// Closing a branch name or upstream prompt forgets the branch, or
+    /// the `HEAD`, it was asked for.
     pub(crate) fn branches_popup_closed(&mut self, closed: &Popup) {
+        if matches!(
+            closed,
+            Popup::Prompt {
+                kind: PromptKind::NewBranchAtHead,
+                ..
+            }
+        ) {
+            self.branches.pending_head = None;
+        }
         if matches!(
             closed,
             Popup::Prompt {
@@ -865,5 +919,110 @@ mod tests {
             assert_eq!(state.popups, [], "{kind:?}");
             assert_eq!(state.branches.pending, None, "{kind:?}");
         }
+    }
+
+    /// `detached_on_commit`, with `HEAD` on a full id the log has not
+    /// loaded, so the prompt shortens it itself.
+    fn detached_on_hex() -> (AppState, kika_git::commit_files::CommitId) {
+        let mut state = detached_on_commit();
+        let hex = "fedcba9".repeat(6)[..40].to_string();
+        state.branch.as_mut().unwrap().head = kika_git::status::Head::Detached(hex.clone());
+        (
+            state,
+            kika_git::commit_files::CommitId::parse(&hex).unwrap(),
+        )
+    }
+
+    #[test]
+    fn shift_n_on_a_detached_head_makes_a_branch_there() {
+        let (mut state, head) = detached_on_hex();
+        press(&mut state, KeyCode::Char('N'));
+        assert!(matches!(
+            state.popups.as_slice(),
+            [Popup::Prompt {
+                kind: PromptKind::NewBranchAtHead,
+                ..
+            }]
+        ));
+        assert_eq!(state.branches.pending_head, Some(head.clone()));
+        assert_eq!(
+            state.prompt_title(PromptKind::NewBranchAtHead),
+            "New branch at fedcba9"
+        );
+
+        type_text(&mut state, " topic ");
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+
+        assert_eq!(
+            op,
+            GitOp::CreateBranchAt {
+                name: "topic".into(),
+                at: head
+            }
+        );
+        assert_eq!(state.branches.pending_head, None);
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn a_branch_at_head_runs_nothing_once_head_has_moved() {
+        // Detached elsewhere, then onto a branch.
+        let moved = [
+            kika_git::status::Head::Detached("c2".into()),
+            on_branch("main").head,
+        ];
+        for head in moved {
+            let (mut state, _) = detached_on_hex();
+            press(&mut state, KeyCode::Char('N'));
+            type_text(&mut state, "topic");
+            state.branch.as_mut().unwrap().head = head.clone();
+            assert_eq!(press(&mut state, KeyCode::Enter), vec![], "{head:?}");
+            let notice = state.notice.as_deref();
+            assert_eq!(notice, Some("HEAD moved; try again"), "{head:?}");
+            assert_eq!(state.held_seq(), None, "{head:?}");
+            assert_eq!(state.branches.pending_head, None, "{head:?}");
+        }
+    }
+
+    #[test]
+    fn a_branch_at_head_needs_a_name_and_a_free_op_slot() {
+        let (mut state, _) = detached_on_hex();
+        press(&mut state, KeyCode::Char('N'));
+        type_text(&mut state, "  ");
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.notice.as_deref(), Some("A branch needs a name"));
+        assert_eq!(state.branches.pending_head, None);
+
+        press(&mut state, KeyCode::Char('N'));
+        type_text(&mut state, "topic");
+        state.hold_op(7);
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.notice.as_deref(), Some(crate::keymap::OP_RUNNING));
+        assert_eq!(state.held_seq(), Some(7));
+    }
+
+    #[test]
+    fn a_bisect_begun_while_the_prompt_was_open_refuses_the_branch() {
+        let (mut state, _) = detached_on_hex();
+        press(&mut state, KeyCode::Char('N'));
+        type_text(&mut state, "topic");
+        let branch = state.branch.as_mut().unwrap();
+        branch
+            .in_progress
+            .push(kika_git::repo_state::Operation::Bisect);
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.held_seq(), None);
+        assert!(state.notice.is_some());
+        assert_eq!(state.branches.pending_head, None);
+    }
+
+    #[test]
+    fn esc_closes_the_branch_at_head_prompt_and_forgets_head() {
+        let (mut state, _) = detached_on_hex();
+        press(&mut state, KeyCode::Char('N'));
+        assert!(state.branches.pending_head.is_some());
+        assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
+        assert_eq!(state.popups, []);
+        assert_eq!(state.branches.pending_head, None);
     }
 }

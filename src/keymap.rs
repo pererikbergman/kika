@@ -22,8 +22,8 @@ use kika_git::remotes::RemoteName;
 use kika_git::repo_state::{Operation, resumable};
 
 /// Why a key or menu item cannot run, shown to the user. Most reasons are
-/// fixed text; some name a branch or a commit.
-pub type Reason = std::borrow::Cow<'static, str>;
+/// fixed text; some name a branch or a commit, which `Notice` makes safe.
+pub type Reason = crate::notice::Notice;
 
 /// A key as pressed: just the code and modifiers, without the event kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2451,6 +2451,7 @@ static CHUNKS: &[&[Binding]] = &[
     branches::keys::BRANCHES_TABS,
     remotes::keys::REMOTES_KEYS,
     tags::keys::TAGS_KEYS,
+    branches::keys::BRANCHES_AT_HEAD,
     commits::bisect::keys::BISECT_COMMITS,
     operation::keys::OPERATION_STATUS,
     commits::bisect::keys::BISECT_STATUS,
@@ -5874,6 +5875,7 @@ mod tests {
         "tags.prev_tab",
         "commits.tag",
         "commits.tag_annotated",
+        "commits.branch_at_head",
         "commits.bisect",
         "status.continue",
         "status.skip",

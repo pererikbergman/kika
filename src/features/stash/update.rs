@@ -1112,37 +1112,80 @@ mod tests {
         // The file at the old path is listed but not marked.
         let files = vec![renamed("new.rs", "old.rs"), untracked("old.rs")];
         let (mut state, _) = with_files(files, 24);
-        let reason = keys::STASH_RENAME_TAKEN;
-        assert_eq!(keys::stash_file_disabled(&state), Some(reason.into()));
+        let reason: Option<keymap::Reason> =
+            Some(keys::stash_rename_taken(&"old.rs".into()).into());
+        assert_eq!(
+            reason.as_deref(),
+            Some("A file now sits at the renamed file's old path: old.rs")
+        );
+        assert_eq!(keys::stash_file_disabled(&state), reason);
         // Marked too, it is refused for the same reason.
         press_char(&mut state, 'V');
         press_char(&mut state, 'j');
-        assert_eq!(keys::stash_file_disabled(&state), Some(reason.into()));
+        assert_eq!(keys::stash_file_disabled(&state), reason);
         assert_eq!(stash_menu_item(&mut state, 3), vec![]);
-        assert_eq!(state.notice, Some(reason.into()));
+        assert_eq!(state.notice, reason);
         assert_eq!(state.stash_draft, None);
         assert!(state.files.range_anchor.is_some());
     }
 
     #[test]
-    fn a_rename_whose_old_directory_is_now_a_file_is_refused_with_a_reason() {
-        let reason = Some(keys::STASH_RENAME_TAKEN.into());
+    fn a_rename_whose_old_directory_is_now_a_file_is_refused_naming_it() {
+        let named = |p: &str| Some(keys::stash_rename_taken(&p.into()).into());
         for taken in ["d", "d/e"] {
             let files = vec![renamed("new.rs", "d/e/old.rs"), untracked(taken)];
             let (state, _) = with_files(files, 24);
-            assert_eq!(keys::stash_file_disabled(&state), reason, "{taken}");
+            assert_eq!(keys::stash_file_disabled(&state), named(taken), "{taken}");
         }
         // A case-insensitive filesystem would fold these onto the old path
-        // or its directory, so they are refused too.
+        // or its directory, so they are refused too, naming the row.
         for (old, taken) in [("Old.rs", "old.rs"), ("D/old.rs", "d")] {
             let files = vec![renamed("new.rs", old), untracked(taken)];
             let (state, _) = with_files(files, 24);
-            assert_eq!(keys::stash_file_disabled(&state), reason, "{taken}");
+            assert_eq!(keys::stash_file_disabled(&state), named(taken), "{taken}");
         }
         // A file beside the old path, inside its directory, is fine.
         let files = vec![renamed("new.rs", "d/e/old.rs"), untracked("d/e/other.rs")];
         let (state, _) = with_files(files, 24);
         assert_eq!(keys::stash_file_disabled(&state), None);
+    }
+
+    #[test]
+    fn a_case_only_rename_is_refused_as_one() {
+        let reason = Some(keys::STASH_RENAME_CASE.into());
+        assert_eq!(
+            keys::STASH_RENAME_CASE,
+            "This rename only changes case and cannot be stashed by file"
+        );
+        // Alone.
+        let (mut state, _) = with_files(vec![renamed("old.txt", "Old.txt")], 24);
+        assert_eq!(keys::stash_file_disabled(&state), reason);
+        assert_eq!(stash_menu_item(&mut state, 3), vec![]);
+        assert_eq!(state.notice, reason);
+        assert_eq!(state.stash_draft, None);
+        // Marked with another, clean, entry.
+        let files = vec![renamed("old.txt", "Old.txt"), changed("a.rs", '.', 'M')];
+        let (mut state, _) = with_files(files, 24);
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        assert_eq!(keys::stash_file_disabled(&state), reason);
+        assert_eq!(stash_menu_item(&mut state, 3), vec![]);
+        assert_eq!(state.notice, reason);
+        assert_eq!(state.stash_draft, None);
+    }
+
+    #[test]
+    fn the_path_in_the_way_is_named_terminal_safe() {
+        let raw = "a\x1b[31m\u{202E}b";
+        let files = vec![renamed("new.rs", raw), untracked(raw)];
+        let (state, _) = with_files(files, 24);
+        let reason = keys::stash_file_disabled(&state);
+        assert_eq!(reason, Some(keys::stash_rename_taken(&raw.into()).into()));
+        let reason = reason.as_deref().unwrap();
+        assert!(!reason.contains('\x1b'), "{reason:?}");
+        assert!(!reason.contains('\u{202E}'), "{reason:?}");
+        assert!(reason.contains('\u{FFFD}'), "{reason:?}");
+        assert!(reason.contains("<U+202E>"), "{reason:?}");
     }
 
     #[test]

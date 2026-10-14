@@ -44,7 +44,7 @@ impl AppState {
         let added = self.copied.toggle(entry);
         let verb = if added { "Copied" } else { "Removed" };
         let n = self.copied.len();
-        self.notice_text = Some(format!("{verb} {short} ({n} copied)"));
+        self.notice = Some(format!("{verb} {short} ({n} copied)").into());
     }
 
     /// Cherry-pick the copied commits on the terminal, so hooks and
@@ -93,7 +93,7 @@ impl AppState {
             n => format!("{n} merges skipped, "),
         };
         let total = self.copied.len();
-        self.notice_text = Some(format!("{verb} {count} ({skipped}{total} copied)"));
+        self.notice = Some(format!("{verb} {count} ({skipped}{total} copied)").into());
     }
 }
 
@@ -119,19 +119,13 @@ mod tests {
         assert_eq!(press_char(&mut state, 'c'), vec![]);
         assert_eq!(state.copied.ids(), [cid(COPIED_OID)]);
         assert!(!state.copied.contains(&cid("1111111")));
-        assert_eq!(
-            state.notice_text.as_deref(),
-            Some("Copied 1111111 (1 copied)")
-        );
+        assert_eq!(state.notice.as_deref(), Some("Copied 1111111 (1 copied)"));
         assert_eq!(press_char(&mut state, 'c'), vec![]);
         assert!(state.copied.is_empty());
-        assert_eq!(
-            state.notice_text.as_deref(),
-            Some("Removed 1111111 (0 copied)")
-        );
+        assert_eq!(state.notice.as_deref(), Some("Removed 1111111 (0 copied)"));
         // The next key clears the notice.
         press_char(&mut state, 'j');
-        assert_eq!(state.notice_text, None);
+        assert_eq!(state.notice, None);
     }
 
     #[test]

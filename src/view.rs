@@ -663,11 +663,7 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
     // Found before the input is laid out, so a full input leaves the
     // notice room to say why the key did nothing.
     let remote_notice = state.remote.as_ref().and_then(|run| run.notice.as_deref());
-    let notice = state
-        .notice
-        .as_deref()
-        .or(state.notice_text.as_deref())
-        .or(remote_notice);
+    let notice = state.notice.as_deref().or(remote_notice);
     if let Some(input) = state
         .input
         .as_ref()
@@ -3518,7 +3514,7 @@ mod tests {
         let subject = "s".repeat(72);
         let notice = crate::bisect::found_notice("abc1234", &subject);
         let mut quiet = loaded(vec![]);
-        quiet.notice_text = Some(notice.clone());
+        quiet.notice = Some(notice.clone().into());
         let mut busy = quiet.clone();
         busy.set_busy(1);
         let mut running = quiet.clone();

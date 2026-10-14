@@ -13,8 +13,24 @@ use kika_git::runner::{GitCommand, GitRunner};
 use kika_git::status::{EntryKind, FileEntry};
 
 /// Why a stash of a staged rename is refused: something sits at its old
-/// path, which the push would leave alone and the restore overwrite.
-pub const STASH_RENAME_TAKEN: &str = "A file now sits at the renamed file's old path";
+/// path, `path` here, which the push would leave alone and the restore
+/// overwrite. The name is its terminal-safe display form.
+pub(crate) fn stash_rename_taken(path: &RepoPath) -> String {
+    format!(
+        "A file now sits at the renamed file's old path: {}",
+        path.display()
+    )
+}
+
+/// Why a stash of a rename that only changes case is refused: on a
+/// case-insensitive filesystem its old and new paths are one file, so a
+/// per-file stash cannot restore the old side.
+pub const STASH_RENAME_CASE: &str = "This rename only changes case and cannot be stashed by file";
+
+/// Whether `old` and `new` differ only in ASCII case.
+pub(crate) fn case_only(old: &RepoPath, new: &RepoPath) -> bool {
+    old != new && old.as_bytes().eq_ignore_ascii_case(new.as_bytes())
+}
 
 /// Why a stash of a staged deletion is refused: something sits at its
 /// path, which the push's cleanup would overwrite with `HEAD`'s version.
@@ -152,13 +168,18 @@ pub(crate) fn leading_dirs(path: &RepoPath) -> Vec<RepoPath> {
         .collect()
 }
 
-/// Whether anything sits where a restore of `restore` would write: at an
-/// old path or under it, or exactly at one of its leading directories. A
-/// file under a leading directory is fine; that directory is real.
-fn restore_taken(runner: &dyn GitRunner, restore: &[RepoPath]) -> Result<bool, String> {
+/// What sits where a restore of `restore` would write, the first name
+/// git lists: at an old path or under it, or exactly at one of its leading
+/// directories. A file under a leading directory is fine; that directory
+/// is real. Output with no name in it still refuses, naming the first old
+/// path, so an odd answer fails closed.
+fn restore_taken(runner: &dyn GitRunner, restore: &[RepoPath]) -> Result<Option<RepoPath>, String> {
     let at_old = checked(runner, &restore_taken_command(restore))?;
     if !at_old.stdout.is_empty() {
-        return Ok(true);
+        let name = at_old.stdout.split(|&b| b == 0).find(|n| !n.is_empty());
+        return Ok(name
+            .map(RepoPath::from_bytes)
+            .or_else(|| restore.first().cloned()));
     }
     let mut dirs: Vec<RepoPath> = Vec::new();
     for dir in restore.iter().flat_map(leading_dirs) {
@@ -167,29 +188,32 @@ fn restore_taken(runner: &dyn GitRunner, restore: &[RepoPath]) -> Result<bool, S
         }
     }
     if dirs.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     let found = checked(runner, &restore_taken_command(&dirs))?;
-    Ok((found.stdout.split(|&b| b == 0)).any(|name| dirs.iter().any(|d| d.as_bytes() == name)))
+    Ok((found.stdout.split(|&b| b == 0))
+        .find(|name| dirs.iter().any(|d| d.as_bytes() == *name))
+        .map(RepoPath::from_bytes))
 }
 
-/// Whether the worktree at `top` holds anything a restore of `restore`
-/// would overwrite or unlink: anything at an old path, or a leading
-/// directory that is not a real directory (a file or a symlink). The
-/// filesystem answers, so a name that differs only in case or Unicode form
-/// counts where the filesystem folds them, as git's byte-wise checks
-/// cannot. Anything unreadable counts as taken.
-fn restore_blocked_on_disk(top: &Path, restore: &[RepoPath]) -> bool {
+/// Where the worktree at `top` holds something a restore of `restore`
+/// would overwrite or unlink: an old path with anything at it, or a
+/// leading directory that is not a real directory (a file or a symlink).
+/// The filesystem answers, so a name that differs only in case or Unicode
+/// form counts where the filesystem folds them, as git's byte-wise checks
+/// cannot; the name given back is the one probed, as the filesystem does
+/// not say how it stores it. Anything unreadable counts as taken.
+fn restore_blocked_on_disk(top: &Path, restore: &[RepoPath]) -> Option<RepoPath> {
     let found = |path: &RepoPath| match std::fs::symlink_metadata(top.join(path.as_os_str())) {
         Ok(meta) => Some(Ok(meta.is_dir())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => Some(Err(e)),
     };
-    restore.iter().any(|old| {
+    restore.iter().find_map(|old| {
         let bad_dir = leading_dirs(old)
-            .iter()
-            .any(|dir| matches!(found(dir), Some(Ok(false) | Err(_))));
-        bad_dir || found(old).is_some()
+            .into_iter()
+            .find(|dir| matches!(found(dir), Some(Ok(false) | Err(_))));
+        bad_dir.or_else(|| found(old).map(|_| old.clone()))
     })
 }
 
@@ -231,26 +255,36 @@ fn restage_command(unstage: &[RepoPath]) -> GitCommand {
 /// staged again if the push fails. Either way the worktree ends clean for
 /// every path. Fails closed: nothing changes when an old or deleted path,
 /// or a directory it needs, is taken, since git would write `HEAD`'s
-/// version there.
+/// version there. A rename that only changes case is refused before any
+/// git command runs, should the set have changed since its guard ran.
 pub(crate) fn push_with_fixups(
     runner: &dyn GitRunner,
     op: &GitOp,
     restore: &[RepoPath],
     unstage: &[RepoPath],
 ) -> Result<(), String> {
-    let head = head_commit(runner)?;
-    if !restore.is_empty() && restore_taken(runner, restore)? {
-        return Err(STASH_RENAME_TAKEN.into());
+    let paths = match op {
+        GitOp::StashPush { paths, .. } => paths.as_slice(),
+        _ => &[],
+    };
+    if (restore.iter()).any(|old| paths.iter().any(|new| case_only(old, new))) {
+        return Err(STASH_RENAME_CASE.into());
     }
-    if !unstage.is_empty() && restore_taken(runner, unstage)? {
+    let head = head_commit(runner)?;
+    if !restore.is_empty()
+        && let Some(path) = restore_taken(runner, restore)?
+    {
+        return Err(stash_rename_taken(&path));
+    }
+    if !unstage.is_empty() && restore_taken(runner, unstage)?.is_some() {
         return Err(STASH_DELETED_TAKEN.into());
     }
     let top = kika_git::repo_root::find_toplevel(runner)
         .ok_or_else(|| "Could not find the worktree's top level".to_string())?;
-    if restore_blocked_on_disk(&top, restore) {
-        return Err(STASH_RENAME_TAKEN.into());
+    if let Some(path) = restore_blocked_on_disk(&top, restore) {
+        return Err(stash_rename_taken(&path));
     }
-    if restore_blocked_on_disk(&top, unstage) {
+    if restore_blocked_on_disk(&top, unstage).is_some() {
         return Err(STASH_DELETED_TAKEN.into());
     }
     if !unstage.is_empty() {
@@ -506,8 +540,48 @@ mod tests {
                 &["ls-files", "-z", "--cached", "--others", "--", "old.rs"],
                 ok(b"old.rs\0"),
             );
-        assert_eq!(run_op(&runner, &op), Err(STASH_RENAME_TAKEN.into()));
+        assert_eq!(
+            run_op(&runner, &op),
+            Err(stash_rename_taken(&"old.rs".into()))
+        );
         runner.assert_done();
+    }
+
+    #[test]
+    fn output_with_no_name_in_it_still_refuses_naming_the_old_path() {
+        let head = "ab".repeat(20);
+        let op = set_push(set(StashMode::All, &["new.rs"], &["old.rs"]), None);
+        let runner = FakeRunner::new()
+            .expect(
+                &["rev-parse", "--verify", "-q", "HEAD^{commit}"],
+                ok(head.as_bytes()),
+            )
+            .expect(
+                &["ls-files", "-z", "--cached", "--others", "--", "old.rs"],
+                ok(b"\0"),
+            );
+        assert_eq!(
+            run_op(&runner, &op),
+            Err(stash_rename_taken(&"old.rs".into()))
+        );
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_case_only_rename_is_refused_before_any_git_command_runs() {
+        let op = set_push(set(StashMode::All, &["old.txt"], &["Old.txt"]), None);
+        let runner = FakeRunner::new();
+        assert_eq!(run_op(&runner, &op), Err(STASH_RENAME_CASE.into()));
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_case_only_rename_folds_ascii_case_and_differs_in_bytes() {
+        let case_only = |old: &str, new: &str| case_only(&old.into(), &new.into());
+        assert!(case_only("Old.txt", "old.txt"));
+        assert!(case_only("D/old.rs", "d/old.rs"));
+        assert!(!case_only("old.txt", "old.txt"), "the same name");
+        assert!(!case_only("old.txt", "new.txt"));
     }
 
     #[test]
@@ -697,7 +771,7 @@ mod tests {
     fn the_disk_check_refuses_anything_at_the_old_path_or_a_non_directory_above_it() {
         let tmp = kika_git::fake::TempDir::new("disk");
         let top = tmp.path();
-        let blocked = |old: &str| restore_blocked_on_disk(top, &[old.into()]);
+        let blocked = |old: &str| restore_blocked_on_disk(top, &[old.into()]).is_some();
         assert!(!blocked("old.txt"), "nothing there");
         assert!(!blocked("a/b/old.txt"), "no directories either");
 
@@ -710,6 +784,10 @@ mod tests {
         std::fs::write(top.join("f"), "mine").unwrap();
         assert!(blocked("f/old.txt"), "a file where a directory goes");
         assert!(blocked("f/g/old.txt"), "and below it");
+        // It names the probed directory or old path.
+        let named = |old: &str| restore_blocked_on_disk(top, &[old.into()]);
+        assert_eq!(named("f/g/old.txt"), Some("f".into()));
+        assert_eq!(named("a/b/old.txt"), Some("a/b/old.txt".into()));
 
         let elsewhere = kika_git::fake::TempDir::new("elsewhere");
         std::os::unix::fs::symlink(elsewhere.path(), top.join("s")).unwrap();
@@ -759,7 +837,10 @@ mod tests {
 
         let op = set_push(set(StashMode::All, &["new.txt"], &["Old.txt"]), None);
         let runner = kika_git::CliRunner::isolated(dir);
-        assert_eq!(run_op(&runner, &op), Err(STASH_RENAME_TAKEN.into()));
+        assert_eq!(
+            run_op(&runner, &op),
+            Err(stash_rename_taken(&"Old.txt".into()))
+        );
         assert_eq!(stash_count(dir), 0);
         assert_eq!(git(dir, &["status", "--porcelain"]), before);
         assert_eq!(
@@ -781,7 +862,7 @@ mod tests {
 
         let op = set_push(set(StashMode::All, &["new.txt"], &["D/old.txt"]), None);
         let runner = kika_git::CliRunner::isolated(dir);
-        assert_eq!(run_op(&runner, &op), Err(STASH_RENAME_TAKEN.into()));
+        assert_eq!(run_op(&runner, &op), Err(stash_rename_taken(&"D".into())));
         assert_eq!(stash_count(dir), 0);
         assert_eq!(git(dir, &["status", "--porcelain"]), before);
         assert_eq!(std::fs::read_to_string(dir.join("d")).unwrap(), "MINE\n");
@@ -807,7 +888,7 @@ mod tests {
             .expect(&verify, ok(head.as_bytes()))
             .expect(&at_old, ok(b""))
             .expect(&at_dirs, ok(b"a/other.rs\0a/b\0"));
-        assert_eq!(run_op(&runner, &op), Err(STASH_RENAME_TAKEN.into()));
+        assert_eq!(run_op(&runner, &op), Err(stash_rename_taken(&"a/b".into())));
         runner.assert_done();
         // Only files inside real directories: the push and restore run.
         let runner = FakeRunner::new()
@@ -839,7 +920,7 @@ mod tests {
 
         let op = set_push(set(StashMode::All, &["new.txt"], &["d/old.txt"]), None);
         let runner = kika_git::CliRunner::isolated(dir);
-        assert_eq!(run_op(&runner, &op), Err(STASH_RENAME_TAKEN.into()));
+        assert_eq!(run_op(&runner, &op), Err(stash_rename_taken(&"d".into())));
         assert_eq!(stash_count(dir), 0);
         assert_eq!(git(dir, &["status", "--porcelain"]), before);
         assert_eq!(std::fs::read_to_string(dir.join("d")).unwrap(), "mine\n");
@@ -911,7 +992,10 @@ mod tests {
         let before = git(dir, &["status", "--porcelain"]);
 
         let runner = kika_git::CliRunner::isolated(dir);
-        assert_eq!(run_op(&runner, &op), Err(STASH_RENAME_TAKEN.into()));
+        assert_eq!(
+            run_op(&runner, &op),
+            Err(stash_rename_taken(&"old.txt".into()))
+        );
         assert_eq!(stash_count(dir), 0);
         assert_eq!(git(dir, &["status", "--porcelain"]), before);
         assert_eq!(

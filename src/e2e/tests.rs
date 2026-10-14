@@ -1845,7 +1845,8 @@ async fn a_bisect_marked_from_the_panels_finds_the_bad_commit_and_resets() {
     app.press(KeyCode::Char('1')).await;
     app.assert_screen_contains("Bisect: 1 good · 1 bad · 0 skipped");
     let mut steps = 0;
-    while app.state().notice_text.is_none() {
+    let found = |notice: Option<&str>| notice.is_some_and(|n| n.starts_with("Bisect found"));
+    while !found(app.state().notice.as_deref()) {
         let mark = if repo.exists("bug") { 'b' } else { 'g' };
         app.press(KeyCode::Char(mark)).await;
         steps += 1;
@@ -2454,7 +2455,7 @@ async fn a_staged_rename_with_a_file_back_at_its_old_path_stashes_nothing() {
     choose_stash_selected(&mut app).await;
     assert_eq!(
         app.state().notice.as_deref(),
-        Some(crate::features::stash::keys::STASH_RENAME_TAKEN)
+        Some("A file now sits at the renamed file's old path: a.txt")
     );
     assert_eq!(stash_count(&repo), 0);
     let after = String::from_utf8(repo.git(["status", "--porcelain"])).unwrap();

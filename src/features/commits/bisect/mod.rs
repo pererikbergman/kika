@@ -29,7 +29,7 @@
 //!   `menu.rs` and `model.rs` call it too;
 //! - `bisect_lines` and `FOUND_MARK` in `view.rs`, which the operation
 //!   feature's Status panel draws;
-//! - `src/git/bisect.rs`, which `git/status` reads;
+//! - `kika_git::bisect`, which `git/status` reads;
 //! - the `update()` dispatch arms and the `bisect::bisect_only` guards,
 //!   the Bisect menu (`MenuId::Bisect`) and its `BisectIntent::AskReset` intent,
 //!   and the `op_command`/`run_op` arms in `op.rs`.

@@ -119,8 +119,9 @@ pub(crate) fn stash_staged_disabled(state: &AppState) -> Option<Reason> {
 /// see `push::stash_files_for`.
 pub(crate) const STASH_APART: &str = "Stash deleted files apart from untracked";
 
-/// Why a staged rename is refused when a file sits at its old path again.
-pub(crate) use super::push::STASH_RENAME_TAKEN;
+/// Why a staged rename is refused when a file sits at its old path again,
+/// naming that file, and why one that only changes case is refused.
+pub(crate) use super::push::{STASH_RENAME_CASE, stash_rename_taken};
 
 /// Why a staged deletion is refused when a file sits at its path again.
 pub(crate) use super::push::STASH_DELETED_TAKEN;
@@ -128,13 +129,16 @@ pub(crate) use super::push::STASH_DELETED_TAKEN;
 /// Stashing selected files acts on the marked set: the Files range when
 /// one is set, else the row under the cursor. A filter that hides the
 /// cursor's row refuses it, as other row actions are refused. A staged
-/// rename is refused when any listed entry sits at its old path or at a
-/// directory that path needs: the restore after the push would overwrite
-/// or unlink that file. A staged deletion is refused the same way when any
-/// other entry sits at its path or a directory it needs: git checks
-/// `HEAD`'s version out there after the push. Names are compared ignoring
-/// ASCII case, since a case-insensitive filesystem folds them; on another
-/// one this only refuses more.
+/// rename that only changes case is refused first: its old path is its
+/// own new one on a case-insensitive filesystem. Any other staged rename
+/// is refused when any listed entry sits at its old path or at a directory
+/// that path needs, and the reason names the first such entry: the
+/// restore after the push would overwrite or unlink that file. A staged
+/// deletion is refused the same way when any other entry sits at its path
+/// or a directory it needs: git checks `HEAD`'s version out there after
+/// the push. Names are compared ignoring ASCII case, since a
+/// case-insensitive filesystem folds them; on another one this only
+/// refuses more.
 pub(crate) fn stash_file_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, true)
         .or_else(|| stash_blocked(state))
@@ -143,27 +147,36 @@ pub(crate) fn stash_file_disabled(state: &AppState) -> Option<Reason> {
             let sets: Vec<_> = (entries.iter())
                 .filter_map(|e| push::stash_file_for(e).map(|set| (*e, set)))
                 .collect();
-            // Whether an entry other than `own` sits at `path` or a
+            // The first entry other than `own` that sits at `path` or a
             // directory it needs.
             let taken = |own: Option<&FileEntry>, path: &RepoPath| {
                 let mut at = leading_dirs(path);
                 at.push(path.clone());
-                at.iter().any(|taken| {
+                at.into_iter().find_map(|taken| {
                     (state.files.rows.iter())
                         .filter(|f| !own.is_some_and(|own| std::ptr::eq(*f, own)))
-                        .any(|f| f.path.as_bytes().eq_ignore_ascii_case(taken.as_bytes()))
+                        .find(|f| f.path.as_bytes().eq_ignore_ascii_case(taken.as_bytes()))
+                        .map(|f| &f.path)
                 })
             };
+            let case_only = entries.iter().any(|e| {
+                e.index == 'R'
+                    && e.orig_path
+                        .as_ref()
+                        .is_some_and(|old| push::case_only(old, &e.path))
+            });
             let renamed_taken = (sets.iter())
                 .flat_map(|(_, set)| &set.restore)
-                .any(|old| taken(None, old));
+                .find_map(|old| taken(None, old));
             let deleted_taken = (sets.iter())
                 .flat_map(|(own, set)| set.unstage.iter().map(move |gone| (*own, gone)))
-                .any(|(own, gone)| taken(Some(own), gone));
+                .any(|(own, gone)| taken(Some(own), gone).is_some());
             if entries.is_empty() {
                 Some("No file selected".into())
-            } else if renamed_taken {
-                Some(STASH_RENAME_TAKEN.into())
+            } else if case_only {
+                Some(STASH_RENAME_CASE.into())
+            } else if let Some(path) = renamed_taken {
+                Some(stash_rename_taken(path).into())
             } else if deleted_taken {
                 Some(STASH_DELETED_TAKEN.into())
             } else if push::stash_files_for(&entries).is_none() {

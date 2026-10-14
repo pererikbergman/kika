@@ -38,6 +38,11 @@ pub(crate) enum BranchesIntent {
     Delete,
     /// The new branch's name, typed into the `PromptKind::NewBranch` prompt.
     CreateNamed(String),
+    /// Ask for a name, to make a branch at the detached `HEAD`.
+    NewAtHead,
+    /// The new branch's name, typed into the `PromptKind::NewBranchAtHead`
+    /// prompt.
+    CreateAtHeadNamed(String),
     /// The new name, typed into the `PromptKind::RenameBranch` prompt.
     RenameTo(String),
     /// Delete the branch the open question names: plainly, or with

@@ -1,11 +1,13 @@
 //! The argv for creating, renaming and deleting one branch and for
 //! setting or unsetting its upstream, which `op_command` in `op.rs` builds
-//! through these five functions. Argv only, with `--` before the names, the
-//! start point and the upstream as full refs, and raw name bytes.
+//! through these six functions. Argv only, with `--` before the names, the
+//! start point as a full ref or a full commit id, the upstream as a full
+//! ref, and raw name bytes.
 
 use std::ffi::OsString;
 
 use kika_git::branches::BranchName;
+use kika_git::commit_files::CommitId;
 use kika_git::remotes::RemoteBranch;
 use kika_git::runner::GitCommand;
 
@@ -19,6 +21,19 @@ pub(crate) fn create_command(name: &str, from: &BranchName) -> GitCommand {
         .arg("-b")
         .arg(name)
         .arg(from.full_ref())
+        .arg("--")
+}
+
+/// `git checkout -b` for `name` at the commit `at`.
+///
+/// The full id is hex digits, so it cannot be read as an option; `--`
+/// keeps it from being read as a path.
+pub(crate) fn create_at_command(name: &str, at: &CommitId) -> GitCommand {
+    GitCommand::new("checkout")
+        .arg("-q")
+        .arg("-b")
+        .arg(name)
+        .arg(at.as_str())
         .arg("--")
 }
 
@@ -199,6 +214,60 @@ mod tests {
         };
         run_op(&runner, &delete).unwrap();
         assert_eq!(branches(), "made\nmain\n");
+    }
+
+    #[test]
+    fn a_branch_at_a_commit_is_checked_out_from_its_full_hex_id() {
+        use kika_git::commit_files::CommitId;
+        let at = CommitId::parse(&"a1".repeat(20)).unwrap();
+        let op = GitOp::CreateBranchAt {
+            name: "topic".into(),
+            at,
+        };
+        let id = "a1".repeat(20);
+        let expected = ["checkout", "-q", "-b", "topic", id.as_str(), "--"];
+        let runner = FakeRunner::new().expect(&expected, ok(b""));
+        assert_eq!(run_op(&runner, &op), Ok(()));
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_branch_at_a_detached_head_attaches_head_there_in_real_git() {
+        use kika_git::commit_files::CommitId;
+        let tmp = dirty_repo();
+        let dir = tmp.path();
+        let git = |args: &[&str]| kika_git::fake::git(dir, args);
+        git(&["checkout", "-q", "--detach"]);
+        let head = String::from_utf8(git(&["rev-parse", "HEAD"])).unwrap();
+        let at = CommitId::parse(head.trim()).unwrap();
+        let runner = kika_git::CliRunner::isolated(dir);
+        let worktree = || std::fs::read_to_string(dir.join("a.txt")).unwrap();
+
+        for name in ["-f", "--orphan"] {
+            let create = GitOp::CreateBranchAt {
+                name: name.into(),
+                at: at.clone(),
+            };
+            assert!(run_op(&runner, &create).is_err(), "{name}");
+            // Still detached: `HEAD` holds the id, not a ref.
+            let still = std::fs::read_to_string(dir.join(".git/HEAD")).unwrap();
+            assert_eq!(still, head, "{name}");
+            assert_eq!(worktree(), "work in progress\n", "{name}");
+        }
+        assert_eq!(
+            git(&["for-each-ref", "--format=%(refname)", "refs/heads"]),
+            b"refs/heads/main\n"
+        );
+
+        let create = GitOp::CreateBranchAt {
+            name: "topic".into(),
+            at,
+        };
+        run_op(&runner, &create).unwrap();
+        assert_eq!(git(&["symbolic-ref", "HEAD"]), b"refs/heads/topic\n");
+        let now = String::from_utf8(git(&["rev-parse", "HEAD"])).unwrap();
+        assert_eq!(now, head);
+        assert_eq!(worktree(), "work in progress\n");
     }
 
     fn origin_main() -> RemoteBranch {
