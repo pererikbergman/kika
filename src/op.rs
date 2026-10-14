@@ -10,6 +10,7 @@ use crate::features::commits::custom_patch::{CustomPatch, PatchAction};
 use crate::features::commits::git::detached_checkout;
 use crate::features::commits::reflog::{self, Direction, Expected, Step};
 use crate::features::commits::rewrite;
+use crate::features::review;
 use crate::features::stash::{self, StashMode, StashRef};
 use kika_git::bisect::BisectMark;
 use kika_git::branches::BranchName;
@@ -270,6 +271,20 @@ pub enum GitOp {
     },
     /// End the bisect and check out where it started.
     BisectReset,
+    /// Check out pull request `number`'s `head` as the local `branch`,
+    /// always `pr/<number>`: made when `old` is `None`, else moved forward
+    /// from `old` (only while it still holds `old`) and switched to;
+    /// `current` when it is checked out already. Built only from a plan
+    /// that allows it (see `crate::features::review`), and run only while
+    /// the branch is still as planned; a branch that has diverged is never
+    /// moved, nor one that is not checked out.
+    CheckoutPrBranch {
+        number: u64,
+        branch: BranchName,
+        head: CommitId,
+        old: Option<CommitId>,
+        current: bool,
+    },
 }
 
 /// How a merge records the other branch's commits.
@@ -518,6 +533,14 @@ pub fn op_command(op: &GitOp) -> GitCommand {
                 .user_env();
         }
         GitOp::BisectReset => return GitCommand::new("bisect").arg("reset").user_env(),
+        // The first of its steps; `run_op` runs them all, and `refusal`
+        // keeps one with nothing to do from running.
+        GitOp::CheckoutPrBranch { .. } => {
+            return pr_checkout_steps(op)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| GitCommand::new("checkout").write_env());
+        }
         // The user's tool runs on the terminal and keeps their locale, so
         // no `LC_ALL`; the name is still read literally.
         GitOp::MergeTool(path) => {
@@ -562,6 +585,21 @@ pub(crate) fn checkout_command(name: &BranchName) -> GitCommand {
         cmd
     };
     cmd.arg(name.as_os_string()).arg("--")
+}
+
+/// The commands a pull request checkout runs, in order; none for any
+/// other op.
+fn pr_checkout_steps(op: &GitOp) -> Vec<GitCommand> {
+    match op {
+        GitOp::CheckoutPrBranch {
+            branch,
+            head,
+            old,
+            current,
+            ..
+        } => review::pr_checkout_commands(branch, head, old.as_ref(), *current),
+        _ => vec![],
+    }
 }
 
 /// The single ops a many-step op runs, in order; any other op is its own
@@ -651,6 +689,25 @@ fn run_op_with(
             .iter()
             .try_for_each(|step| run_op_with(runner, step, env_set));
     }
+    if let GitOp::CheckoutPrBranch {
+        branch,
+        old,
+        current,
+        ..
+    } = op
+    {
+        // The question may have been open a long time: refuse unless the
+        // branch, and `HEAD` when it is the branch, are still as planned.
+        review::verify_pr_branch(runner, branch, old.as_ref(), *current)?;
+        // Stop at the first failure: a refused switch moves nothing.
+        for cmd in pr_checkout_steps(op) {
+            let output = runner.run(&cmd).map_err(|e| GitError::io(&e).to_string())?;
+            if !output.success {
+                return Err(GitError::failed(&cmd, &output).to_string());
+            }
+        }
+        return Ok(());
+    }
     if let GitOp::Travel { expect, .. } = op {
         let now = reflog::git::read_head(runner);
         if now.oid.as_ref() != Some(&expect.oid) || now.head_ref != expect.head_ref {
@@ -716,6 +773,13 @@ pub fn refusal(op: &GitOp) -> Option<&'static str> {
         // Only its first step is one command; run alone it would leave
         // the rebase stopped.
         GitOp::CustomPatch { .. } => Some("A custom patch only runs on the terminal"),
+        // The branch is only ever named from the number.
+        GitOp::CheckoutPrBranch { number, branch, .. } if *branch != review::pr_branch(*number) => {
+            Some("A pull request is only checked out as pr/<number>")
+        }
+        GitOp::CheckoutPrBranch { .. } if pr_checkout_steps(op).is_empty() => {
+            Some("The pull request's branch is checked out at its head already")
+        }
         _ => None,
     }
 }
@@ -882,6 +946,7 @@ mod tests {
             GitOp::BisectMark { .. } => 47,
             GitOp::BisectReset => 48,
             GitOp::CreateBranchAt { .. } => 49,
+            GitOp::CheckoutPrBranch { .. } => 50,
         }
     }
 
@@ -1135,10 +1200,21 @@ mod tests {
                 Write,
                 w,
             ),
+            (
+                GitOp::CheckoutPrBranch {
+                    number: 7,
+                    branch: "pr/7".into(),
+                    head: id("a"),
+                    old: None,
+                    current: false,
+                },
+                Write,
+                w,
+            ),
         ];
 
         let listed: BTreeSet<usize> = cases.iter().map(|(op, ..)| variant(op)).collect();
-        assert_eq!(listed, (0..=49).collect(), "a variant is missing");
+        assert_eq!(listed, (0..=50).collect(), "a variant is missing");
         for (op, profile, expected) in &cases {
             let cmd = op_command(op);
             assert_eq!(cmd.env_profile(), Some(*profile), "{op:?}");
@@ -1302,6 +1378,132 @@ mod tests {
             .expect(&["remote", "remove", "c"], ok(b""));
         assert_eq!(run_op(&runner, &remotes), Ok(()));
         runner.assert_done();
+    }
+
+    fn pr_checkout(old: Option<&str>, current: bool) -> GitOp {
+        GitOp::CheckoutPrBranch {
+            number: 7,
+            branch: "pr/7".into(),
+            head: CommitId::parse(OID).unwrap(),
+            old: old.map(|o| CommitId::parse(o).unwrap()),
+            current,
+        }
+    }
+
+    const PR_REF: [&str; 3] = [
+        "for-each-ref",
+        "--format=%(refname)%00%(objectname)%00%(HEAD)%00%(worktreepath)",
+        "refs/heads/pr/7",
+    ];
+
+    /// What `for-each-ref` says of `pr/7`: its id, `*` when it is `HEAD`
+    /// here, and the worktree that has it.
+    fn pr_ref(oid: &str, head: &str, worktree: &str) -> GitOutput {
+        ok(format!("refs/heads/pr/7\0{oid}\0{head}\0{worktree}\n").as_bytes())
+    }
+
+    #[test]
+    fn a_pull_request_checkout_reads_the_branch_again_then_runs_fixed_argv() {
+        let old = "abcdef0123456789abcdef0123456789abcdef01";
+        let cases: [(GitOp, GitOutput, &[&[&str]]); 4] = [
+            (
+                pr_checkout(None, false),
+                ok(b""),
+                &[&["checkout", "-q", "-b", "pr/7", OID, "--"]],
+            ),
+            (
+                pr_checkout(Some(OID), false),
+                pr_ref(OID, " ", ""),
+                &[&["checkout", "-q", "pr/7", "--"]],
+            ),
+            (
+                pr_checkout(Some(old), true),
+                pr_ref(old, "*", "/r"),
+                &[&["merge", "--ff-only", "-q", OID]],
+            ),
+            (
+                pr_checkout(Some(old), false),
+                pr_ref(old, " ", ""),
+                &[
+                    &["checkout", "-q", "pr/7", "--"],
+                    &["merge", "--ff-only", "-q", OID],
+                ],
+            ),
+        ];
+        for (op, listed, steps) in cases {
+            assert_eq!(argv(&op_command(&op)), steps[0], "{op:?}");
+            let runner = steps
+                .iter()
+                .fold(FakeRunner::new().expect(&PR_REF, listed), |runner, step| {
+                    runner.expect(step, ok(b""))
+                });
+            assert_eq!(run_op(&runner, &op), Ok(()), "{op:?}");
+            runner.assert_done();
+        }
+        // The merge may run the user's hook in their own env.
+        let merge = op_command(&pr_checkout(Some(old), true));
+        assert_eq!(merge.env_profile(), Some(EnvProfile::UserEnv));
+        for op in [pr_checkout(Some(old), false), pr_checkout(None, false)] {
+            assert_eq!(op_command(&op).env_profile(), Some(EnvProfile::Write));
+        }
+        // A refused switch stops there: the branch is never merged into.
+        let runner = FakeRunner::new()
+            .expect(&PR_REF, pr_ref(old, " ", ""))
+            .expect(
+                &["checkout", "-q", "pr/7", "--"],
+                fail("error: Your local changes would be overwritten by checkout"),
+            );
+        let result = run_op(&runner, &pr_checkout(Some(old), false));
+        assert!(result.unwrap_err().contains("local changes"));
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_pull_request_branch_that_moved_while_asked_runs_nothing() {
+        let old = "abcdef0123456789abcdef0123456789abcdef01";
+        let moved = "pr/7 moved since the question; press b again";
+        let cases = [
+            // Planned on pr/7, but another branch is checked out now: no
+            // merge may land on it.
+            (pr_checkout(Some(old), true), pr_ref(old, " ", "")),
+            // Planned elsewhere, but pr/7 is checked out here now.
+            (pr_checkout(Some(old), false), pr_ref(old, "*", "/r")),
+            // ... or in another worktree.
+            (pr_checkout(Some(old), false), pr_ref(old, " ", "/other")),
+            (pr_checkout(Some(OID), false), pr_ref(OID, " ", "/other")),
+            // It moved to another commit.
+            (pr_checkout(Some(old), true), pr_ref(OID, "*", "/r")),
+            (pr_checkout(Some(old), false), pr_ref(OID, " ", "")),
+            // It was made, or deleted.
+            (pr_checkout(None, false), pr_ref(old, " ", "")),
+            (pr_checkout(Some(old), false), ok(b"")),
+        ];
+        for (op, listed) in cases {
+            let runner = FakeRunner::new().expect(&PR_REF, listed);
+            assert_eq!(run_op(&runner, &op), Err(moved.into()), "{op:?}");
+            runner.assert_done();
+        }
+        // A failed read refuses too.
+        let runner = FakeRunner::new().expect(&PR_REF, fail("fatal: broken"));
+        assert!(run_op(&runner, &pr_checkout(Some(old), true)).is_err());
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_pull_request_checkout_with_nothing_to_do_or_another_branch_runs_no_git() {
+        let renamed = GitOp::CheckoutPrBranch {
+            number: 7,
+            branch: "main".into(),
+            head: CommitId::parse(OID).unwrap(),
+            old: None,
+            current: false,
+        };
+        for op in [pr_checkout(Some(OID), true), renamed] {
+            assert!(refusal(&op).is_some(), "{op:?}");
+            let runner = FakeRunner::new();
+            assert!(run_op(&runner, &op).is_err(), "{op:?}");
+            runner.assert_done();
+        }
     }
 
     #[test]

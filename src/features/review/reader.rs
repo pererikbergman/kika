@@ -3,14 +3,14 @@
 //! the file's threads. It reads only the discussion already loaded and
 //! never moves the diff. Drawn by `reader_view.rs`.
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::files::{PrFiles, files_screen};
 use super::markdown;
 use super::state::RenderedBody;
 use super::threads::{ThreadScope, ready_threads};
-use super::threads_view::{context_line, dim, short_time, span_label, top_label};
+use super::threads_view::{context_line, dim, header_style, short_time, span_label, top_label};
 use crate::intent::Scroll;
 use crate::keymap::Reason;
 use crate::model::AppState;
@@ -99,11 +99,7 @@ pub fn reader_lines(scope: &ThreadScope, t: usize, path: &str, width: usize) -> 
         "unresolved"
     };
     let header = format!("{path} · {} · {state} · {count}", where_label(scope, t));
-    let look = if thread.resolved {
-        dim()
-    } else {
-        Style::new().fg(Color::Yellow)
-    };
+    let look = header_style(thread, scope.placement(t));
     let mut lines = markdown::wrap_text(&header, look.add_modifier(Modifier::BOLD), width);
     if !matches!(scope.placement(t), Some(Placement::Line { .. })) {
         lines.extend(thread.context.iter().map(|c| context_line(c, width)));

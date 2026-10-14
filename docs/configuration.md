@@ -1804,6 +1804,29 @@ GitHub and cannot be undone, so `enter` does not answer it.
 | `merge_pr.no` | `n`, `esc` | No, merge nothing | locked |
 | `merge_pr.quit` | `ctrl-c` | Quit Kika | locked |
 
+### Check out this pull request?
+
+`b` on a pull request's detail checks its head out as the local branch
+`pr/<number>` and goes to the workspace. It reads the branch with
+`for-each-ref`'s `%(worktreepath)`, so it needs git 2.23 or newer; an
+older git says why and nothing runs.
+
+The question names the branch `pr/<number>`, what happens to it, and the
+remote a missing head is fetched from first. Nothing is fetched before
+`y`, and `enter` does not answer it. A branch with commits the pull
+request does not have, or one another worktree has checked out, is never
+moved. Right before it runs, the branch is read again: if it, or the
+branch checked out here, changed while the question was open, nothing
+runs. A branch that is behind is switched to first and only then
+fast-forwarded, so a switch git refuses for local changes leaves it
+where it was. Uncommitted changes come along, or git refuses.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `checkout_pr.yes` | `y` | Yes, check out the pull request's branch | locked |
+| `checkout_pr.no` | `n`, `esc` | No, check out nothing | locked |
+| `checkout_pr.quit` | `ctrl-c` | Quit Kika | locked |
+
 ### Pick one (a pull request's target remote or base branch, a failing check, or a merge method)
 
 | Binding id | Default keys | Action | Repo file |
@@ -1829,6 +1852,7 @@ GitHub and cannot be undone, so `enter` does not answer it.
 | `review.back` | `esc` | Back to the pull request from its files or conversation, else to the queue; in the queue, clear the filter, else back to the workspace | locked |
 | `review.files` | `f` | Show the pull request's changed files and diff, fetching its commits once if they are not here | locked |
 | `review.merge` | `M` | Merge the open pull request on GitHub, after a question only y answers | locked |
+| `review.checkout` | `b` | Check out the open pull request as branch pr/<number> and go to the workspace, after a question only y answers | locked |
 | `review.conversation` | `C` | Show the pull request's conversation: its comments and review bodies, oldest first | |
 | `review.page_down` | `pgdn` | Scroll the pull request or its conversation down a page | |
 | `review.page_up` | `pgup` | Scroll the pull request or its conversation up a page | |
@@ -1837,6 +1861,11 @@ GitHub and cannot be undone, so `enter` does not answer it.
 
 The file list has the Review keys too: `j`/`k` pick a file and show its
 diff, `esc` goes back to the pull request.
+
+A review thread marked **addressed** (in green) is unresolved, and GitHub
+says the lines it was written on changed in a later push. It says the
+code moved, not that the comment was answered; resolved threads whose
+lines changed still read `outdated`.
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|

@@ -73,6 +73,11 @@ pub(crate) fn update(state: &mut AppState, intent: ReviewIntent) -> Vec<Effect> 
             repo,
             result,
         } => return state.pr_detail_loaded(tag, number, repo, result),
+        ReviewIntent::CheckoutPr => return state.open_pr_checkout(),
+        ReviewIntent::ConfirmCheckoutPr => return state.confirm_pr_checkout(),
+        ReviewIntent::CheckoutPlanned { tag, result } => {
+            return state.pr_checkout_planned(tag, result);
+        }
     }
     Vec::new()
 }

@@ -7,13 +7,15 @@
 //! over the files screen (`reader.rs`, drawn by `reader_view.rs`), its
 //! conversation of comments and review bodies (`conversation.rs`, drawn
 //! by `conversation_view.rs`), merging it from the detail
-//! (`merge.rs`), the markdown renderer for its body (`markdown.rs`), and
-//! the local git reads behind the files screen (`git.rs`). The feature
+//! (`merge.rs`), checking its head out as the local branch `pr/<number>`
+//! and going to the workspace (`checkout.rs`), the markdown renderer for
+//! its body (`markdown.rs`), and the local git reads behind the files
+//! screen and the checkout (`git.rs`). The feature
 //! also owns its key bindings (`keys.rs`), its screen (`view.rs`) and the
 //! I/O behind `LoadReviewQueues`, `LoadPrDetail`, `LoadPrDiscussion`,
 //! `CheckReviewCommits`, `FetchReviewCommits`, `LoadReviewFiles`,
-//! `LoadReviewCommits`, `LoadReviewRange`, `SetFileViewed` and
-//! `MergePullRequest` (`effects.rs`). The credential
+//! `LoadReviewCommits`, `LoadReviewRange`, `SetFileViewed`,
+//! `PlanPrCheckout` and `MergePullRequest` (`effects.rs`). The credential
 //! plumbing that `FetchReviewCommits` shares with sync and the merge
 //! question popup stay in core; the forge client is the `kika_forge` crate.
 //!
@@ -21,7 +23,7 @@
 //! `AppIntent::Review`, and its one `update` arm calls [`update`] here.
 //! `update.rs` holds only that function; it dispatches to the handlers in
 //! `state.rs`, `files.rs`, `commit_view.rs`, `viewed.rs`, `threads.rs`,
-//! `reader.rs`, `conversation.rs` and `merge.rs`.
+//! `reader.rs`, `conversation.rs`, `merge.rs` and `checkout.rs`.
 //! The review guards on core arms (`ScrollDiff`, `OpenSearch`,
 //! `DiffEscape`) stay in core.
 //!
@@ -33,17 +35,21 @@
 //! - the guards `queue_keys_disabled`, `review_diff_focused` and
 //!   `thread_reader_open`, which core focus uses, and those in `keys.rs`;
 //! - the handlers in `state.rs`, `files.rs`, `commit_view.rs`, `viewed.rs`,
-//!   `threads.rs` and `merge.rs` that `update` calls, including the
-//!   `review_files_shown` guard;
+//!   `threads.rs`, `merge.rs` and `checkout.rs` that `update` calls,
+//!   including the `review_files_shown` guard;
+//! - `pr_branch`, `verify_pr_branch` and `pr_checkout_commands`
+//!   (`git.rs`), which core's `GitOp::CheckoutPrBranch` is named, checked
+//!   and run by;
 //! - `review_jump_landed` (`threads.rs`), which core's `AppIntent::Diff`
 //!   arm calls after each diff chunk, so a thread `]`/`[` waits for is
 //!   scrolled to once its row streams in;
-//! - the chunks `keys::{REVIEW_KEYS, REVIEW_MERGE_CONFIRM}`, and
-//!   `keys::HIDDEN_WHEN_OFF`, the bar hints left out while refused;
+//! - the chunks `keys::{REVIEW_KEYS, REVIEW_MERGE_CONFIRM,
+//!   REVIEW_CHECKOUT_CONFIRM}`, and `keys::HIDDEN_WHEN_OFF`, the bar
+//!   hints left out while refused;
 //! - `view::render`;
 //! - `effects::{load_queues, load_detail, load_discussion, check_commits,
 //!   fetch_commits, load_files, load_commits, load_range_files,
-//!   set_file_viewed, merge}`.
+//!   set_file_viewed, plan_checkout, merge}`.
 //!
 //! Kept cross-feature reads and calls:
 //! - `merge.rs` reloads the badges after a merge by asking core
@@ -53,6 +59,7 @@
 //! - `files.rs` reads and writes `diff` and `diff_options` (diff);
 //! - `state.rs` reads `files` (files).
 
+mod checkout;
 mod commit_view;
 mod conversation;
 mod conversation_view;
@@ -73,7 +80,9 @@ pub(crate) mod view;
 mod viewed;
 
 pub(crate) use files::review_diff_focused;
-pub(crate) use git::{CommitsHere, PrCommit, PrFileRow};
+pub(crate) use git::{
+    CommitsHere, PrCommit, PrFileRow, pr_branch, pr_checkout_commands, verify_pr_branch,
+};
 pub(crate) use intent::ReviewIntent;
 pub(crate) use merge::PrMerging;
 pub(crate) use reader::thread_reader_open;
