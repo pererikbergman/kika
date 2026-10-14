@@ -410,6 +410,8 @@ mod tests {
             .into_question(),
             reset_hard_question("c1".into(), reset_op(ResetMode::Hard), None),
             crate::features::operation::skip_question(Operation::Rebase, None).unwrap(),
+            crate::features::operation::skip_question_unchecked(Operation::CherryPick, None)
+                .unwrap(),
         ]
     }
 
@@ -423,6 +425,19 @@ mod tests {
 
     #[test]
     fn enter_never_answers_a_destructive_question_and_confirm_yes_only_a_discard_or_skip() {
+        // Only these two destructive questions take `ConfirmYes`; any other
+        // that starts to would drop its assertion below, so it must be
+        // added here on purpose.
+        let mut confirm_yes: Vec<KeyScope> = destructive_questions()
+            .iter()
+            .map(|q| q.scope)
+            .filter(|scope| yes_is_confirm_yes(*scope))
+            .collect();
+        confirm_yes.dedup();
+        assert_eq!(
+            confirm_yes,
+            [KeyScope::DiscardConfirm, KeyScope::SkipConfirm]
+        );
         for question in destructive_questions() {
             let name = question.title.clone();
             assert_ne!(question.answer, Answer::YOrEnter, "{name}");

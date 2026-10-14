@@ -16,7 +16,7 @@
 //!   `skip_check`;
 //! - the handlers in `update.rs`: `branch_op`, `resume`, `skip` and
 //!   `ask_abort`, which asks `abort_question`; the skip question is
-//!   `skip_question`;
+//!   `skip_question`, or `skip_question_unchecked` when the check failed;
 //! - `effects::check_stop_work`, behind `Effect::CheckStopWork`;
 //! - `keys::{OPERATION_BRANCHES, OPERATION_STATUS, OPERATION_ABORT_CONFIRM,
 //!   OPERATION_SKIP_CONFIRM, merge_disabled}`;
@@ -61,4 +61,4 @@ pub(crate) use state::StopWorkCheck;
 pub(crate) use update::update;
 
 #[cfg(test)]
-pub(crate) use update::{abort_question, skip_question};
+pub(crate) use update::{abort_question, skip_question, skip_question_unchecked};

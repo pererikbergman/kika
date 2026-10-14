@@ -132,14 +132,19 @@ impl AppState {
         }
         match result {
             Ok(false) => self.run_op_where_it_belongs(GitOp::Skip(operation)),
-            // Fails closed: a check that could not tell asks too.
-            Ok(true) | Err(_) => {
-                if let Some(question) = skip_question(operation, head) {
-                    self.popups.push(Popup::Question(question));
-                }
-                vec![]
-            }
+            Ok(true) => self.ask_skip(skip_question(operation, head)),
+            // Fails closed: a check that could not tell asks too, and
+            // says it could not tell.
+            Err(_) => self.ask_skip(skip_question_unchecked(operation, head)),
         }
+    }
+
+    /// Put the skip question up, if the operation has one.
+    fn ask_skip(&mut self, question: Option<ConfirmQuestion>) -> Vec<Effect> {
+        if let Some(question) = question {
+            self.popups.push(Popup::Question(question));
+        }
+        vec![]
     }
 
     /// Skip, as the question asked, if `operation` can still be skipped.
@@ -204,36 +209,76 @@ pub(crate) fn abort_question(operation: Operation) -> Option<ConfirmQuestion> {
     })
 }
 
-/// "Skip the commit the rebase stopped on?", naming the operation the
-/// check ran for, so the answer skips what the question said. Only `y`
-/// answers: the conflict resolution done since the stop is lost. `head`
-/// is the detached `HEAD` it is asked from, so a yes runs nothing once
-/// that has moved. A merge has nothing to skip and a bisect skips from
-/// its own keys, so neither has a question.
+/// "Skip the commit the rebase stopped on?", asked when the check found
+/// work since the stop. It names the operation the check ran for, so the
+/// answer skips what the question said. Only `y` answers: the conflict
+/// resolution done since the stop is lost. `head` is the detached `HEAD`
+/// it is asked from, so a yes runs nothing once that has moved. A merge
+/// has nothing to skip and a bisect skips from its own keys, so neither
+/// has a question.
 pub(crate) fn skip_question(
     operation: Operation,
     head: Option<CommitId>,
 ) -> Option<ConfirmQuestion> {
-    let (title, name) = match operation {
-        Operation::Rebase => ("Skip rebase commit", "rebase"),
-        Operation::CherryPick => ("Skip cherry-pick commit", "cherry-pick"),
-        Operation::Revert => ("Skip revert commit", "revert"),
-        Operation::Merge | Operation::Bisect => return None,
-    };
-    Some(ConfirmQuestion {
-        scope: KeyScope::SkipConfirm,
-        title: title.into(),
-        text: format!(
+    let (title, name) = skip_names(operation)?;
+    Some(skip_confirm(
+        operation,
+        head,
+        title,
+        format!(
             "Skip the commit the {name} stopped on? \
              Conflict resolution done since the stop is lost. (y/n)"
         ),
+    ))
+}
+
+/// [`skip_question`] for when the check itself failed: the same answer,
+/// but it says Kika could not tell whether there is work to lose.
+pub(crate) fn skip_question_unchecked(
+    operation: Operation,
+    head: Option<CommitId>,
+) -> Option<ConfirmQuestion> {
+    let (title, name) = skip_names(operation)?;
+    Some(skip_confirm(
+        operation,
+        head,
+        title,
+        format!(
+            "Skip the commit the {name} stopped on? \
+             Kika could not check for work since the stop; \
+             any conflict resolution done since then is lost. (y/n)"
+        ),
+    ))
+}
+
+/// The question's title and the operation's name, for the operations
+/// that have a commit to skip.
+fn skip_names(operation: Operation) -> Option<(&'static str, &'static str)> {
+    match operation {
+        Operation::Rebase => Some(("Skip rebase commit", "rebase")),
+        Operation::CherryPick => Some(("Skip cherry-pick commit", "cherry-pick")),
+        Operation::Revert => Some(("Skip revert commit", "revert")),
+        Operation::Merge | Operation::Bisect => None,
+    }
+}
+
+fn skip_confirm(
+    operation: Operation,
+    head: Option<CommitId>,
+    title: &'static str,
+    text: String,
+) -> ConfirmQuestion {
+    ConfirmQuestion {
+        scope: KeyScope::SkipConfirm,
+        title: title.into(),
+        text,
         answer: Answer::YOnly,
         then: Then::Intent(Box::new(AppIntent::Operation(
             OperationIntent::ConfirmSkip(operation),
         ))),
         range: false,
         head,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -472,16 +517,14 @@ mod tests {
     #[test]
     fn work_since_the_stop_or_a_failed_check_asks_first() {
         for op in SKIPPABLE {
-            for result in [Ok(true), Err("fatal: bad".to_string())] {
+            let found = skip_question(op, Some(cid("c0")));
+            let unknown = skip_question_unchecked(op, Some(cid("c0")));
+            for (result, asked) in [(Ok(true), found), (Err("fatal: bad".to_string()), unknown)] {
                 let case = format!("{op:?} {result:?}");
                 let (state, effects) = skip_checked(op, result);
                 assert_eq!(effects, vec![], "{case}");
                 assert_eq!(state.held_seq(), None, "{case}");
-                assert_eq!(
-                    state.popups,
-                    [Popup::Question(skip_question(op, Some(cid("c0"))).unwrap())],
-                    "{case}"
-                );
+                assert_eq!(state.popups, [Popup::Question(asked.unwrap())], "{case}");
                 assert_eq!(state.key_focus(), KeyScope::SkipConfirm, "{case}");
             }
         }
@@ -564,7 +607,7 @@ mod tests {
              Conflict resolution done since the stop is lost. (y/n)"
         );
         assert_eq!(
-            (ask.scope, ask.answer, ask.range, ask.head),
+            (ask.scope, ask.answer, ask.range, ask.head.clone()),
             (KeyScope::SkipConfirm, Answer::YOnly, false, Some(cid("c0")))
         );
         assert_eq!(
@@ -583,6 +626,24 @@ mod tests {
         );
         assert_eq!(skip_question(Operation::Merge, None), None);
         assert_eq!(skip_question(Operation::Bisect, None), None);
+
+        // When the check failed, it says Kika could not tell; the rest is
+        // the same question.
+        let unknown = skip_question_unchecked(Operation::Revert, Some(cid("c0"))).unwrap();
+        assert_eq!(
+            unknown.text,
+            "Skip the commit the revert stopped on? \
+             Kika could not check for work since the stop; \
+             any conflict resolution done since then is lost. (y/n)"
+        );
+        assert_eq!(
+            ConfirmQuestion {
+                text: ask.text.clone(),
+                ..unknown
+            },
+            ask
+        );
+        assert_eq!(skip_question_unchecked(Operation::Merge, None), None);
     }
 
     #[test]
