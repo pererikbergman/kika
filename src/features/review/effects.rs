@@ -15,6 +15,7 @@ use crate::background;
 use crate::effect::{AnswerSlot, Bridge, Tag};
 use crate::features::review::ReviewIntent;
 use crate::intent::AppIntent;
+use kika_forge::discussion_write::DiscussionWrite;
 use kika_forge::merge::MergeMethod;
 use kika_forge::pending::{self, PendingError, PendingKey, PendingReview};
 use kika_forge::review::{self, ReviewError, ReviewLoad};
@@ -349,6 +350,44 @@ pub(crate) fn set_file_viewed(
         // A panic still answers, or the mark would stay in flight.
         |_| Err(CreateError::Status(ForgeStatus::Failed)),
         move |result| answer(path, result),
+    );
+}
+
+/// Write `write` to pull request `number`'s discussion through `gh`;
+/// always answered by one `ReviewIntent::DiscussionWritten`. It is never
+/// tried again: a post that timed out may still have been made.
+pub(crate) fn write_discussion(
+    forge: Option<ForgeContext>,
+    tx: UnboundedSender<AppIntent>,
+    tag: Tag,
+    host: ForgeHost,
+    repo: ForgeRepo,
+    number: u64,
+    write: DiscussionWrite,
+) {
+    let sent_to = host.clone();
+    let answer = move |write: DiscussionWrite, result| {
+        AppIntent::Review(ReviewIntent::DiscussionWritten {
+            tag,
+            host: sent_to.clone(),
+            number,
+            write,
+            result,
+        })
+    };
+    // No forge client: nothing may reach the network. The client itself
+    // refuses a repository `[forge.allow]` leaves out.
+    let Some(forge) = forge else {
+        let _ = tx.send(answer(write, Err(CreateError::Status(ForgeStatus::Failed))));
+        return;
+    };
+    let sent = write.clone();
+    background::run(
+        tx,
+        move || forge.write_discussion(&host, &repo, &sent),
+        // A panic still answers, or the write would stay in flight.
+        |_| Err(CreateError::Status(ForgeStatus::Failed)),
+        move |result| answer(write, result),
     );
 }
 
@@ -804,6 +843,81 @@ mod tests {
         Runtime::new(git.clone(), tx)
             .with_forge(client())
             .spawn(mark(left_out.clone()));
+        assert_eq!(rx.recv().await, failed(&left_out));
+        assert_eq!(gh.calls().len(), 1);
+        git.assert_done();
+    }
+
+    #[tokio::test]
+    async fn a_discussion_write_answers_once_and_reaches_gh_only_through_the_client() {
+        use kika_forge::allow::AllowRule;
+        use kika_forge::discussion_write::{DiscussionWrite, Written};
+        use kika_forge::github::{FakeGh, GhCall, answer};
+
+        let git = Arc::new(FakeRunner::new());
+        let gh = Arc::new(FakeGh::new().reply(answer(
+            "HTTP/2.0 200 OK\r\n\r\n{\"data\":{\"addPullRequestReviewThreadReply\":{\"comment\":{\"id\":\"PRRC_1\"}}}}",
+        )));
+        let client = || {
+            Some(ForgeContext {
+                gh: gh.clone(),
+                glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
+                sink: CommandSink::new(),
+                cache_dir: None,
+            })
+        };
+        let reply = DiscussionWrite::Reply {
+            thread: "PRRT_kwDOA1".into(),
+            body: "Done".into(),
+        };
+        let send = |host: ForgeHost| Effect::WriteDiscussion {
+            tag: forge_tag(),
+            host,
+            repo: ForgeRepo {
+                host: "github.com".into(),
+                owner: "acme".into(),
+                name: "widgets".into(),
+            },
+            number: 42,
+            write: reply.clone(),
+        };
+        // The answer names the host the write was sent to.
+        let answered = |host: &ForgeHost, result| {
+            Some(AppIntent::Review(ReviewIntent::DiscussionWritten {
+                tag: forge_tag(),
+                host: host.clone(),
+                number: 42,
+                write: reply.clone(),
+                result,
+            }))
+        };
+        let github = ForgeHost::parse("github.com").unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        Runtime::new(git.clone(), tx)
+            .with_forge(client())
+            .spawn(send(github.clone()));
+        assert_eq!(rx.recv().await, answered(&github, Ok(Written::Posted)));
+        let [call] = gh.calls().try_into().unwrap();
+        let GhCall::Graphql { body } = &call.kind else {
+            panic!("{call:?}");
+        };
+        let sent: serde_json::Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(sent["variables"]["id"], "PRRT_kwDOA1");
+        assert_eq!(sent["variables"]["body"], "Done");
+
+        // Without a forge client, or for a repository `[forge.allow]`
+        // leaves out, nothing is asked.
+        let failed = |host| answered(host, Err(CreateError::Status(ForgeStatus::Failed)));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        Runtime::new(git.clone(), tx).spawn(send(github.clone()));
+        assert_eq!(rx.recv().await, failed(&github));
+        let left_out = ForgeHost::parse("github.com")
+            .unwrap()
+            .with_allow(vec![AllowRule::parse("other").unwrap()]);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        Runtime::new(git.clone(), tx)
+            .with_forge(client())
+            .spawn(send(left_out.clone()));
         assert_eq!(rx.recv().await, failed(&left_out));
         assert_eq!(gh.calls().len(), 1);
         git.assert_done();

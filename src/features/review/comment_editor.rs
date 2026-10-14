@@ -1,11 +1,15 @@
 //! The built-in comment composer: a multi-line markdown buffer edited key
-//! by key over the files screen. `ctrl-s` keeps the comment in the
-//! pending review, `esc` drops it (asking first when it has text), and
-//! every other key is typed. Pure, so `update` owns it and tests drive it.
+//! by key over the files screen or the conversation. For a line comment
+//! `ctrl-s` keeps it in the pending review; for a reply or a general
+//! comment it asks before posting to GitHub. `esc` drops it (asking first
+//! when it has text), and every other key is typed. Pure, so `update`
+//! owns it and tests drive it.
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
+use super::discussion_write::{POSTING, WAIT};
 use super::pending::CommentTarget;
+use super::state::{ReviewScreen, ReviewState};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::Effect;
 use crate::features::review::ReviewIntent;
@@ -13,6 +17,7 @@ use crate::intent::AppIntent;
 use crate::keymap::{KeyPress, KeyScope};
 use crate::model::AppState;
 use crate::popup::{Popup, byte_at, char_len};
+use kika_forge::discussion_write::DiscussionWrite;
 
 /// Text being typed. `row` indexes `lines` and `col` counts chars, not
 /// bytes, in that line; both always point inside the text.
@@ -119,39 +124,115 @@ impl CommentEditor {
     }
 }
 
-/// The open composer: where the comment goes, the pending comment it
-/// edits (`None` for a new one) and its text.
+/// What the composer's text is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComposerKind {
+    /// A line comment kept in the pending review: where it goes, and the
+    /// pending comment it edits (`None` for a new one).
+    Line {
+        target: CommentTarget,
+        editing: Option<u64>,
+    },
+    /// A reply to review thread `thread` (its node id) of pull request
+    /// `number`, posted to GitHub; `label` names the thread, made safe to
+    /// draw.
+    Reply {
+        number: u64,
+        thread: String,
+        label: String,
+    },
+    /// A general comment on pull request `number`, whose node id is
+    /// `subject`, posted to GitHub.
+    General { number: u64, subject: String },
+}
+
+/// The open composer: what its text is for, and the text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Composer {
-    pub target: CommentTarget,
-    pub editing: Option<u64>,
+    pub kind: ComposerKind,
     pub text: CommentEditor,
 }
 
-/// The composer is open over the files screen, so it has the keys.
+impl Composer {
+    /// A composer with no text yet.
+    pub fn new(kind: ComposerKind) -> Self {
+        Self {
+            kind,
+            text: CommentEditor::default(),
+        }
+    }
+
+    /// Its text goes to GitHub, after a question, not to the pending review.
+    pub fn posts(&self) -> bool {
+        !matches!(self.kind, ComposerKind::Line { .. })
+    }
+}
+
+/// The composer is open over the files screen or the conversation, so it
+/// has the keys.
 pub(crate) fn composer_open(state: &AppState) -> bool {
-    state.review_files_shown() && state.review.composer.is_some()
+    let shown =
+        state.review_files_shown() || matches!(state.review.screen, ReviewScreen::Conversation(_));
+    shown && state.review.composer.is_some()
+}
+
+impl ReviewState {
+    /// The open composer posts to GitHub and its write is in flight.
+    pub(super) fn composer_posting(&self) -> bool {
+        let posting = self
+            .writing
+            .as_ref()
+            .is_some_and(|w| !matches!(w.write, DiscussionWrite::Resolve { .. }));
+        posting && self.composer.as_ref().is_some_and(Composer::posts)
+    }
 }
 
 impl AppState {
-    /// A key no composer binding took: typed into the text.
+    /// The open composer's text is on its way to GitHub: it may not
+    /// change or close until GitHub answers.
+    pub(super) fn composer_posting(&self) -> bool {
+        self.review.composer_posting()
+    }
+
+    /// A key no composer binding took: typed into the text, unless the
+    /// text is being posted.
     pub(crate) fn type_comment(&mut self, key: KeyPress) {
+        if self.composer_posting() {
+            return;
+        }
         if let Some(composer) = &mut self.review.composer {
             composer.text.edit(key);
         }
     }
 
-    /// `ctrl-s`: keep the comment in the pending review, never posted.
+    /// `ctrl-s`: keep a line comment in the pending review, never posted;
+    /// for a reply or a general comment, ask before posting it to GitHub.
     /// Blank text is refused, and the composer stays.
     pub(crate) fn save_comment(&mut self) -> Vec<Effect> {
         let Some(composer) = &self.review.composer else {
             return vec![];
         };
         let text = composer.text.text();
-        // Refused: the composer stays, so the text can be tried again.
-        if let Some(reason) = self.pending_change_refused(composer.editing) {
-            self.notice = Some(reason);
-            return vec![];
+        let question = match &composer.kind {
+            ComposerKind::Line { editing, .. } => {
+                // Refused: the composer stays, so the text can be tried again.
+                if let Some(reason) = self.pending_change_refused(*editing) {
+                    self.notice = Some(reason);
+                    return vec![];
+                }
+                None
+            }
+            ComposerKind::Reply { .. } => Some("Post this reply to GitHub? (y/n)".to_string()),
+            ComposerKind::General { number, .. } => {
+                Some(format!("Post this comment on #{number} to GitHub? (y/n)"))
+            }
+        };
+        if let Some(question) = question {
+            if self.review.writing.is_some() {
+                self.notice = Some(POSTING.into());
+                return vec![];
+            }
+            return self.ask_post(question, &text);
         }
         let Some(body) = self.comment_body(&text) else {
             return vec![];
@@ -159,14 +240,44 @@ impl AppState {
         let Some(composer) = self.review.composer.take() else {
             return vec![];
         };
-        match composer.editing {
-            Some(id) => self.update_pending(id, body),
-            None => self.add_pending(composer.target, body),
+        match composer.kind {
+            ComposerKind::Line {
+                editing: Some(id), ..
+            } => self.update_pending(id, body),
+            ComposerKind::Line {
+                target,
+                editing: None,
+            } => self.add_pending(target, body),
+            // Asked about above; never kept.
+            ComposerKind::Reply { .. } | ComposerKind::General { .. } => vec![],
         }
     }
 
+    /// The question before a post. Only `y` answers it; the composer and
+    /// its text stay under it either way.
+    fn ask_post(&mut self, question: String, text: &str) -> Vec<Effect> {
+        if self.comment_body(text).is_none() {
+            return vec![];
+        }
+        self.popups.push(Popup::Question(ConfirmQuestion {
+            scope: KeyScope::ReviewCommentConfirm,
+            title: "Post to GitHub".into(),
+            text: question,
+            answer: Answer::YOnly,
+            then: Then::Intent(Box::new(AppIntent::Review(ReviewIntent::PostComment))),
+            range: false,
+            head: None,
+        }));
+        vec![]
+    }
+
     /// `esc`: close a blank composer at once; ask before dropping text.
+    /// While its text is being posted it stays.
     pub(crate) fn escape_comment(&mut self) {
+        if self.composer_posting() {
+            self.notice = Some(WAIT.into());
+            return;
+        }
         let Some(composer) = &self.review.composer else {
             return;
         };
@@ -187,6 +298,9 @@ impl AppState {
 
     /// The yes of "Discard this comment?".
     pub(crate) fn discard_comment(&mut self) {
+        if self.composer_posting() {
+            return;
+        }
         self.review.composer = None;
     }
 }

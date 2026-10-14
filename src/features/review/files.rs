@@ -114,6 +114,9 @@ pub struct PrFiles {
     pub reader: Option<ThreadReader>,
     /// The diff rows a comment is being picked on, in pick mode.
     pub pick: Option<CommentPick>,
+    /// The node id of the thread a reply was posted to, so the reader
+    /// opens on it again once the discussion is read again.
+    pub reopen_thread: Option<String>,
 }
 
 impl PrFiles {
@@ -138,6 +141,7 @@ impl PrFiles {
             jump: None,
             reader: None,
             pick: None,
+            reopen_thread: None,
         }
     }
 

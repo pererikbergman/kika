@@ -6,7 +6,9 @@
 //! (`threads.rs`, drawn by `threads_view.rs`), one thread read in full
 //! over the files screen (`reader.rs`, drawn by `reader_view.rs`), its
 //! conversation of comments and review bodies (`conversation.rs`, drawn
-//! by `conversation_view.rs`), merging it from the detail
+//! by `conversation_view.rs`), replying to a thread, resolving it and
+//! commenting on the pull request on GitHub (`discussion_write.rs`),
+//! merging it from the detail
 //! (`merge.rs`), checking its head out as the local branch `pr/<number>`
 //! and going to the workspace (`checkout.rs`), the markdown renderer for
 //! its body (`markdown.rs`), the pending review of line comments kept on
@@ -18,7 +20,7 @@
 //! I/O behind `LoadReviewQueues`, `LoadPrDetail`, `LoadPrDiscussion`,
 //! `CheckReviewCommits`, `FetchReviewCommits`, `LoadReviewFiles`,
 //! `LoadReviewCommits`, `LoadReviewRange`, `SetFileViewed`,
-//! `PlanPrCheckout`, `MergePullRequest`, `LoadPendingReview` and
+//! `WriteDiscussion`, `PlanPrCheckout`, `MergePullRequest`, `LoadPendingReview` and
 //! `SavePendingReview` (`effects.rs`). The credential
 //! plumbing that `FetchReviewCommits` shares with sync and the merge
 //! question popup stay in core; the forge client is the `kika_forge` crate.
@@ -27,8 +29,8 @@
 //! `AppIntent::Review`, and its one `update` arm calls [`update`] here.
 //! `update.rs` holds only that function; it dispatches to the handlers in
 //! `state.rs`, `files.rs`, `commit_view.rs`, `viewed.rs`, `threads.rs`,
-//! `reader.rs`, `conversation.rs`, `merge.rs`, `checkout.rs`,
-//! `pending.rs`, `comment_pick.rs` and `comment_editor.rs`.
+//! `reader.rs`, `conversation.rs`, `discussion_write.rs`, `merge.rs`,
+//! `checkout.rs`, `pending.rs`, `comment_pick.rs` and `comment_editor.rs`.
 //! The review guards on core arms (`ScrollDiff`, `OpenSearch`,
 //! `DiffEscape`) stay in core.
 //!
@@ -55,7 +57,8 @@
 //! - `view::render`;
 //! - `effects::{load_queues, load_detail, load_discussion, check_commits,
 //!   fetch_commits, load_files, load_commits, load_range_files,
-//!   set_file_viewed, plan_checkout, merge, load_pending, save_pending}`.
+//!   set_file_viewed, write_discussion, plan_checkout, merge, load_pending,
+//!   save_pending}`.
 //!
 //! Kept cross-feature reads and calls:
 //! - `merge.rs` reloads the badges after a merge by asking core
@@ -73,6 +76,7 @@ mod comment_pick;
 mod commit_view;
 mod conversation;
 mod conversation_view;
+mod discussion_write;
 pub(crate) mod effects;
 mod files;
 mod git;

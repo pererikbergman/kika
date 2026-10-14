@@ -10,6 +10,7 @@ use crate::effect::Tag;
 use crate::intent::Scroll;
 use crate::keymap::KeyPress;
 use kika_forge::discussion::PrDiscussion;
+use kika_forge::discussion_write::{DiscussionWrite, Written};
 use kika_forge::pending::{PendingError, PendingReview};
 use kika_forge::review::{PrDetail, Queues, ReviewError};
 use kika_forge::{CreateError, ForgeHost, ForgeRepo};
@@ -151,6 +152,24 @@ pub(crate) enum ReviewIntent {
     EscapeComment,
     /// The yes of "Discard this comment?".
     DiscardComment,
+    /// Write a reply to the thread the reader shows.
+    ReplyToThread,
+    /// Resolve the thread the reader shows on GitHub, or unresolve it.
+    ToggleThreadResolved,
+    /// Write a general comment on the pull request whose conversation
+    /// shows.
+    StartGeneralComment,
+    /// The yes of "Post this … to GitHub?": post the composer's text.
+    PostComment,
+    /// GitHub answered `write` on pull request `number`, or why not.
+    DiscussionWritten {
+        tag: Tag,
+        /// The host the write went to, where a rate limit is recorded.
+        host: ForgeHost,
+        number: u64,
+        write: DiscussionWrite,
+        result: Result<Written, CreateError>,
+    },
     /// List the pending comments.
     OpenPendingList,
     /// Move the list's cursor by this many rows.

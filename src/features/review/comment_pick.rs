@@ -4,7 +4,7 @@
 //! opens the composer on them. The diff scrolls only to keep the cursor
 //! in view. The pick ends when the file, the view or the diff changes.
 
-use super::comment_editor::{CommentEditor, Composer};
+use super::comment_editor::{Composer, ComposerKind};
 use super::files::{FilesStage, ReviewView, files_screen};
 use super::pending::{CommentTarget, comment_disabled};
 use crate::diff_search::reveal;
@@ -174,11 +174,10 @@ impl AppState {
         });
         self.end_comment_pick();
         if let Some(target) = target {
-            self.review.composer = Some(Composer {
+            self.review.composer = Some(Composer::new(ComposerKind::Line {
                 target,
                 editing: None,
-                text: CommentEditor::default(),
-            });
+            }));
         }
     }
 
@@ -209,7 +208,10 @@ mod tests {
 
     fn target(state: &AppState) -> (Option<GhLine>, GhLine) {
         let composer = state.review.composer.as_ref().expect("a composer");
-        (composer.target.start, composer.target.end)
+        let ComposerKind::Line { target, .. } = &composer.kind else {
+            panic!("{composer:?}");
+        };
+        (target.start, target.end)
     }
 
     #[test]

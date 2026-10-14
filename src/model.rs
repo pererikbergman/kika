@@ -731,8 +731,9 @@ impl AppState {
             }
             (Context::Workspace, Focus::Blame(_)) => KeyScope::Blame,
             (Context::Workspace, Focus::Conflict(_)) => KeyScope::Conflict,
+            // Over the files screen or the conversation.
+            (Context::Review { .. }, _) if review::composer_open(self) => KeyScope::ReviewComment,
             (Context::Review { .. }, _) => match &self.review.files {
-                Some(_) if review::composer_open(self) => KeyScope::ReviewComment,
                 Some(_) if review::pending_list_open(self) => KeyScope::ReviewPending,
                 Some(_) if review::thread_reader_open(self) => KeyScope::ReviewThread,
                 Some(_) if review::comment_pick_open(self) => KeyScope::ReviewPick,

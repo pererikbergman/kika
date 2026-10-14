@@ -50,7 +50,13 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
             Some(files) => return files_screen(state, files, frame, inner),
             None => Vec::new(),
         },
-        ReviewScreen::Conversation(_) => super::conversation_view::conversation_view(review, inner),
+        ReviewScreen::Conversation(_) => {
+            let lines = super::conversation_view::conversation_view(review, inner);
+            frame.render_widget(Paragraph::new(lines), inner);
+            // A general comment is typed over it.
+            super::pending_view::render_pending(review, frame, inner);
+            return;
+        }
     };
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -1091,6 +1097,7 @@ mod tests {
             jump: None,
             reader: None,
             pick: None,
+            reopen_thread: None,
         });
         state
     }

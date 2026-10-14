@@ -5,6 +5,7 @@
 use super::checkout::pr_checkout_disabled;
 use super::commit_view::review_commit_disabled;
 use super::conversation::{conversation_disabled, page_disabled};
+use super::discussion_write::{general_comment_disabled, thread_write_disabled};
 use super::files::{review_files_disabled, review_search_step_disabled};
 use super::merge::merge_disabled;
 use super::pending::{comment_disabled, pending_list_disabled};
@@ -22,7 +23,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 /// Bar hints left out, rather than dimmed, while their key is refused:
 /// they belong to one screen only.
-pub(crate) const HIDDEN_WHEN_OFF: &[&str] = &["review.conversation"];
+pub(crate) const HIDDEN_WHEN_OFF: &[&str] = &["review.conversation", "review.comment_general"];
 
 // Chunk 27: review
 pub(crate) static REVIEW_KEYS: &[Binding] = &[
@@ -174,6 +175,18 @@ pub(crate) static REVIEW_KEYS: &[Binding] = &[
         label: "conversation",
         bar: true,
         disabled: conversation_disabled,
+    },
+    // Opens the composer for a post to GitHub, so a repository file may
+    // not move it.
+    Binding {
+        id: "review.comment_general",
+        keys: &[KeyPattern::exact(KeyCode::Char('a'), NONE)],
+        scope: KeyScope::Review,
+        intent: AppIntent::Review(ReviewIntent::StartGeneralComment),
+        description: "Write a comment on the pull request, posted to GitHub after a question only y answers",
+        label: "comment",
+        bar: true,
+        disabled: general_comment_disabled,
     },
     Binding {
         id: "review.page_down",
@@ -411,6 +424,29 @@ pub(crate) static REVIEW_KEYS: &[Binding] = &[
         bar: false,
         disabled: never,
     },
+    // Opens the composer for a post to GitHub, so a repository file may
+    // not move it.
+    Binding {
+        id: "review_thread.reply",
+        keys: &[KeyPattern::exact(KeyCode::Char('a'), NONE)],
+        scope: KeyScope::ReviewThread,
+        intent: AppIntent::Review(ReviewIntent::ReplyToThread),
+        description: "Write a reply to the thread, posted to GitHub after a question only y answers",
+        label: "reply",
+        bar: true,
+        disabled: thread_write_disabled,
+    },
+    // Reaches GitHub, so a repository file may not move it.
+    Binding {
+        id: "review_thread.resolve",
+        keys: &[KeyPattern::any(KeyCode::Char('R'))],
+        scope: KeyScope::ReviewThread,
+        intent: AppIntent::Review(ReviewIntent::ToggleThreadResolved),
+        description: "Resolve the thread on GitHub, or unresolve it if it is resolved",
+        label: "resolve",
+        bar: true,
+        disabled: thread_write_disabled,
+    },
     Binding {
         id: "review_thread.close",
         keys: &[KeyPattern::any(KeyCode::Esc)],
@@ -609,7 +645,7 @@ pub(crate) static REVIEW_COMMENT_KEYS: &[Binding] = &[
         keys: &[KeyPattern::exact(KeyCode::Char('s'), KeyModifiers::CONTROL)],
         scope: KeyScope::ReviewComment,
         intent: AppIntent::Review(ReviewIntent::SaveComment),
-        description: "Keep the comment in the pending review; nothing is posted",
+        description: "Keep a line comment in the pending review, or ask to post a reply or general comment",
         label: "save",
         bar: true,
         disabled: never,
@@ -707,13 +743,14 @@ pub(crate) static REVIEW_COMMENT_KEYS: &[Binding] = &[
 
 // Chunk 71c: review comments
 pub(crate) static REVIEW_COMMENT_CONFIRM: &[Binding] = &[
-    // The comment is lost, so Enter is left unbound.
+    // The comment is lost, or posted where it cannot be taken back, so
+    // Enter is left unbound.
     Binding {
         id: "review_comment_confirm.yes",
         keys: Answer::YOnly.keys(),
         scope: KeyScope::ReviewCommentConfirm,
         intent: AppIntent::ConfirmYes,
-        description: "Yes, delete or discard the comment",
+        description: "Yes: delete or discard the comment, or post it to GitHub",
         label: "yes",
         bar: true,
         disabled: never,
@@ -774,11 +811,19 @@ mod tests {
                 "review_thread.page_up",
                 "review_thread.next",
                 "review_thread.prev",
+                "review_thread.reply",
+                "review_thread.resolve",
                 "review_thread.close",
                 "review_thread.quit",
             ]
         );
-        ids.extend(in_thread.iter().filter(|id| **id != "review_thread.quit"));
+        // Those that reach GitHub are locked, as `v` is.
+        let writes = [
+            "review_thread.quit",
+            "review_thread.reply",
+            "review_thread.resolve",
+        ];
+        ids.extend(in_thread.iter().filter(|id| !writes.contains(id)));
         for id in ids {
             assert!(!REPO_LOCKED.contains(&id), "{id}");
         }
@@ -928,5 +973,40 @@ mod tests {
             assert_eq!(help(state), reason);
         }
         assert_eq!(help(&commenting()), None);
+    }
+
+    #[test]
+    fn the_write_keys_reach_their_bindings_and_ctrl_s_still_saves() {
+        assert_eq!(
+            owner(KeyScope::ReviewThread, plain('a')),
+            Some("review_thread.reply")
+        );
+        let shift_r = KeyPress::new(KeyCode::Char('R'), KeyModifiers::SHIFT);
+        assert_eq!(
+            owner(KeyScope::ReviewThread, shift_r),
+            Some("review_thread.resolve")
+        );
+        // On the conversation (the review scope); the files keep their own.
+        assert_eq!(
+            owner(KeyScope::Review, plain('a')),
+            Some("review.comment_general")
+        );
+        assert_eq!(
+            owner(KeyScope::ReviewFiles, plain('a')),
+            Some("review_files.comment")
+        );
+        let ctrl_s = KeyPress::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert_eq!(
+            owner(KeyScope::ReviewComment, ctrl_s),
+            Some("review_comment.save")
+        );
+        assert!(HIDDEN_WHEN_OFF.contains(&"review.comment_general"));
+        for id in [
+            "review_thread.reply",
+            "review_thread.resolve",
+            "review.comment_general",
+        ] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+        }
     }
 }
