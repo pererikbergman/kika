@@ -193,6 +193,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let runtime = Runtime::new(git.clone(), tx).with_forge(Some(ForgeContext {
             gh: gh.clone(),
+            glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
             sink: CommandSink::new(),
             cache_dir: Some(cache_dir.clone()),
         }));
@@ -302,6 +303,7 @@ mod tests {
         let gh = Arc::new(leaky_gh());
         let ctx = ForgeContext {
             gh: gh.clone(),
+            glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
             sink: CommandSink::new(),
             cache_dir: Some(tmp.path().join("forge")),
         };
@@ -382,6 +384,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let runtime = Runtime::new(git.clone(), tx).with_forge(Some(ForgeContext {
             gh: gh.clone(),
+            glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
             sink: CommandSink::new(),
             cache_dir: Some(cache_dir.clone()),
         }));
@@ -432,6 +435,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let runtime = Runtime::new(git.clone(), tx).with_forge(Some(ForgeContext {
             gh: gh.clone(),
+            glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
             sink: CommandSink::new(),
             cache_dir: None,
         }));

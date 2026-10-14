@@ -1350,6 +1350,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let runtime = Runtime::new(git, tx).with_forge(Some(ForgeContext {
             gh: gh.clone(),
+            glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
             sink,
             cache_dir: Some(tmp.path().join("forge")),
         }));
