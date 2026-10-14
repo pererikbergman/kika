@@ -113,7 +113,7 @@ impl AppState {
         if let Some(found) = &now.first_bad {
             if was_found != Some(found) {
                 let short = self.commits.short_oid(&found.commit);
-                self.notice_text = Some(bisect::found_notice(&short, &found.subject));
+                self.notice = Some(bisect::found_notice(&short, &found.subject).into());
             }
         } else if now.only_skipped && !was_only_skipped {
             self.notice = Some(bisect::ONLY_SKIPPED.into());
@@ -164,15 +164,15 @@ mod tests {
         let tag = refresh_tag(&mut state);
         state.update(status_with(tag, branch.clone()));
         assert_eq!(
-            state.notice_text.as_deref(),
+            state.notice.as_deref(),
             Some("Bisect found c1 (a resets): commit 1")
         );
 
         press_char(&mut state, 'j');
-        assert_eq!(state.notice_text, None);
+        assert_eq!(state.notice, None);
         let tag = refresh_tag(&mut state);
         state.update(status_with(tag, branch));
-        assert_eq!(state.notice_text, None);
+        assert_eq!(state.notice, None);
     }
 
     #[test]
@@ -192,7 +192,6 @@ mod tests {
             ),
         ));
         assert_eq!(state.notice, Some(bisect::ONLY_SKIPPED.into()));
-        assert_eq!(state.notice_text, None);
     }
 
     #[test]
