@@ -17,6 +17,7 @@ use crate::features::custom_commands::OutputMode;
 use crate::features::diff::renderers::{self, ExternalRenderer};
 use crate::features::diff::{self, DiffStreamer};
 use crate::features::stash::StashEntry;
+#[cfg(any(unix, test))]
 use crate::features::sync::SyncIntent;
 use crate::features::{
     blame, commit, conflicts, custom_commands, files, operation, pull_requests, repos, review,
@@ -1387,6 +1388,7 @@ mod tests {
     use crate::features::commits::reflog::ReflogIntent;
     #[cfg(unix)]
     use crate::features::custom_commands::CommandFailure;
+    #[cfg(unix)]
     use crate::features::custom_commands::CustomCommandsIntent;
     use crate::features::diff::DiffIntent;
     use crate::features::pull_requests::PullRequestsIntent;

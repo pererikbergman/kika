@@ -449,8 +449,12 @@ pull request, then to the queue, then to the workspace.
   fetched at most once a session, so if it is still missing after that,
   Kika says so and leaves it to you. A password or passphrase is asked as
   for a fetch from the workspace.
-- Viewed marks are read for the first 100 files; the rest, and a file
-  whose name is not UTF-8, show `?`.
+- Viewed marks are read with the pull request, 100 files per
+  `gh api graphql --include --hostname <host> --input -` call (the
+  repository, number and page cursor go on its input), for at most 1000
+  files (10 calls). Each call shows in the Command log. Paging stops at a
+  rate limit or a failed page. Files past the cap or past such a stop, and
+  files whose name is not UTF-8, show `?`.
 - `v` on the files screen marks the selected file viewed on GitHub, or
   not viewed when it is already. It is one
   `gh api graphql --include --hostname <host> --input -` call, shown in
@@ -458,7 +462,7 @@ pull request, then to the queue, then to the workspace.
   input. It is asked only when you press `v`, only on an allowed `github`
   host, and not while that host is rate limited. GitHub keeps the mark per
   file for the whole pull request. While GitHub has not answered yet, the
-  file's mark shows a dim `…`. A file past the first 100 can still be
+  file's mark shows a dim `…`. A file whose mark is `?` can still be
   marked; its `?` turns to the mark once GitHub takes it. A file whose
   name is not UTF-8 cannot be marked.
 - `c` on the files screen picks what it shows: "Whole pull request", or
@@ -486,10 +490,11 @@ pull request, then to the queue, then to the workspace.
   stop at the first and last. At most 100 threads, 50 comments in each,
   and 200 conversation items (100 comments and 100 reviews) are read.
 
-- GitHub is asked only when you enter review mode, open a pull request,
-  press `r` or answer `y` to a merge, or press `v` on the files screen;
-  opening a pull request or `r` asks for its detail, then its threads.
-  Nothing refreshes by itself, and nothing is cached on disk.
+- GitHub is asked only when you enter review mode, open a pull request
+  (which reads its viewed marks in up to 10 calls), press `r` or answer
+  `y` to a merge, or press `v` on the files screen; opening a pull request
+  or `r` asks for its detail, then its threads. Nothing refreshes by
+  itself, and nothing is cached on disk.
 - Only a `github` host is asked. With none, or with the remote on another
   host, review mode says so and asks nobody; a rate-limited host is not
   asked until its limit resets.
@@ -1698,11 +1703,12 @@ and resetting a bisect drops its marks, so `enter` does not answer it.
 
 ### Skip the stopped commit?
 
-Skipping a rebase, cherry-pick or revert commit loses the conflict resolution
-done since the stop, so `enter` does not answer it. It is only asked when
-there is such work: a conflict resolved in the index, a conflicted file
-edited, or, in a rebase, an unstaged change to a tracked file. If Kika cannot
-tell, it asks. With no work since the stop, `s` skips right away.
+Skipping a rebase, cherry-pick or revert commit loses the work done since
+the stop, so `enter` does not answer it. It is only asked when there is such
+work: a conflict resolved in the index, a conflicted file edited, in a rebase,
+an unstaged change to a tracked file, or, at a rebase `edit` or `break` stop,
+a staged change. If Kika cannot tell, it asks. With no work since the stop,
+`s` skips right away.
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|

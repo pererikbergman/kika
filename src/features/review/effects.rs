@@ -399,6 +399,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_detail_load_reads_its_later_pages_of_marks_and_answers_once() {
+        use kika_forge::allow::AllowRule;
+        use kika_forge::github::{FakeGh, answer};
+        use kika_forge::review::fixtures::{detail_with_files, files_page};
+
+        let github = vec![ForgeHost::parse("github.com").unwrap()];
+        let repo = ForgeRepo {
+            host: "github.com".into(),
+            owner: "acme".into(),
+            name: "widgets".into(),
+        };
+        let load = |hosts: Vec<ForgeHost>| Effect::LoadPrDetail {
+            tag: forge_tag(),
+            hosts,
+            repo: Some(repo.clone()),
+            number: 42,
+            limited: vec![],
+        };
+        let context = |gh: &Arc<FakeGh>| {
+            Some(ForgeContext {
+                gh: gh.clone(),
+                glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
+                sink: CommandSink::new(),
+                cache_dir: None,
+            })
+        };
+        let git = Arc::new(FakeRunner::new());
+        let gh = Arc::new(
+            FakeGh::new()
+                .reply(answer(&detail_with_files(0..100, 130, Some("c1"))))
+                .reply(answer(&files_page(100..130, None))),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        Runtime::new(git.clone(), tx)
+            .with_forge(context(&gh))
+            .spawn(load(github.clone()));
+        match rx.recv().await {
+            Some(AppIntent::Review(ReviewIntent::PrDetailLoaded {
+                result: Ok(Some(detail)),
+                ..
+            })) => {
+                assert_eq!(detail.viewed.len(), 130);
+                assert_eq!(detail.viewed_gap, None);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(gh.calls().len(), 2);
+        assert!(rx.try_recv().is_err(), "one answer only");
+
+        // No forge client, or a repository the allow-list leaves out:
+        // nobody is asked, not even for the first page.
+        let gh = Arc::new(FakeGh::new());
+        let narrowed = vec![
+            github[0]
+                .clone()
+                .with_allow(vec![AllowRule::parse("other").unwrap()]),
+        ];
+        for (forge, hosts) in [(None, github.clone()), (context(&gh), narrowed)] {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            Runtime::new(git.clone(), tx)
+                .with_forge(forge)
+                .spawn(load(hosts));
+            match rx.recv().await {
+                Some(AppIntent::Review(ReviewIntent::PrDetailLoaded { result, .. })) => {
+                    assert_eq!(result, Err(ReviewError::NoForgeHost));
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(gh.calls(), []);
+        git.assert_done();
+    }
+
+    #[tokio::test]
     async fn a_discussion_load_answers_once_and_reaches_gh_only_on_an_allowed_host() {
         use kika_forge::allow::AllowRule;
         use kika_forge::discussion::fixtures::DISCUSSION;

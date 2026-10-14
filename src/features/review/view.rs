@@ -1071,6 +1071,26 @@ mod tests {
     }
 
     #[test]
+    fn a_file_past_the_first_page_of_marks_draws_its_mark_when_scrolled_to() {
+        use crate::features::review::files::tests::large_ready;
+        use kika_forge::github::fixtures::GRAPHQL_RATE_LIMITED;
+        use kika_forge::review::fixtures::files_page;
+
+        let mut state = large_ready(files_page(100..150, None));
+        state.review.files.as_mut().unwrap().cursor = 120;
+        let rows = draw(&state, 100, 24);
+        assert!(contains(&rows, "M ✓ f0120"), "{rows:#?}");
+        assert!(contains(&rows, "M ~ f0118"), "{rows:#?}");
+        assert!(!contains(&rows, "M ? "), "{rows:#?}");
+
+        // Where paging stopped, the files past it are unknown.
+        let mut state = large_ready(GRAPHQL_RATE_LIMITED.to_string());
+        state.review.files.as_mut().unwrap().cursor = 120;
+        let rows = draw(&state, 100, 24);
+        assert!(contains(&rows, "M ? f0120"), "{rows:#?}");
+    }
+
+    #[test]
     fn the_files_screen_says_what_it_waits_for_or_why_it_failed() {
         let mut state = files_state();
         for (stage, text) in [

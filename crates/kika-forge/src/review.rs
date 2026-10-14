@@ -1,7 +1,8 @@
 //! Pull requests to review on GitHub: four queues in one GraphQL call,
-//! and one pull request's detail in another. Every string GitHub sends is
-//! made terminal-safe while it is parsed, so no type here ever holds raw
-//! server text. The repository and the number travel as GraphQL
+//! and one pull request's detail in another, then one more per later
+//! page of its files' viewed marks, up to [`MAX_FILES_PAGES`] in all.
+//! Every string GitHub sends is made terminal-safe while it is parsed, so
+//! no type here ever holds raw server text. The repository and the number travel as GraphQL
 //! variables on stdin; argv is the fixed `gh api graphql` line.
 
 use serde::Deserialize;
@@ -29,8 +30,14 @@ pub const MAX_REVIEWERS: usize = 20;
 pub const MAX_BODY: usize = 64 * 1024;
 /// The most of a one-line field kept, in characters.
 const MAX_FIELD: usize = 512;
-/// The files whose viewed state a detail asks for; past it, unknown.
-pub const MAX_FILES: usize = 100;
+/// The files one page of a pull request's files asks for; the queries
+/// write it as a literal `first:100`.
+pub const FILES_PAGE: usize = 100;
+/// The most pages of files read for one detail, its own page included,
+/// so a load makes at most this many calls.
+pub const MAX_FILES_PAGES: usize = 10;
+/// The files whose viewed state a detail keeps; past it, unknown.
+pub const MAX_FILES: usize = FILES_PAGE * MAX_FILES_PAGES;
 /// The longest file path kept from GitHub, in bytes. Longer ones are
 /// dropped: no file Git can check out has one.
 pub const MAX_PATH: usize = 4096;
@@ -238,11 +245,38 @@ pub struct PrDetail {
     /// The head and base commits; `None` when GitHub sent no hex id.
     pub head_oid: Option<CommitId>,
     pub base_oid: Option<CommitId>,
-    /// The viewed state of up to [`MAX_FILES`] files, by path. The paths
-    /// are only ever compared with local ones, never drawn.
+    /// The viewed state of up to [`MAX_FILES`] files, by path, read a
+    /// page at a time. The paths are only ever compared with local ones,
+    /// never drawn.
     pub viewed: Vec<(String, ViewedState)>,
+    /// Why `viewed` stops short of every file; `None` when every page
+    /// was read.
+    pub viewed_gap: Option<ViewedGap>,
     /// How many files GitHub says the pull request changes.
     pub files_total: u64,
+}
+
+impl PrDetail {
+    /// Until when the host is rate limited, when a later page of files
+    /// met a limit. The detail itself still answered.
+    pub fn viewed_limit(&self) -> Option<i64> {
+        match self.viewed_gap {
+            Some(ViewedGap::Limited { until }) => Some(until),
+            _ => None,
+        }
+    }
+}
+
+/// Why the viewed marks stop before the pull request's last file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewedGap {
+    /// GitHub had more files after [`MAX_FILES_PAGES`] pages.
+    Capped,
+    /// A later page failed, or gave a cursor that was bad or already sent,
+    /// or held nothing yet claimed more.
+    Failed,
+    /// A later page was rate limited until this second; no more were asked.
+    Limited { until: i64 },
 }
 
 /// Why review mode has nothing to show. A fixed set: nothing `gh` or
@@ -279,7 +313,8 @@ impl Gh<'_> {
         self.call(kind, |answer| read_with(answer, read_queues), outcome)
     }
 
-    /// Pull request `number` of `repo`; `None` when GitHub has none.
+    /// Pull request `number` of `repo`; `None` when GitHub has none. Its
+    /// viewed marks past the first page are read before it answers.
     pub fn fetch_detail(&self, repo: &ForgeRepo, number: u64) -> Result<Option<PrDetail>, Refusal> {
         // GraphQL numbers are 32-bit; a larger one names no pull request.
         if number > i32::MAX as u64 {
@@ -289,11 +324,16 @@ impl Gh<'_> {
             body: detail_body(repo, number),
         };
         let now = self.now;
-        self.run_logged(
+        let first = self.run_logged(
             kind,
             |output| pull_request_answer(output, now, read_detail),
             outcome,
-        )
+        )?;
+        let Some((mut detail, end)) = first else {
+            return Ok(None);
+        };
+        detail.viewed_gap = self.page_viewed(repo, number, &mut detail.viewed, end);
+        Ok(Some(detail))
     }
 }
 
@@ -378,7 +418,7 @@ const DETAIL_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!)\
 {repository(owner:$owner,name:$name){mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed \
 pullRequest(number:$number)\
 {id number title body state isDraft mergeable mergeStateStatus baseRefName headRefName headRefOid baseRefOid \
-author{login} files(first:100){totalCount nodes{path viewerViewedState}} \
+author{login} files(first:100){totalCount pageInfo{hasNextPage endCursor} nodes{path viewerViewedState}} \
 labels(first:20){nodes{name}} \
 reviewRequests(first:20){nodes{requestedReviewer{...on User{login} ...on Bot{login} \
 ...on Mannequin{login} ...on Team{slug}}}} \
@@ -513,8 +553,17 @@ struct PrNode {
 #[serde(rename_all = "camelCase")]
 struct FilesNode {
     total_count: Option<u64>,
+    page_info: Option<PageInfo>,
     #[serde(default = "Vec::new")]
     nodes: Vec<Option<FileNode>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PageInfo {
+    #[serde(default)]
+    has_next_page: bool,
+    end_cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -600,7 +649,8 @@ fn pull_request_null(body: &[u8]) -> bool {
     })
 }
 
-fn read_detail(body: &[u8]) -> Result<Option<PrDetail>, ForgeStatus> {
+/// The detail, and where its page of files left the connection.
+fn read_detail(body: &[u8]) -> Result<Option<(PrDetail, PageEnd)>, ForgeStatus> {
     let data: DetailData = data_of(body)?;
     let repository = data.repository.ok_or(ForgeStatus::NoAccess)?;
     // A flag GitHub did not send allows nothing.
@@ -672,23 +722,10 @@ fn read_detail(body: &[u8]) -> Result<Option<PrDetail>, ForgeStatus> {
         .take(MAX_CHECKS)
         .collect();
     let files_total = pr.files.as_ref().and_then(|f| f.total_count).unwrap_or(0);
-    let viewed = pr
-        .files
-        .into_iter()
-        .flat_map(|f| f.nodes.into_iter().flatten())
-        .filter_map(|file| {
-            let path = file.path.filter(|p| p.len() <= MAX_PATH)?;
-            let viewed = match file.viewer_viewed_state.as_deref() {
-                Some("VIEWED") => ViewedState::Viewed,
-                Some("DISMISSED") => ViewedState::Dismissed,
-                _ => ViewedState::Unviewed,
-            };
-            Some((path, viewed))
-        })
-        .take(MAX_FILES)
-        .collect();
+    let mut viewed = Vec::new();
+    let end = add_viewed(&mut viewed, pr.files);
     let oid = full_oid;
-    Ok(Some(PrDetail {
+    let detail = PrDetail {
         node_id: pr.id.filter(|id| node_id_ok(id)),
         number: pr.number,
         title: line(pr.title.as_deref().unwrap_or_default()),
@@ -708,8 +745,170 @@ fn read_detail(body: &[u8]) -> Result<Option<PrDetail>, ForgeStatus> {
         head_oid: oid(pr.head_ref_oid),
         base_oid: oid(pr.base_ref_oid),
         viewed,
+        viewed_gap: None,
         files_total,
-    }))
+    };
+    Ok(Some((detail, end)))
+}
+
+// Paging through a pull request's files for their viewed marks. Each
+// later page is one more `gh api graphql` call on the same `Gh`, so it
+// stays behind the allow gate and rate-limit check the load passed.
+
+/// One later page of a pull request's files: fixed text; owner, name,
+/// number and the cursor to read after are variables.
+const FILES_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!,$after:String!)\
+{repository(owner:$owner,name:$name){pullRequest(number:$number)\
+{files(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{path viewerViewedState}}}}}";
+
+fn files_body(repo: &ForgeRepo, number: u64, after: &str) -> Vec<u8> {
+    let variables = json!({
+        "owner": repo.owner,
+        "name": repo.name,
+        "number": number,
+        "after": after,
+    });
+    serde_json::to_vec(&json!({ "query": FILES_QUERY, "variables": variables })).unwrap_or_default()
+}
+
+/// Whether `cursor` is fit to send back as a page cursor: 1 to 256
+/// visible ASCII characters. It only ever travels as a JSON variable;
+/// the check keeps it bounded.
+pub fn cursor_ok(cursor: &str) -> bool {
+    (1..=256).contains(&cursor.len()) && cursor.bytes().all(|b| b.is_ascii_graphic())
+}
+
+/// Where one page of files left the connection.
+#[derive(Debug, Default)]
+struct PageEnd {
+    /// GitHub says more files follow.
+    more: bool,
+    cursor: Option<String>,
+    /// The page held at least one file.
+    held: bool,
+}
+
+/// `(path, state)` of one file: a path over [`MAX_PATH`] is none, and a
+/// state Kika does not know counts as not viewed.
+fn viewed_of(file: FileNode) -> Option<(String, ViewedState)> {
+    let path = file.path.filter(|p| p.len() <= MAX_PATH)?;
+    let viewed = match file.viewer_viewed_state.as_deref() {
+        Some("VIEWED") => ViewedState::Viewed,
+        Some("DISMISSED") => ViewedState::Dismissed,
+        _ => ViewedState::Unviewed,
+    };
+    Some((path, viewed))
+}
+
+/// Add a page's files to `viewed`, up to [`MAX_FILES`]; a path already
+/// there keeps its first state. Where the page ends comes back.
+fn add_viewed(viewed: &mut Vec<(String, ViewedState)>, files: Option<FilesNode>) -> PageEnd {
+    let Some(files) = files else {
+        return PageEnd::default();
+    };
+    let info = files.page_info;
+    let mut end = PageEnd {
+        more: info.as_ref().is_some_and(|i| i.has_next_page),
+        cursor: info.and_then(|i| i.end_cursor),
+        held: false,
+    };
+    let mut seen: std::collections::HashSet<String> =
+        viewed.iter().map(|(p, _)| p.clone()).collect();
+    for file in files.nodes.into_iter().flatten() {
+        end.held = true;
+        if viewed.len() >= MAX_FILES {
+            continue;
+        }
+        if let Some((path, state)) = viewed_of(file)
+            && seen.insert(path.clone())
+        {
+            viewed.push((path, state));
+        }
+    }
+    end
+}
+
+/// The cursor of the next page to ask for, `Ok(None)` when no more are
+/// wanted, or the gap that stops the paging. `pages` have been read,
+/// `full` says [`MAX_FILES`] are kept, and `sent` are the cursors
+/// already asked with.
+fn next_cursor(
+    end: PageEnd,
+    pages: usize,
+    full: bool,
+    sent: &[String],
+) -> Result<Option<String>, ViewedGap> {
+    if !end.more {
+        return Ok(None);
+    }
+    if pages >= MAX_FILES_PAGES || full {
+        return Err(ViewedGap::Capped);
+    }
+    match end.cursor {
+        Some(cursor) if end.held && cursor_ok(&cursor) && !sent.contains(&cursor) => {
+            Ok(Some(cursor))
+        }
+        _ => Err(ViewedGap::Failed),
+    }
+}
+
+/// The files of a later page, read like the detail's own.
+#[derive(Deserialize)]
+struct FilesData {
+    repository: Option<FilesRepo>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FilesRepo {
+    pull_request: Option<FilesPr>,
+}
+
+#[derive(Deserialize)]
+struct FilesPr {
+    files: Option<FilesNode>,
+}
+
+/// A later page's files; a missing repository, pull request or files
+/// connection is a failure, as the detail just named them.
+fn read_files(body: &[u8]) -> Result<FilesNode, ForgeStatus> {
+    let data: FilesData = data_of(body)?;
+    data.repository
+        .and_then(|r| r.pull_request)
+        .and_then(|p| p.files)
+        .ok_or(ForgeStatus::Failed)
+}
+
+impl Gh<'_> {
+    /// Read the pages after the detail's own into `viewed`, one call each,
+    /// until GitHub has no more or [`MAX_FILES_PAGES`] pages are read.
+    /// A page that fails ends it and keeps what was read; why it ended
+    /// short comes back.
+    fn page_viewed(
+        &self,
+        repo: &ForgeRepo,
+        number: u64,
+        viewed: &mut Vec<(String, ViewedState)>,
+        mut end: PageEnd,
+    ) -> Option<ViewedGap> {
+        let mut sent: Vec<String> = Vec::new();
+        loop {
+            let cursor = match next_cursor(end, 1 + sent.len(), viewed.len() >= MAX_FILES, &sent) {
+                Ok(Some(cursor)) => cursor,
+                Ok(None) => return None,
+                Err(gap) => return Some(gap),
+            };
+            let kind = GhCall::Graphql {
+                body: files_body(repo, number, &cursor),
+            };
+            sent.push(cursor);
+            match self.call(kind, |answer| read_with(answer, read_files), outcome) {
+                Ok(files) => end = add_viewed(viewed, Some(files)),
+                Err(Refusal::Limited { until }) => return Some(ViewedGap::Limited { until }),
+                Err(Refusal::Status(_)) => return Some(ViewedGap::Failed),
+            }
+        }
+    }
 }
 
 /// A review's state as a verdict; `None` for one Kika does not know.
@@ -913,6 +1112,78 @@ pub mod fixtures {
     pub const DETAIL: &str = include_str!("fixtures/review_detail.http");
     pub const DETAIL_MISSING: &str = include_str!("fixtures/review_detail_missing.http");
     pub const DETAIL_BAD_OID: &str = include_str!("fixtures/review_detail_bad_oid.http");
+    /// A later page of files: two of them, and no more after.
+    pub const LATER_PAGE: &str = include_str!("fixtures/review_files_page.http");
+    /// A later page whose pull request is gone.
+    pub const LATER_PAGE_NULL: &str = include_str!("fixtures/review_files_page_null.http");
+
+    /// The path of file `i` in the built pages.
+    pub fn page_path(i: usize) -> String {
+        format!("f{i:04}")
+    }
+
+    /// GitHub's viewed state of file `i` in the built pages: viewed,
+    /// dismissed and not viewed in turn.
+    pub fn page_state(i: usize) -> &'static str {
+        ["VIEWED", "DISMISSED", "UNVIEWED"][i % 3]
+    }
+
+    /// The `files` connection of `paths`, with `next` as the cursor of
+    /// the page after it, or no page after it.
+    fn files_json(
+        paths: std::ops::Range<usize>,
+        total: Option<usize>,
+        next: Option<&str>,
+    ) -> String {
+        let nodes: Vec<String> = paths
+            .map(|i| {
+                format!(
+                    "{{\"path\":\"{}\",\"viewerViewedState\":\"{}\"}}",
+                    page_path(i),
+                    page_state(i)
+                )
+            })
+            .collect();
+        let info = match next {
+            Some(cursor) => format!(
+                "{{\"hasNextPage\":true,\"endCursor\":{}}}",
+                serde_json::to_string(cursor).unwrap()
+            ),
+            None => "{\"hasNextPage\":false,\"endCursor\":null}".to_string(),
+        };
+        let total = total
+            .map(|t| format!("\"totalCount\":{t},"))
+            .unwrap_or_default();
+        format!(
+            "\"files\":{{{total}\"pageInfo\":{info},\"nodes\":[{}]}}",
+            nodes.join(",")
+        )
+    }
+
+    /// A later page holding files `paths`, answered as [`LATER_PAGE`] is.
+    pub fn files_page(paths: std::ops::Range<usize>, next: Option<&str>) -> String {
+        let (head, _) = LATER_PAGE.split_once("\n\n").unwrap();
+        format!(
+            "{head}\n\n{{\"data\":{{\"repository\":{{\"pullRequest\":{{{}}}}}}}}}\n",
+            files_json(paths, None, next)
+        )
+    }
+
+    /// [`DETAIL`] with files `paths` of `total` in place of its own.
+    pub fn detail_with_files(
+        paths: std::ops::Range<usize>,
+        total: usize,
+        next: Option<&str>,
+    ) -> String {
+        let start = DETAIL.find("\"files\":").unwrap();
+        let end = start + DETAIL[start..].find("]},").unwrap() + 2;
+        format!(
+            "{}{}{}",
+            &DETAIL[..start],
+            files_json(paths, Some(total), next),
+            &DETAIL[end..]
+        )
+    }
 
     /// `queues` with pull request `number`'s title replaced everywhere.
     pub fn with_title(queues: Queues, number: u64, title: &str) -> Queues {
@@ -1125,7 +1396,7 @@ pub(crate) mod tests {
             .as_str()
             .unwrap()
             .to_string();
-        let cap = format!("files(first:{MAX_FILES})");
+        let cap = format!("files(first:{FILES_PAGE})");
         for field in [
             "{id ",
             "headRefOid",
@@ -1299,6 +1570,7 @@ pub(crate) mod tests {
     fn a_missing_pull_request_is_none_not_a_failure() {
         let runner = FakeGh::new().reply(answer(DETAIL_MISSING));
         assert_eq!(detail(&runner, 999), Ok(None));
+        assert_eq!(runner.calls().len(), 1);
         // A number GraphQL cannot hold asks nobody.
         let runner = FakeGh::new();
         assert_eq!(detail(&runner, u64::from(u32::MAX)), Ok(None));
@@ -1326,6 +1598,7 @@ pub(crate) mod tests {
             detail(&runner, 1),
             Err(Refusal::Status(ForgeStatus::NotLoggedIn))
         );
+        assert_eq!(runner.calls().len(), 1);
         let runner = FakeGh::new().missing();
         assert_eq!(queues(&runner), Err(Refusal::Status(ForgeStatus::NoGh)));
         let runner = FakeGh::new().reply(answer("{\"data\":null}"));
@@ -1429,6 +1702,254 @@ pub(crate) mod tests {
         assert_eq!((l1.as_str(), l2.as_str()), (line, line));
         assert_eq!((a, c), (b, d));
         assert_ne!(a, c);
+    }
+
+    /// `fetch_detail` of pull request 42 answered by `pages` in turn.
+    fn paged(pages: &[String]) -> (FakeGh, Result<Option<PrDetail>, Refusal>) {
+        let runner = pages
+            .iter()
+            .fold(FakeGh::new(), |runner, page| runner.reply(answer(page)));
+        let result = detail(&runner, 42);
+        (runner, result)
+    }
+
+    /// The marks the built pages give files `paths`.
+    fn marks_of(paths: std::ops::Range<usize>) -> Vec<(String, ViewedState)> {
+        paths
+            .map(|i| {
+                let state = match page_state(i) {
+                    "VIEWED" => ViewedState::Viewed,
+                    "DISMISSED" => ViewedState::Dismissed,
+                    _ => ViewedState::Unviewed,
+                };
+                (page_path(i), state)
+            })
+            .collect()
+    }
+
+    /// The detail's 100 files, saying the next page starts after `c1`.
+    fn first_page() -> String {
+        detail_with_files(0..100, 250, Some("c1"))
+    }
+
+    #[test]
+    fn both_queries_page_by_files_page_and_ask_where_the_page_ends() {
+        let first = format!("first:{FILES_PAGE}");
+        assert!(
+            DETAIL_QUERY.contains(&format!(
+                "files({first}){{totalCount pageInfo{{hasNextPage endCursor}} nodes{{path viewerViewedState}}}}"
+            )),
+            "{DETAIL_QUERY}"
+        );
+        assert!(
+            FILES_QUERY.contains(&format!(
+                "files({first},after:$after){{pageInfo{{hasNextPage endCursor}} nodes{{path viewerViewedState}}}}"
+            )),
+            "{FILES_QUERY}"
+        );
+        assert!(
+            FILES_QUERY
+                .starts_with("query($owner:String!,$name:String!,$number:Int!,$after:String!)")
+        );
+        assert_eq!(MAX_FILES, FILES_PAGE * MAX_FILES_PAGES);
+        assert_eq!(MAX_FILES, 1000);
+    }
+
+    #[test]
+    fn a_pull_request_past_one_page_has_every_file_marked_in_three_calls() {
+        let (runner, result) = paged(&[
+            first_page(),
+            files_page(100..200, Some("c2")),
+            files_page(200..250, None),
+        ]);
+        let pr = result.unwrap().unwrap();
+        assert_eq!(pr.viewed.len(), 250);
+        assert_eq!(pr.viewed, marks_of(0..250));
+        assert_eq!(pr.viewed[120], (page_path(120), ViewedState::Viewed));
+        assert_eq!(pr.viewed[202], (page_path(202), ViewedState::Dismissed));
+        assert_eq!(pr.viewed[248], (page_path(248), ViewedState::Unviewed));
+        assert_eq!(pr.viewed_gap, None);
+        assert_eq!(pr.files_total, 250);
+        assert_eq!(runner.calls().len(), 3);
+    }
+
+    #[test]
+    fn each_later_page_sends_its_cursor_as_a_variable_on_stdin_only() {
+        let (runner, result) = paged(&[
+            first_page(),
+            files_page(100..200, Some("Y3Vyc29yOjIwMA==")),
+            files_page(200..250, None),
+        ]);
+        result.unwrap().unwrap();
+        let calls = runner.calls();
+        let fixed = "gh api graphql --include --hostname github.com --input -";
+        for (cmd, after) in calls[1..].iter().zip(["c1", "Y3Vyc29yOjIwMA=="]) {
+            let body = sent(cmd);
+            assert_eq!(body["query"], FILES_QUERY);
+            let vars = body["variables"].as_object().unwrap();
+            let mut keys: Vec<&str> = vars.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            assert_eq!(keys, ["after", "name", "number", "owner"]);
+            assert_eq!(vars["after"], after);
+            assert_eq!(
+                (&vars["owner"], &vars["name"], &vars["number"]),
+                (&json!("acme"), &json!("widgets"), &json!(42))
+            );
+            assert_eq!(cmd.display_line(), fixed);
+            assert_eq!(cmd.args(), calls[0].args());
+            for arg in cmd.args() {
+                let arg = arg.to_string_lossy();
+                for word in [after, "acme", "widgets"] {
+                    assert!(!arg.contains(word), "{word} in {arg}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_two_file_fixture_page_adds_its_marks_after_the_details() {
+        let more = DETAIL.replace(
+            "\"hasNextPage\":false,\"endCursor\":\"Y3Vyc29yOjM=\"",
+            "\"hasNextPage\":true,\"endCursor\":\"Y3Vyc29yOjM=\"",
+        );
+        let (runner, result) = paged(&[more, LATER_PAGE.to_string()]);
+        let pr = result.unwrap().unwrap();
+        assert_eq!(
+            sent(&runner.calls()[1])["variables"]["after"],
+            "Y3Vyc29yOjM="
+        );
+        assert_eq!(
+            pr.viewed[3..],
+            [
+                ("src/later.rs".to_string(), ViewedState::Viewed),
+                ("docs/later.md".to_string(), ViewedState::Dismissed),
+            ]
+        );
+        assert_eq!(pr.viewed_gap, None);
+    }
+
+    #[test]
+    fn paging_stops_at_its_cap_of_pages_and_files() {
+        let mut pages = vec![detail_with_files(0..100, 3000, Some("c1"))];
+        for page in 1..MAX_FILES_PAGES {
+            let next = format!("c{}", page + 1);
+            pages.push(files_page(page * 100..(page + 1) * 100, Some(&next)));
+        }
+        let (runner, result) = paged(&pages);
+        let pr = result.unwrap().unwrap();
+        assert_eq!(runner.calls().len(), MAX_FILES_PAGES);
+        assert_eq!(pr.viewed.len(), MAX_FILES);
+        assert_eq!(pr.viewed, marks_of(0..MAX_FILES));
+        assert_eq!(pr.viewed_gap, Some(ViewedGap::Capped));
+        assert_eq!(pr.files_total, 3000);
+    }
+
+    #[test]
+    fn a_failed_later_page_keeps_the_marks_read_before_it() {
+        let errors = "HTTP/2.0 200 OK\nContent-Type: application/json\n\n\
+                      {\"errors\":[{\"type\":\"INTERNAL\",\"message\":\"boom\"}]}";
+        let malformed = "HTTP/2.0 200 OK\nContent-Type: application/json\n\n{\"data\":{\"repo";
+        let status_500 = "HTTP/2.0 500 Internal Server Error\nContent-Type: application/json\n\n\
+                          {\"message\":\"Server Error\"}";
+        for third in [
+            status_500,
+            crate::github::fixtures::SERVER_ERROR,
+            errors,
+            malformed,
+            LATER_PAGE_NULL,
+        ] {
+            let (runner, result) = paged(&[
+                first_page(),
+                files_page(100..200, Some("c2")),
+                third.to_string(),
+            ]);
+            let pr = result.unwrap().unwrap_or_else(|| panic!("{third}"));
+            assert_eq!(pr.viewed, marks_of(0..200), "{third}");
+            assert_eq!(pr.viewed_gap, Some(ViewedGap::Failed), "{third}");
+            assert_eq!(runner.calls().len(), 3, "{third}");
+        }
+    }
+
+    #[test]
+    fn a_rate_limited_later_page_stops_the_paging_and_says_until_when() {
+        let (runner, result) = paged(&[first_page(), GRAPHQL_RATE_LIMITED.to_string()]);
+        let pr = result.unwrap().unwrap();
+        assert_eq!(runner.calls().len(), 2);
+        assert_eq!(pr.viewed, marks_of(0..100));
+        assert_eq!(
+            pr.viewed_gap,
+            Some(ViewedGap::Limited {
+                until: 1_700_003_600
+            })
+        );
+        assert_eq!(pr.viewed_limit(), Some(1_700_003_600));
+        assert_eq!(fixture_detail_limit(), None);
+    }
+
+    fn fixture_detail_limit() -> Option<i64> {
+        let runner = FakeGh::new().reply(answer(DETAIL));
+        detail(&runner, 42).unwrap().unwrap().viewed_limit()
+    }
+
+    #[test]
+    fn a_cursor_unfit_to_send_is_never_sent() {
+        let long = "a".repeat(257);
+        for bad in ["", long.as_str(), "a b", "a\nb", "a\u{1b}b", "caf\u{e9}"] {
+            let (runner, result) = paged(&[detail_with_files(0..100, 250, Some(bad))]);
+            let pr = result.unwrap().unwrap();
+            assert_eq!(pr.viewed_gap, Some(ViewedGap::Failed), "{bad:?}");
+            assert_eq!(pr.viewed.len(), 100);
+            assert_eq!(runner.calls().len(), 1, "{bad:?}");
+        }
+        // A page that claims more but names no cursor stops it too.
+        let none = detail_with_files(0..100, 250, Some("c1")).replace("\"c1\"", "null");
+        let (runner, result) = paged(&[none]);
+        assert_eq!(result.unwrap().unwrap().viewed_gap, Some(ViewedGap::Failed));
+        assert_eq!(runner.calls().len(), 1);
+
+        assert!(cursor_ok(&"a".repeat(256)));
+        assert!(cursor_ok("Y3Vyc29yOjEwMA=="));
+        assert!(!cursor_ok(&long));
+        assert!(!cursor_ok("a\tb"));
+    }
+
+    #[test]
+    fn a_repeated_cursor_or_an_empty_page_claiming_more_stops_the_paging() {
+        let (runner, result) = paged(&[first_page(), files_page(100..200, Some("c1"))]);
+        let pr = result.unwrap().unwrap();
+        assert_eq!(pr.viewed_gap, Some(ViewedGap::Failed));
+        assert_eq!(pr.viewed, marks_of(0..200));
+        assert_eq!(runner.calls().len(), 2);
+
+        let (runner, result) = paged(&[first_page(), files_page(100..100, Some("c2"))]);
+        let pr = result.unwrap().unwrap();
+        assert_eq!(pr.viewed_gap, Some(ViewedGap::Failed));
+        assert_eq!(pr.viewed.len(), 100);
+        assert_eq!(runner.calls().len(), 2);
+        // Null nodes alone hold nothing either.
+        let nulls =
+            files_page(100..100, Some("c2")).replace("\"nodes\":[]", "\"nodes\":[null,null]");
+        let (runner, result) = paged(&[first_page(), nulls]);
+        assert_eq!(result.unwrap().unwrap().viewed_gap, Some(ViewedGap::Failed));
+        assert_eq!(runner.calls().len(), 2);
+    }
+
+    #[test]
+    fn a_path_repeated_across_pages_keeps_its_first_state_and_bad_nodes_are_skipped() {
+        let later = files_page(100..103, None)
+            .replace(&page_path(100), &page_path(0))
+            .replace(&page_path(101), &"p".repeat(MAX_PATH + 1))
+            .replace(
+                "\"nodes\":[",
+                "\"nodes\":[null,{\"viewerViewedState\":\"VIEWED\"},",
+            );
+        assert_eq!(page_state(100), "DISMISSED");
+        let (_, result) = paged(&[first_page(), later]);
+        let pr = result.unwrap().unwrap();
+        assert_eq!(pr.viewed.len(), 101);
+        assert_eq!(pr.viewed[0], (page_path(0), ViewedState::Viewed));
+        assert_eq!(pr.viewed[100..], marks_of(102..103));
+        assert_eq!(pr.viewed_gap, None);
     }
 
     #[test]
