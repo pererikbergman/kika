@@ -1,18 +1,25 @@
 //! Operation: the Status panel (branch, upstream, operations in progress);
 //! merging the selected branch or rebasing onto it; and continuing,
 //! skipping or aborting the merge, rebase, cherry-pick or revert in
-//! progress, with the abort question. The feature has no state and no
-//! `Effect` of its own: its git ops run through the core op slot.
+//! progress, with the abort question. Skip first checks, as an effect,
+//! for conflict-resolution work done since the stop
+//! (`git::stop_work::read_stop_work`), and asks the skip question when
+//! it finds some or the check fails; otherwise it skips right away. Its
+//! git ops run through the core op slot.
 //!
 //! Its intents are nested (ADR-0002): core wraps [`OperationIntent`] in
 //! `AppIntent::Operation`, and its one `update` arm calls [`update`] here.
 //!
 //! Its `pub(crate)` API:
 //! - the intent enum [`OperationIntent`] and the free function [`update`];
-//! - the handlers in `update.rs`: `branch_op`, `resume` and `ask_abort`,
-//!   which asks `abort_question`;
+//! - [`StopWorkCheck`], the check in flight that `AppState` holds as
+//!   `skip_check`;
+//! - the handlers in `update.rs`: `branch_op`, `resume`, `skip` and
+//!   `ask_abort`, which asks `abort_question`; the skip question is
+//!   `skip_question`, or `skip_question_unchecked` when the check failed;
+//! - `effects::check_stop_work`, behind `Effect::CheckStopWork`;
 //! - `keys::{OPERATION_BRANCHES, OPERATION_STATUS, OPERATION_ABORT_CONFIRM,
-//!   merge_disabled}`;
+//!   OPERATION_SKIP_CONFIRM, merge_disabled}`;
 //! - `view::render_status_panel`.
 //!
 //! Kept cross-feature reads and calls:
@@ -42,13 +49,16 @@
 //! - the merge menu (`MenuId::Merge` in `menu.rs`) and the
 //!   `op_command`/`run_op` arms in `op.rs`.
 
+pub(crate) mod effects;
 mod intent;
 pub(crate) mod keys;
+mod state;
 mod update;
 pub(crate) mod view;
 
 pub(crate) use intent::OperationIntent;
+pub(crate) use state::StopWorkCheck;
 pub(crate) use update::update;
 
 #[cfg(test)]
-pub(crate) use update::abort_question;
+pub(crate) use update::{abort_question, skip_question, skip_question_unchecked};

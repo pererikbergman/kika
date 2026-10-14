@@ -276,6 +276,9 @@ pub enum KeyScope {
     DropStash,
     /// "Abort the operation in progress?" on top of the popup stack.
     AbortConfirm,
+    /// "Skip the stopped commit and lose the work since the stop?" on top
+    /// of the popup stack.
+    SkipConfirm,
     /// "Fold every fixup! commit?" on top of the popup stack.
     AutosquashConfirm,
     /// "Rewrite the history with the custom patch?" on top of the popup
@@ -353,6 +356,7 @@ impl KeyScope {
             | KeyScope::LeaveCommits
             | KeyScope::DropStash
             | KeyScope::AbortConfirm
+            | KeyScope::SkipConfirm
             | KeyScope::AutosquashConfirm
             | KeyScope::PatchConfirm
             | KeyScope::DropRangeConfirm
@@ -411,6 +415,7 @@ impl KeyScope {
             KeyScope::LeaveCommits => "Leave commits behind",
             KeyScope::DropStash => "Drop stash",
             KeyScope::AbortConfirm => "Abort",
+            KeyScope::SkipConfirm => "Skip",
             KeyScope::AutosquashConfirm => "Autosquash",
             KeyScope::PatchConfirm => "Custom patch",
             KeyScope::DropRangeConfirm => "Drop commits",
@@ -562,6 +567,9 @@ pub const REPO_LOCKED: &[&str] = &[
     "abort_confirm.yes",
     "abort_confirm.no",
     "abort_confirm.quit",
+    "skip_confirm.yes",
+    "skip_confirm.no",
+    "skip_confirm.quit",
     "remotes.remove",
     "remove_remote.yes",
     "remove_remote.no",
@@ -2454,6 +2462,7 @@ static CHUNKS: &[&[Binding]] = &[
     commits::rewrite::keys::REWRITE_LEAVE_COMMITS_CONFIRM,
     stash::keys::STASH_DROP_CONFIRM,
     operation::keys::OPERATION_ABORT_CONFIRM,
+    operation::keys::OPERATION_SKIP_CONFIRM,
     commits::rewrite::keys::REWRITE_AUTOSQUASH_CONFIRM,
     commits::custom_patch::keys::CUSTOM_PATCH_CONFIRM,
     commits::rewrite::keys::REWRITE_DROP_RANGE_CONFIRM,
@@ -2676,17 +2685,24 @@ mod tests {
     }
 
     #[test]
-    fn a_repository_layer_cannot_put_enter_back_on_the_abort_question() {
+    fn a_repository_layer_cannot_put_enter_back_on_the_abort_or_skip_question() {
         for id in [
             "abort_confirm.yes",
             "abort_confirm.no",
             "abort_confirm.quit",
+            "skip_confirm.yes",
+            "skip_confirm.no",
+            "skip_confirm.quit",
         ] {
             assert!(REPO_LOCKED.contains(&id), "{id}");
         }
         assert_eq!(
             build(&[("abort_confirm.yes", &["enter"])], Trust::Repo).unwrap_err(),
             r#""abort_confirm.yes" can only be changed in the global config file"#
+        );
+        assert_eq!(
+            build(&[("skip_confirm.yes", &["enter"])], Trust::Repo).unwrap_err(),
+            r#""skip_confirm.yes" can only be changed in the global config file"#
         );
         assert_eq!(
             build(&[("discard_confirm.yes", &["enter"])], Trust::Repo).unwrap_err(),
@@ -4595,6 +4611,7 @@ mod tests {
             KeyScope::LeaveCommits => "leave_commits",
             KeyScope::DropStash => "drop_stash",
             KeyScope::AbortConfirm => "abort_confirm",
+            KeyScope::SkipConfirm => "skip_confirm",
             KeyScope::AutosquashConfirm => "autosquash_confirm",
             KeyScope::PatchConfirm => "patch_confirm",
             KeyScope::DropRangeConfirm => "drop_range_confirm",
@@ -5889,6 +5906,9 @@ mod tests {
         "abort_confirm.yes",
         "abort_confirm.no",
         "abort_confirm.quit",
+        "skip_confirm.yes",
+        "skip_confirm.no",
+        "skip_confirm.quit",
         "autosquash_confirm.yes",
         "autosquash_confirm.no",
         "autosquash_confirm.quit",

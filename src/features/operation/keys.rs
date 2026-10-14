@@ -1,6 +1,7 @@
 //! The operation's key bindings: `m` on a branch opens the merge menu,
 //! the Status panel's `c`, `s` and `a` continue, skip or abort the
-//! operation in progress, and the abort question's own keys answer it.
+//! operation in progress, and the abort and skip questions' own keys
+//! answer them.
 //! `CHUNKS` in `keymap.rs` places the chunks, so their position there is
 //! behaviour.
 
@@ -116,6 +117,45 @@ pub(crate) static OPERATION_ABORT_CONFIRM: &[Binding] = &[
     },
 ];
 
+// Chunk 61b: operation
+pub(crate) static OPERATION_SKIP_CONFIRM: &[Binding] = &[
+    // As with aborting, Enter is left unbound: skipping loses resolved
+    // conflicts. The question is only asked when there are some.
+    Binding {
+        id: "skip_confirm.yes",
+        keys: Answer::YOnly.keys(),
+        scope: KeyScope::SkipConfirm,
+        intent: AppIntent::ConfirmYes,
+        description: "Yes, skip the commit and lose the work since the stop",
+        label: "skip",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "skip_confirm.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::SkipConfirm,
+        intent: AppIntent::ConfirmNo,
+        description: "No, keep the work and the stop",
+        label: "keep",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "skip_confirm.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::SkipConfirm,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,14 +166,23 @@ mod tests {
 
     #[test]
     fn the_abort_question_has_no_enter_and_n_or_esc_keeps_the_operation() {
+        answers_only_to_y_with_n_or_esc_keeping(KeyScope::AbortConfirm, "Abort");
+    }
+
+    #[test]
+    fn the_skip_question_has_no_enter_and_n_or_esc_keeps_the_work() {
+        answers_only_to_y_with_n_or_esc_keeping(KeyScope::SkipConfirm, "Skip");
+        let label = |id| registry().iter().find(|b| b.id == id).map(|b| b.label);
+        assert_eq!(label("skip_confirm.yes"), Some("skip"));
+        assert_eq!(label("skip_confirm.no"), Some("keep"));
+        assert_eq!(label("skip_confirm.quit"), Some("quit"));
+    }
+
+    /// `scope`'s question: only `y` says yes, `n` and Esc say no, Ctrl-C
+    /// quits, and nothing in it takes Enter.
+    fn answers_only_to_y_with_n_or_esc_keeping(scope: KeyScope, title: &str) {
         let state = AppState::new(Context::Workspace);
-        let resolve_in = |key| match resolve(
-            registry(),
-            &Keymap::default(),
-            KeyScope::AbortConfirm,
-            &state,
-            key,
-        ) {
+        let resolve_in = |key| match resolve(registry(), &Keymap::default(), scope, &state, key) {
             Resolution::Run(binding) => Some(binding.intent.clone()),
             Resolution::Unbound => None,
             other => panic!("{key:?}: {other:?}"),
@@ -151,14 +200,11 @@ mod tests {
             resolve_in(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             Some(AppIntent::Quit)
         );
-        assert_eq!(KeyScope::AbortConfirm.parent(), None);
-        assert_eq!(KeyScope::AbortConfirm.title(), "Abort");
+        assert_eq!(scope.parent(), None);
+        assert_eq!(scope.title(), title);
 
         let enter = key(KeyCode::Enter, none);
-        for b in registry()
-            .iter()
-            .filter(|b| b.scope == KeyScope::AbortConfirm)
-        {
+        for b in registry().iter().filter(|b| b.scope == scope) {
             assert!(!b.keys.iter().any(|k| k.matches(enter)), "{}", b.id);
         }
     }

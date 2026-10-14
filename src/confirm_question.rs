@@ -190,7 +190,7 @@ mod tests {
 
     /// Each question's yes binding, with the answer its question is asked
     /// with.
-    const YES_BINDINGS: [(&str, KeyScope, Answer); 18] = [
+    const YES_BINDINGS: [(&str, KeyScope, Answer); 19] = [
         (
             "discard_confirm.yes",
             KeyScope::DiscardConfirm,
@@ -213,6 +213,7 @@ mod tests {
         ("reset_hard.yes", KeyScope::ResetHard, Answer::YOnly),
         ("confirm.yes", KeyScope::Confirm, Answer::YOrEnter),
         ("abort_confirm.yes", KeyScope::AbortConfirm, Answer::YOnly),
+        ("skip_confirm.yes", KeyScope::SkipConfirm, Answer::YOnly),
         (
             "autosquash_confirm.yes",
             KeyScope::AutosquashConfirm,
@@ -408,11 +409,35 @@ mod tests {
             }
             .into_question(),
             reset_hard_question("c1".into(), reset_op(ResetMode::Hard), None),
+            crate::features::operation::skip_question(Operation::Rebase, None).unwrap(),
+            crate::features::operation::skip_question_unchecked(Operation::CherryPick, None)
+                .unwrap(),
         ]
     }
 
+    /// Whether `scope`'s yes binding sends `ConfirmYes`, which then
+    /// answers its question: the discard and the skip question.
+    fn yes_is_confirm_yes(scope: KeyScope) -> bool {
+        crate::keymap::registry().iter().any(|b| {
+            b.scope == scope && b.intent == AppIntent::ConfirmYes && b.id.ends_with(".yes")
+        })
+    }
+
     #[test]
-    fn enter_never_answers_a_destructive_question_and_confirm_yes_only_a_discard() {
+    fn enter_never_answers_a_destructive_question_and_confirm_yes_only_a_discard_or_skip() {
+        // Only these two destructive questions take `ConfirmYes`; any other
+        // that starts to would drop its assertion below, so it must be
+        // added here on purpose.
+        let mut confirm_yes: Vec<KeyScope> = destructive_questions()
+            .iter()
+            .map(|q| q.scope)
+            .filter(|scope| yes_is_confirm_yes(*scope))
+            .collect();
+        confirm_yes.dedup();
+        assert_eq!(
+            confirm_yes,
+            [KeyScope::DiscardConfirm, KeyScope::SkipConfirm]
+        );
         for question in destructive_questions() {
             let name = question.title.clone();
             assert_ne!(question.answer, Answer::YOrEnter, "{name}");
@@ -422,7 +447,7 @@ mod tests {
             assert_eq!(state.key_focus(), asked_scope(&asked), "{name}");
             assert_eq!(press(&mut state, KeyCode::Enter), vec![], "{name}");
             assert_eq!(state.popups, asked, "{name}");
-            if asked_scope(&asked) != KeyScope::DiscardConfirm {
+            if !yes_is_confirm_yes(asked_scope(&asked)) {
                 assert_eq!(state.update(AppIntent::ConfirmYes), vec![], "{name}");
                 assert_eq!(state.popups, asked, "{name}");
             }
