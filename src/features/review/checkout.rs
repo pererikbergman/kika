@@ -824,4 +824,49 @@ mod tests {
             assert!(screen.contains(words), "{words:?} in {rows:#?}");
         }
     }
+
+    fn draw(state: &AppState, width: u16, height: u16) -> Vec<String> {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| crate::view::render(state, frame))
+            .unwrap();
+        crate::view::buffer_rows(terminal.backend().buffer())
+    }
+
+    #[test]
+    fn the_longest_question_keeps_its_answer_line_at_80_by_24() {
+        let state = asked(missing(BranchAt::FastForward(id(OLD)), Some("origin")));
+        assert!(question_text(&state).ends_with(
+            "Fast-forward pr/12 from 2222222 to 1111111 and switch to it? Fetches it from origin first."
+        ));
+        let rows = draw(&state, 80, 24);
+        let screen = rows.join("\n");
+        assert!(
+            screen.contains("Press y to check it out, n or Esc to cancel"),
+            "{rows:#?}"
+        );
+        assert!(screen.contains("Fast-forward pr/12"), "{rows:#?}");
+        for row in &rows {
+            assert!(crate::view::width_of(row) <= 80, "{row:?}");
+        }
+    }
+
+    #[test]
+    fn the_detail_bar_offers_b_checkout() {
+        let state = on_detail(|_| {});
+        let rows = draw(&state, 120, 24);
+        let bar = rows.last().unwrap();
+        assert!(bar.contains("M merge  b checkout"), "{bar:?}");
+        // At 80 columns the bar elides its middle and keeps help and quit.
+        let rows = draw(&state, 80, 24);
+        let bar = rows.last().unwrap();
+        assert!(crate::view::width_of(bar) <= 80, "{bar:?}");
+        assert!(bar.contains("? keys  q quit"), "{bar:?}");
+        // While refused, as on the queue, the hint stays and says why on a press.
+        let mut queue = crate::features::review::state::tests::in_queues();
+        assert!(draw(&queue, 120, 24).last().unwrap().contains("b checkout"));
+        press(&mut queue, KeyCode::Char('b'));
+        assert_eq!(queue.notice.as_deref(), Some("Open a pull request first"));
+    }
 }

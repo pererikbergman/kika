@@ -257,19 +257,18 @@ pub fn is_ancestor_command(old: &CommitId, head: &CommitId) -> GitCommand {
     )
 }
 
-/// The reflog message of a branch moved to a pull request's new head.
-pub const FAST_FORWARD_MESSAGE: &str = "kika: fast-forward to the pull request head";
-
 /// The git commands that check out `head` as `branch`, which held `old`
 /// (`None`: no such branch) and is checked out here when `current`. Each
 /// takes only fixed words, the branch built from the number and hex ids:
 /// - absent: `checkout -q -b <branch> <head> --`;
 /// - at the head, elsewhere: `checkout -q <branch> --`;
 /// - behind, checked out: `merge --ff-only -q <head>`;
-/// - behind, elsewhere: `update-ref` from `old` to `head`, which fails if
-///   the branch moved since it was read, then `checkout -q <branch> --`.
+/// - behind, elsewhere: `checkout -q <branch> --`, then the same merge.
 ///
-/// At the head and checked out, there is nothing to run: none.
+/// The branch only moves once it is checked out, so a switch git refuses
+/// (for local changes it would overwrite) leaves it where it was. At the
+/// head and checked out, there is nothing to run: none. Run them only
+/// after [`verify_pr_branch`] says the branch is still as planned.
 pub fn pr_checkout_commands(
     branch: &BranchName,
     head: &CommitId,
@@ -277,6 +276,14 @@ pub fn pr_checkout_commands(
     current: bool,
 ) -> Vec<GitCommand> {
     let switch = || crate::op::checkout_command(branch).write_env();
+    // It may run the user's post-merge hook, as any merge does.
+    let forward = || {
+        GitCommand::new("merge")
+            .arg("--ff-only")
+            .arg("-q")
+            .arg(head.as_str())
+            .user_env()
+    };
     match old {
         None => vec![
             GitCommand::new("checkout")
@@ -289,24 +296,34 @@ pub fn pr_checkout_commands(
         ],
         Some(old) if old == head && current => vec![],
         Some(old) if old == head => vec![switch()],
-        // It may run the user's post-merge hook, as any merge does.
-        Some(_) if current => vec![
-            GitCommand::new("merge")
-                .arg("--ff-only")
-                .arg("-q")
-                .arg(head.as_str())
-                .user_env(),
-        ],
-        Some(old) => vec![
-            GitCommand::new("update-ref")
-                .arg("-m")
-                .arg(FAST_FORWARD_MESSAGE)
-                .arg(branch.full_ref())
-                .arg(head.as_str())
-                .arg(old.as_str())
-                .write_env(),
-            switch(),
-        ],
+        Some(_) if current => vec![forward()],
+        Some(_) => vec![switch(), forward()],
+    }
+}
+
+/// Whether `branch` is still where the question saw it, read again right
+/// before the checkout runs: absent when `old` is `None`, else at `old`,
+/// checked out here exactly when `current` (so `HEAD` is the branch at
+/// `old` before a merge moves it), and in no other worktree. Anything else
+/// may have moved while the question was open, and nothing runs.
+pub fn verify_pr_branch(
+    runner: &dyn GitRunner,
+    branch: &BranchName,
+    old: Option<&CommitId>,
+    current: bool,
+) -> Result<(), String> {
+    let still = match (old, read_branch(runner, branch)?) {
+        (None, None) => !current,
+        (Some(old), Some((oid, here, elsewhere))) => &oid == old && here == current && !elsewhere,
+        _ => false,
+    };
+    if still {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} moved since the question; press b again",
+            branch.display()
+        ))
     }
 }
 
@@ -908,15 +925,8 @@ mod tests {
         assert_eq!(
             steps(Some(OLD), false),
             [
-                vec![
-                    "update-ref",
-                    "-m",
-                    FAST_FORWARD_MESSAGE,
-                    "refs/heads/pr/7",
-                    HEAD,
-                    OLD
-                ],
                 vec!["checkout", "-q", "pr/7", "--"],
+                vec!["merge", "--ff-only", "-q", HEAD],
             ]
         );
     }
@@ -1155,7 +1165,7 @@ mod tests {
         assert_eq!(plan.at, BranchAt::Diverged);
         assert_eq!(rev("pr/7"), side.as_str());
 
-        // A stale old id: the swap fails and nothing moves.
+        // A stale old id: refused before anything runs, nothing moves.
         run(&["branch", "-q", "-f", "pr/7", h1.as_str()]);
         let stale = GitOp::CheckoutPrBranch {
             number: 7,
@@ -1169,6 +1179,41 @@ mod tests {
             (rev("pr/7"), on()),
             (h1.as_str().to_string(), "main".into())
         );
+        let main = rev("main");
+
+        // Planned on pr/7, then main checked out before `y`: no merge
+        // lands on main.
+        run(&["checkout", "-q", "pr/7"]);
+        let plan = plan_checkout(&runner, &h2, &branch).unwrap();
+        assert!(plan.current);
+        let planned = op(&h2, &plan);
+        run(&["checkout", "-q", "main"]);
+        let refused = run_op(&runner, &planned).unwrap_err();
+        assert!(refused.contains("moved since the question"), "{refused}");
+        assert_eq!((rev("main"), on()), (main.clone(), "main".into()));
+        assert_eq!(rev("pr/7"), h1.as_str());
+
+        // Planned from main, then pr/7 checked out before `y`.
+        let plan = plan_checkout(&runner, &h2, &branch).unwrap();
+        assert!(!plan.current);
+        let planned = op(&h2, &plan);
+        run(&["checkout", "-q", "pr/7"]);
+        assert!(run_op(&runner, &planned).is_err());
+        assert_eq!(
+            (rev("pr/7"), on()),
+            (h1.as_str().to_string(), "pr/7".into())
+        );
+
+        // A switch git refuses for local changes leaves pr/7 unmoved.
+        run(&["checkout", "-q", "main"]);
+        let plan = plan_checkout(&runner, &h2, &branch).unwrap();
+        std::fs::write(work.join("a.txt"), "local edit").unwrap();
+        assert!(run_op(&runner, &op(&h2, &plan)).is_err());
+        assert_eq!(
+            (rev("pr/7"), on()),
+            (h1.as_str().to_string(), "main".into())
+        );
+        run(&["checkout", "-q", "--", "a.txt"]);
 
         // Another worktree's branch is never moved.
         let other = tmp.path().join("other");

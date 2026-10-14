@@ -37,8 +37,9 @@
 //! - the handlers in `state.rs`, `files.rs`, `commit_view.rs`, `viewed.rs`,
 //!   `threads.rs`, `merge.rs` and `checkout.rs` that `update` calls,
 //!   including the `review_files_shown` guard;
-//! - `pr_branch` and `pr_checkout_commands` (`git.rs`), which core's
-//!   `GitOp::CheckoutPrBranch` is named and run by;
+//! - `pr_branch`, `verify_pr_branch` and `pr_checkout_commands`
+//!   (`git.rs`), which core's `GitOp::CheckoutPrBranch` is named, checked
+//!   and run by;
 //! - `review_jump_landed` (`threads.rs`), which core's `AppIntent::Diff`
 //!   arm calls after each diff chunk, so a thread `]`/`[` waits for is
 //!   scrolled to once its row streams in;
@@ -79,9 +80,9 @@ pub(crate) mod view;
 mod viewed;
 
 pub(crate) use files::review_diff_focused;
-#[cfg(test)]
-pub(crate) use git::FAST_FORWARD_MESSAGE;
-pub(crate) use git::{CommitsHere, PrCommit, PrFileRow, pr_branch, pr_checkout_commands};
+pub(crate) use git::{
+    CommitsHere, PrCommit, PrFileRow, pr_branch, pr_checkout_commands, verify_pr_branch,
+};
 pub(crate) use intent::ReviewIntent;
 pub(crate) use merge::PrMerging;
 pub(crate) use reader::thread_reader_open;
