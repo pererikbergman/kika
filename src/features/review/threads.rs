@@ -255,7 +255,8 @@ impl AppState {
     ) {
         let shown = matches!(
             self.review.screen,
-            ReviewScreen::Detail(n) | ReviewScreen::Files(n) if n == number
+            ReviewScreen::Detail(n) | ReviewScreen::Files(n) | ReviewScreen::Conversation(n)
+                if n == number
         );
         if !shown || !self.review_current(tag, &self.review.discussion_fetch) {
             return;
@@ -273,10 +274,21 @@ impl AppState {
             }
         }
         // Thread indexes were into the discussion that has gone.
-        if let Some(files) = &mut self.review.files {
+        let reopen = self.review.files.as_mut().and_then(|files| {
             files.thread = None;
             files.jump = None;
             files.reader = None;
+            files.reopen_thread.take()
+        });
+        // A reply was posted from the reader: back on its thread.
+        if let Some(node_id) = reopen {
+            self.reopen_thread_reader(&node_id);
+        }
+        // A comment was posted from the conversation: it is the last item.
+        if matches!(self.review.screen, ReviewScreen::Conversation(_)) {
+            self.review.conversation = None;
+            self.render_review_conversation();
+            self.scroll_review_conversation(isize::MAX);
         }
     }
 

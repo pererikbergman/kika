@@ -26,6 +26,7 @@ use crate::features::{
 use crate::handoff::HandOff;
 use crate::intent::AppIntent;
 use crate::op::{GitOp, run_op};
+use kika_forge::discussion_write::DiscussionWrite;
 use kika_forge::merge::MergeMethod;
 use kika_forge::pending::{PendingKey, PendingReview};
 use kika_forge::task::ForgeContext;
@@ -344,6 +345,16 @@ pub enum Effect {
         number: u64,
         path: String,
         viewed: bool,
+    },
+    /// Write `write` to pull request `number`'s discussion on GitHub
+    /// through `gh`, on the configured `host`; always answered by one
+    /// `ReviewIntent::DiscussionWritten`.
+    WriteDiscussion {
+        tag: Tag,
+        host: ForgeHost,
+        repo: ForgeRepo,
+        number: u64,
+        write: DiscussionWrite,
     },
     /// Read the review queues of the remote's repository: `repo` when an
     /// earlier load found it, else the remote is read and matched against
@@ -1232,6 +1243,21 @@ impl Runtime {
                 number,
                 path,
                 viewed,
+            ),
+            Effect::WriteDiscussion {
+                tag,
+                host,
+                repo,
+                number,
+                write,
+            } => review::effects::write_discussion(
+                self.forge.clone(),
+                tx,
+                tag,
+                host,
+                repo,
+                number,
+                write,
             ),
             Effect::AnswerCredential(answer) => {
                 if let Some(answers) = lock(&self.credential).as_ref() {

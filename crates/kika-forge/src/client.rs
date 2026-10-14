@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use super::cache;
+use super::discussion_write::{DiscussionWrite, Written};
 use super::github::Gh;
 use super::gitlab::Glab;
 use super::merge::MergeMethod;
@@ -109,6 +110,20 @@ impl ForgeContext {
         self.gh(host, repo, self.now())
             .ok_or(CreateError::Status(ForgeStatus::Failed))?
             .set_file_viewed(node_id, path, viewed)
+    }
+
+    /// Reply to, resolve or unresolve a review thread, or comment on a
+    /// pull request; see [`Gh::write_discussion`]. A repository
+    /// [`Self::gh`] refuses fails without a call.
+    pub fn write_discussion(
+        &self,
+        host: &ForgeHost,
+        repo: &ForgeRepo,
+        write: &DiscussionWrite,
+    ) -> Result<Written, CreateError> {
+        self.gh(host, repo, self.now())
+            .ok_or(CreateError::Status(ForgeStatus::Failed))?
+            .write_discussion(write)
     }
 }
 
@@ -293,6 +308,35 @@ mod tests {
         assert_eq!(
             ctx.set_file_viewed(&github, &repo(), "PR_kwDOA1", "src/a.rs", true),
             Ok(())
+        );
+        assert_eq!(runner.calls().len(), 1);
+    }
+
+    #[test]
+    fn a_discussion_write_reaches_gh_only_for_an_allowed_repository_on_the_host() {
+        let write = DiscussionWrite::Comment {
+            subject: "PR_kwDOA1".into(),
+            body: "Thanks".into(),
+        };
+        let runner = Arc::new(FakeGh::new());
+        let ctx = context(runner.clone(), None);
+        let failed = Err(CreateError::Status(ForgeStatus::Failed));
+        let left_out = ForgeHost::parse("github.com")
+            .unwrap()
+            .with_allow(vec![AllowRule::parse("someone-else").unwrap()]);
+        let elsewhere = ForgeHost::parse("gitlab.example").unwrap();
+        for host in [&left_out, &elsewhere] {
+            assert_eq!(ctx.write_discussion(host, &repo(), &write), failed);
+        }
+        assert!(runner.calls().is_empty());
+
+        let posted = "HTTP/2.0 200 OK\r\n\r\n{\"data\":{\"addComment\":{\"commentEdge\":{\"node\":{\"id\":\"IC_1\"}}}}}";
+        let runner = Arc::new(FakeGh::new().reply(answer(posted)));
+        let ctx = context(runner.clone(), None);
+        let github = ForgeHost::parse("github.com").unwrap();
+        assert_eq!(
+            ctx.write_discussion(&github, &repo(), &write),
+            Ok(Written::Posted)
         );
         assert_eq!(runner.calls().len(), 1);
     }

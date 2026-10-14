@@ -665,6 +665,9 @@ pub const REPO_LOCKED: &[&str] = &[
     "checkout_pr.no",
     "checkout_pr.quit",
     "review_thread.quit",
+    "review_thread.reply",
+    "review_thread.resolve",
+    "review.comment_general",
     "review_pick.quit",
     "review_comment.quit",
     "review_pending.quit",
@@ -2860,7 +2863,7 @@ mod tests {
             Some(AppIntent::Review(ReviewIntent::Refresh))
         );
         assert_eq!(review(plain(' ')), None);
-        assert_eq!(review(plain('a')), None);
+        assert_eq!(review(plain('s')), None);
         assert_eq!(review(plain('q')), Some(AppIntent::Quit));
     }
 
@@ -5279,6 +5282,11 @@ mod tests {
                     | Review(ReviewIntent::OpenFiles)
                     // A viewed mark reaches GitHub.
                     | Review(ReviewIntent::ToggleViewed)
+                    // A resolve reaches GitHub; a reply or comment is
+                    // posted there after its question.
+                    | Review(ReviewIntent::ReplyToThread)
+                    | Review(ReviewIntent::ToggleThreadResolved)
+                    | Review(ReviewIntent::StartGeneralComment)
                     | PullRequests(PullRequestsIntent::PickSelect)
                     // Esc falls through to quit without it.
                     | Review(ReviewIntent::CloseDetail)
@@ -5405,7 +5413,10 @@ mod tests {
                 "review.checkout",
                 "review.back",
                 "review.files",
+                "review.comment_general",
                 "review_files.viewed",
+                "review_thread.reply",
+                "review_thread.resolve",
                 "merge_pr.yes",
                 "checkout_pr.yes",
             ]
@@ -5909,6 +5920,7 @@ mod tests {
         "review.back",
         "review.files",
         "review.conversation",
+        "review.comment_general",
         "review.page_down",
         "review.page_up",
         "review_files.focus",
@@ -5931,6 +5943,8 @@ mod tests {
         "review_thread.page_up",
         "review_thread.next",
         "review_thread.prev",
+        "review_thread.reply",
+        "review_thread.resolve",
         "review_thread.close",
         "review_thread.quit",
         "review_files.comment",

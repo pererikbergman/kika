@@ -9,10 +9,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Padding, Paragraph};
 
-use super::comment_editor::{CommentEditor, Composer};
+use super::comment_editor::{CommentEditor, Composer, ComposerKind};
 use super::comment_pick::{CommentPick, live_pick};
 use super::files::{PrFiles, ReviewView};
-use super::pending::{PendingSlot, lines_label};
+use super::pending::{CommentTarget, PendingSlot, lines_label};
 use super::state::ReviewState;
 use super::threads_view::{CommentMarks, clip_line, dim};
 use crate::model::AppState;
@@ -103,22 +103,38 @@ pub fn render_pending(review: &ReviewState, frame: &mut Frame, area: Rect) {
     }
 }
 
-/// `path:R10-R14` of the comment being written, made safe to draw.
-fn where_label(composer: &Composer) -> String {
-    let target = &composer.target;
+/// `path:R10-R14` of a line comment, made safe to draw.
+fn where_label(target: &CommentTarget) -> String {
     let path = sanitize(target.path.as_bytes());
     format!("{path}:{}", lines_label(target.start, target.end))
 }
 
+/// The composer's title: what is written and where it goes.
+fn composer_title(composer: &Composer) -> String {
+    match &composer.kind {
+        ComposerKind::Line {
+            target,
+            editing: Some(_),
+        } => format!(" Edit comment on {} ", where_label(target)),
+        ComposerKind::Line {
+            target,
+            editing: None,
+        } => format!(" Comment on {} ", where_label(target)),
+        ComposerKind::Reply { label, .. } => {
+            format!(
+                " Reply to {} · ctrl-s posts to GitHub ",
+                sanitize(label.as_bytes())
+            )
+        }
+        ComposerKind::General { number, .. } => {
+            format!(" Comment on #{number} · ctrl-s posts to GitHub ")
+        }
+    }
+}
+
 fn render_composer(composer: &Composer, frame: &mut Frame, area: Rect) {
     let popup = box_area(area);
-    let verb = if composer.editing.is_some() {
-        "Edit comment"
-    } else {
-        "Comment"
-    };
-    let title = format!(" {verb} on {} ", where_label(composer));
-    let block = frame_block(clip_title(&title, popup.width));
+    let block = frame_block(clip_title(&composer_title(composer), popup.width));
     let inner = block.inner(popup);
     let lines = editor_lines(
         &composer.text,

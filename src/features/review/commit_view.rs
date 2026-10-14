@@ -346,6 +346,7 @@ pub(crate) mod tests {
                 !matches!(
                     effect,
                     Effect::SetFileViewed { .. }
+                        | Effect::WriteDiscussion { .. }
                         | Effect::MergePullRequest { .. }
                         | Effect::LoadReviewQueues { .. }
                         | Effect::LoadPrDetail { .. }

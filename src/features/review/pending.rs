@@ -412,8 +412,10 @@ impl AppState {
             return;
         };
         let composer = super::comment_editor::Composer {
-            target: CommentTarget::of(comment),
-            editing: Some(comment.id),
+            kind: super::comment_editor::ComposerKind::Line {
+                target: CommentTarget::of(comment),
+                editing: Some(comment.id),
+            },
             text: super::comment_editor::CommentEditor::from_text(&comment.body),
         };
         self.review.composer = Some(composer);
@@ -823,7 +825,13 @@ pub(crate) mod tests {
         assert_eq!(type_char(&mut state, 'e'), []);
         assert_eq!(state.key_focus(), KeyScope::ReviewComment);
         let composer = state.review.composer.as_ref().unwrap();
-        assert_eq!(composer.editing, Some(3));
+        assert!(matches!(
+            composer.kind,
+            crate::features::review::comment_editor::ComposerKind::Line {
+                editing: Some(3),
+                ..
+            }
+        ));
         assert_eq!(composer.text.text(), "first");
         type_text(&mut state, " and more");
         let (_, review) = saved(&ctrl(&mut state, 's'));

@@ -5,6 +5,7 @@
 
 use super::checkout::PrCheckout;
 use super::comment_editor::Composer;
+use super::discussion_write::DiscussionWriting;
 use super::files::PrFiles;
 use super::pending::PendingSlot;
 use crate::effect::{Effect, Tag};
@@ -119,8 +120,11 @@ pub struct ReviewState {
     pub conversation_scroll: usize,
     /// The open pull request's pending review, from its files screen on.
     pub pending: Option<PendingSlot>,
-    /// A comment being written, over the files screen.
+    /// A comment being written, over the files screen or the
+    /// conversation.
     pub composer: Option<Composer>,
+    /// The one write to the discussion in flight on GitHub, if any.
+    pub writing: Option<DiscussionWriting>,
     /// The cursor of the pending-comment list, while it is open.
     pub pending_list: Option<usize>,
 }
@@ -157,6 +161,7 @@ impl Default for ReviewState {
             conversation_scroll: 0,
             pending: None,
             composer: None,
+            writing: None,
             pending_list: None,
         }
     }

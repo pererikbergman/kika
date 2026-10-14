@@ -11,6 +11,7 @@ pub mod anchor;
 pub mod cache;
 pub mod client;
 pub mod discussion;
+pub mod discussion_write;
 pub mod github;
 pub mod gitlab;
 pub mod head;
