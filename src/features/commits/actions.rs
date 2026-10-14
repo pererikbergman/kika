@@ -96,9 +96,14 @@ pub(crate) fn reset_hard_question(
 
 /// "Check out this commit as a detached HEAD?" Git refuses to overwrite
 /// local changes, so nothing is lost and Enter may answer too (owner
-/// decision #227). `short_oid` names `id` as the log shows it. It has
-/// never re-checked `HEAD`, so `head` is `None`.
-pub(crate) fn checkout_question(short_oid: String, id: CommitId) -> ConfirmQuestion {
+/// decision #227). `short_oid` names `id` as the log shows it; `head` is
+/// the detached `HEAD` it was asked from, so yes or Enter runs nothing once
+/// `HEAD` has moved, and `None` on a branch.
+pub(crate) fn checkout_question(
+    short_oid: String,
+    id: CommitId,
+    head: Option<CommitId>,
+) -> ConfirmQuestion {
     ConfirmQuestion {
         scope: KeyScope::Confirm,
         title: "Detached checkout".into(),
@@ -109,7 +114,7 @@ pub(crate) fn checkout_question(short_oid: String, id: CommitId) -> ConfirmQuest
         answer: Answer::YOrEnter,
         then: Then::Op(GitOp::CheckoutCommit(id)),
         range: false,
-        head: None,
+        head,
     }
 }
 
