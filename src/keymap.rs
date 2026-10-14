@@ -5765,6 +5765,7 @@ mod tests {
         "review.files",
         "review_files.focus",
         "review_files.viewed",
+        "review_files.commit",
         "review_diff.down",
         "review_diff.up",
         "review_diff.page_down",

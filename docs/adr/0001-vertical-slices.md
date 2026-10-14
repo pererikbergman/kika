@@ -241,13 +241,14 @@ The final sweep moved one item: `query_title`, used only by the Commits panel, f
 
 ### Accepted cross-feature calls
 
-Rule 2 has three known exceptions. Each is a direct call to an `AppState` method that a sibling feature defines. They are listed in the caller's `mod.rs`:
+Rule 2 has four known exceptions. Each is a direct call to an `AppState` method that a sibling feature defines. They are listed in the caller's `mod.rs`:
 
 | Caller | Calls | Owner |
 |---|---|---|
 | `branches/tags/update.rs`, `push_tag` | `start_remote` | sync |
 | `pull_requests/create.rs`, `pick_select` | `pick_check` | review |
 | `pull_requests/create.rs`, `pick_select` | `pick_merge_method` | review |
+| `pull_requests/create.rs`, `pick_select` | `pick_review_commit` | review |
 
 They were kept for two reasons. Moving a callee into `model.rs` would break "hubs only shrink". Turning a call into an `Effect` round trip would change the order and timing of effects. The four reload calls that were once listed here (`reload_stashes` from repos and submodules, `load_pull_requests` from branches and review) now go through core `reload.rs`: #378 and #379 moved them there, and the features ask for a `Scope` instead.
 

@@ -2,7 +2,7 @@
 //! `AppIntent::Review`, and hands them to this feature's `update`
 //! (see `docs/adr/0002-nested-intents.md`).
 
-use super::{CommitsHere, PrFileRow};
+use super::{CommitsHere, PrCommit, PrFileRow};
 use crate::effect::Tag;
 use kika_forge::review::{PrDetail, Queues, ReviewError};
 use kika_forge::{CreateError, ForgeHost, ForgeRepo};
@@ -86,7 +86,17 @@ pub(crate) enum ReviewIntent {
         viewed: bool,
         result: Result<(), CreateError>,
     },
-    /// The merge base to head range and its changed files, or why not.
+    /// Review the whole pull request or one of its commits: read the
+    /// commits once, then pick from them.
+    PickCommit,
+    /// The pull request's commits, oldest first, and whether the list was
+    /// cut, or why git could not list them.
+    CommitsLoaded {
+        tag: Tag,
+        result: Result<(Vec<PrCommit>, bool), String>,
+    },
+    /// The range shown, merge base to head or one commit against its first
+    /// parent, and its changed files, or why not.
     FilesLoaded {
         tag: Tag,
         result: Result<(CommitRange, Vec<PrFileRow>), String>,

@@ -3,8 +3,10 @@
 //! from the forge's remote, list the files from the merge base, then
 //! stream the selected file's diff into the same Diff pane the workspace
 //! uses. The viewed marks come from GitHub's detail, matched by path.
+//! The screen shows the whole pull request, or one of its commits picked
+//! with `c` (`commit_view.rs`); the marks stay the pull request's.
 
-use super::git::{CommitsHere, FileCounts, PrFileRow};
+use super::git::{CommitsHere, FileCounts, PrCommit, PrFileRow};
 use super::state::{ReviewScreen, ReviewState};
 use crate::diff_pane::DiffStart;
 use crate::effect::{Effect, Tag};
@@ -61,14 +63,30 @@ pub struct ViewedMark {
     pub viewed: bool,
 }
 
+/// What the files screen shows: the whole pull request, or the commit at
+/// this index of `PrFiles.commits`, oldest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReviewView {
+    #[default]
+    Whole,
+    Commit(usize),
+}
+
 /// The files screen of pull request `number`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrFiles {
     pub number: u64,
     pub head: CommitId,
     pub base: CommitId,
-    /// Merge base to head, once resolved.
+    /// The range shown: merge base to head once resolved, or the picked
+    /// commit against its first parent.
     pub range: Option<CommitRange>,
+    /// Merge base to head, once the whole view's files have come.
+    pub whole: Option<CommitRange>,
+    pub view: ReviewView,
+    /// The pull request's commits, oldest first, and whether the list was
+    /// cut; read on the first `c`.
+    pub commits: Option<(Vec<PrCommit>, bool)>,
     pub rows: Vec<PrFile>,
     pub cursor: usize,
     pub focus: FilesFocus,
@@ -89,6 +107,9 @@ impl PrFiles {
             head,
             base,
             range: None,
+            whole: None,
+            view: ReviewView::Whole,
+            commits: None,
             rows: Vec::new(),
             cursor: 0,
             focus: FilesFocus::List,
@@ -212,7 +233,7 @@ impl AppState {
     }
 
     /// The files screen, if this answer is the one it waits for.
-    fn files_for(&mut self, tag: Tag) -> Option<&mut PrFiles> {
+    pub(super) fn files_for(&mut self, tag: Tag) -> Option<&mut PrFiles> {
         if tag.generation != self.generation {
             return None;
         }
@@ -225,7 +246,7 @@ impl AppState {
             .filter(|f| f.number == number && f.seq == Some(tag.seq))
     }
 
-    fn files_tag(&mut self) -> Tag {
+    pub(super) fn files_tag(&mut self) -> Tag {
         Tag {
             generation: self.generation,
             seq: self.take_seq(),
@@ -374,6 +395,9 @@ impl AppState {
         files.seq = None;
         match result {
             Ok((range, rows)) => {
+                if files.view == ReviewView::Whole {
+                    files.whole = Some(range.clone());
+                }
                 files.range = Some(range);
                 files.rows = with_viewed(rows, &viewed);
                 files.cursor = 0;
@@ -391,7 +415,7 @@ impl AppState {
         self.review_file_diff(DiffStart::Top)
     }
 
-    /// Stream the selected file's diff, merge base to head, from `start`.
+    /// Stream the selected file's diff over the range shown, from `start`.
     fn review_file_diff(&mut self, start: DiffStart) -> Vec<Effect> {
         let request = self.review.files.as_ref().and_then(|files| {
             let range = files.range.as_ref()?;
