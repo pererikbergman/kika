@@ -87,7 +87,7 @@ Dependency rules:
    nothing (hits that point at a parent feature are allowed):
    `grep -rnE 'crate::features::' src/features/<f> | grep -v 'crate::features::<f>\b'`
 
-The known exceptions to rule 2 (three direct calls to a sibling feature's `AppState`
+The known exceptions to rule 2 (four direct calls to a sibling feature's `AppState`
 methods) are listed in ADR-0001's Outcome section and in each caller's `mod.rs`.
 
 MVI purity:
