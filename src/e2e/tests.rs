@@ -2739,7 +2739,7 @@ async fn review_files_fetch_a_missing_head_once_then_list_and_diff_it_locally() 
     app.press(KeyCode::Char('f')).await;
 
     assert_eq!(app.state().review.screen, ReviewScreen::Files(12));
-    app.assert_screen_contains("PR #12 · files (1/1)");
+    app.assert_screen_contains("files (1/1) · whole pull request");
     app.assert_screen_contains("M ✓ src/cache.rs");
     app.assert_screen_contains("+1 −1");
     app.assert_screen_contains("+two");

@@ -2,6 +2,7 @@
 //! and files screens, and the merge question. `CHUNKS` in `keymap.rs`
 //! places both chunks, so their position there is behaviour.
 
+use super::commit_view::review_commit_disabled;
 use super::files::{review_files_disabled, review_search_step_disabled};
 use super::merge::merge_disabled;
 use super::state::{
@@ -163,6 +164,17 @@ pub(crate) static REVIEW_KEYS: &[Binding] = &[
         label: "viewed",
         bar: true,
         disabled: review_viewed_disabled,
+    },
+    // Local git only, so a repository file may move it.
+    Binding {
+        id: "review_files.commit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), NONE)],
+        scope: KeyScope::ReviewFiles,
+        intent: AppIntent::Review(ReviewIntent::PickCommit),
+        description: "Review the whole pull request or one of its commits",
+        label: "commit",
+        bar: true,
+        disabled: review_commit_disabled,
     },
     Binding {
         id: "review_diff.down",

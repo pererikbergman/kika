@@ -36,6 +36,10 @@ pub(crate) fn update(state: &mut AppState, intent: ReviewIntent) -> Vec<Effect> 
         ReviewIntent::FilesLoaded { tag, result } => {
             return state.review_files_loaded(tag, result);
         }
+        ReviewIntent::PickCommit => return state.open_review_commits(),
+        ReviewIntent::CommitsLoaded { tag, result } => {
+            return state.review_commits_loaded(tag, result);
+        }
         ReviewIntent::ToggleViewed => return state.toggle_viewed(),
         ReviewIntent::ViewedSet {
             tag,

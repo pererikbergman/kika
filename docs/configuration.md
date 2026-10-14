@@ -461,6 +461,16 @@ pull request, then to the queue, then to the workspace.
   file's mark shows a dim `…`. A file past the first 100 can still be
   marked; its `?` turns to the mark once GitHub takes it. A file whose
   name is not UTF-8 cannot be marked.
+- `c` on the files screen picks what it shows: "Whole pull request", or
+  one of its commits, oldest first, as `<id> <subject>`. A commit's files
+  and diff are against its first parent, so a merge commit shows what it
+  brought in from that side. The commits are read once per files screen
+  with `git log --no-show-signature --no-color --format=%H%x00%P%x00%s -n 251 <merge-base>..<head> --`;
+  only the latest 250 are offered, and the list then ends with a note
+  saying so. The list title shows the view, `whole pull request` or
+  `commit 2/5 <id>`, and its viewed count is of the files listed. Viewed
+  marks stay the pull request's: a commit's files show the same marks,
+  and `v` there marks the file for the whole pull request. It is local git only and asks GitHub nothing.
 
 - GitHub is asked only when you enter review mode, open a pull request,
   press `r` or answer `y` to a merge, or press `v` on the files screen;
@@ -1787,6 +1797,7 @@ diff, `esc` goes back to the pull request.
 |---|---|---|---|
 | `review_files.focus` | `tab` | Move the keys between the file list and the diff | |
 | `review_files.viewed` | `v` | Mark the selected file viewed on GitHub, or not viewed if it is | locked |
+| `review_files.commit` | `c` | Review the whole pull request or one of its commits | |
 | `review_diff.down` | `j`, `down` | Scroll the diff down a line | |
 | `review_diff.up` | `k`, `up` | Scroll the diff up a line | |
 | `review_diff.page_down` | `pgdn` | Scroll the diff down a page | |

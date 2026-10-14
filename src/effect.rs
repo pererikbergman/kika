@@ -388,6 +388,18 @@ pub enum Effect {
         head: CommitId,
         base: CommitId,
     },
+    /// The commits of a pull request's `range`, merge base to head, oldest
+    /// first. Local only. Always answered by one `ReviewIntent::CommitsLoaded`.
+    LoadReviewCommits {
+        tag: Tag,
+        range: CommitRange,
+    },
+    /// The files `range` changes, a pull request's whole range or one of its
+    /// commits. Local only. Always answered by one `ReviewIntent::FilesLoaded`.
+    LoadReviewRange {
+        tag: Tag,
+        range: CommitRange,
+    },
 
     // --- branches ---
     /// List the local branches; always answered by one
@@ -1230,6 +1242,12 @@ impl Runtime {
             ),
             Effect::LoadReviewFiles { tag, head, base } => {
                 review::effects::load_files(runner, tx, tag, head, base)
+            }
+            Effect::LoadReviewCommits { tag, range } => {
+                review::effects::load_commits(runner, tx, tag, range)
+            }
+            Effect::LoadReviewRange { tag, range } => {
+                review::effects::load_range_files(runner, tx, tag, range)
             }
             Effect::LoadPullRequests {
                 tag,
