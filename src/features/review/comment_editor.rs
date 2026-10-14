@@ -9,7 +9,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 use super::discussion_write::{POSTING, WAIT};
 use super::pending::CommentTarget;
-use super::state::ReviewScreen;
+use super::state::{ReviewScreen, ReviewState};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::Effect;
 use crate::features::review::ReviewIntent;
@@ -176,16 +176,22 @@ pub(crate) fn composer_open(state: &AppState) -> bool {
     shown && state.review.composer.is_some()
 }
 
+impl ReviewState {
+    /// The open composer posts to GitHub and its write is in flight.
+    pub(super) fn composer_posting(&self) -> bool {
+        let posting = self
+            .writing
+            .as_ref()
+            .is_some_and(|w| !matches!(w.write, DiscussionWrite::Resolve { .. }));
+        posting && self.composer.as_ref().is_some_and(Composer::posts)
+    }
+}
+
 impl AppState {
     /// The open composer's text is on its way to GitHub: it may not
     /// change or close until GitHub answers.
     pub(super) fn composer_posting(&self) -> bool {
-        let posting = self
-            .review
-            .writing
-            .as_ref()
-            .is_some_and(|w| !matches!(w.write, DiscussionWrite::Resolve { .. }));
-        posting && self.review.composer.as_ref().is_some_and(Composer::posts)
+        self.review.composer_posting()
     }
 
     /// A key no composer binding took: typed into the text, unless the

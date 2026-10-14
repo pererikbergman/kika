@@ -25,7 +25,10 @@ const NO_PR_ID: &str = "GitHub sent no pull request id; refresh with r";
 const NOT_CONVERSATION: &str = "Open the conversation first (C)";
 const GONE: &str = "That thread is no longer shown; refresh with r";
 const OFFLINE: &str = "GitHub could not be reached, or did not answer in time";
-const MAYBE_POSTED: &str = " - it may have been posted; check before posting again";
+// The warning leads, so a narrow bar keeps it.
+const MAYBE_POSTED: &str = "May have been posted - check before posting again";
+const NO_ANSWER: &str = "GitHub did not answer";
+const NO_USABLE: &str = "GitHub gave no usable answer";
 
 /// The one write in flight: its sequence, the pull request it is on and
 /// what was sent.
@@ -61,18 +64,16 @@ pub(crate) fn general_comment_disabled(state: &AppState) -> Option<Reason> {
 /// What the user is told when a write failed. A post that timed out or
 /// had no usable answer may still have been made.
 fn failure_notice(error: &CreateError, write: &DiscussionWrite) -> String {
-    let text = match error {
+    let post = !matches!(write, DiscussionWrite::Resolve { .. });
+    match error {
+        CreateError::Status(ForgeStatus::Offline) if post => {
+            format!("{MAYBE_POSTED} ({NO_ANSWER})")
+        }
+        CreateError::Status(ForgeStatus::Failed) if post => {
+            format!("{MAYBE_POSTED} ({NO_USABLE})")
+        }
         CreateError::Status(ForgeStatus::Offline) => OFFLINE.to_string(),
         other => other.message(),
-    };
-    let unsure = matches!(
-        error,
-        CreateError::Status(ForgeStatus::Offline | ForgeStatus::Failed)
-    );
-    if unsure && !matches!(write, DiscussionWrite::Resolve { .. }) {
-        format!("{text}{MAYBE_POSTED}")
-    } else {
-        text
     }
 }
 
@@ -292,7 +293,16 @@ impl AppState {
             number,
             write,
         };
-        if tag.generation != self.generation || self.review.writing.as_ref() != Some(&sent) {
+        // The answer to this write from before the generation moved: none
+        // of it applies any more, but nothing stays locked behind it.
+        if tag.generation != self.generation {
+            let ours = self.review.writing.as_ref();
+            if ours.is_some_and(|w| w.seq == sent.seq && w.number == number) {
+                self.review.writing = None;
+            }
+            return vec![];
+        }
+        if self.review.writing.as_ref() != Some(&sent) {
             return vec![];
         }
         self.review.writing = None;
@@ -625,15 +635,35 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_reread_forgets_the_thread_to_reopen() {
+        let mut state = reading();
+        let sent = post_reply(&mut state, "Done");
+        let effects = written(&mut state, &sent, Ok(Written::Posted));
+        let [Effect::LoadPrDiscussion { tag, .. }] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        answer(
+            &mut state,
+            *tag,
+            Err(kika_forge::review::ReviewError::Status(
+                ForgeStatus::Offline,
+            )),
+        );
+        let files = state.review.files.as_ref().unwrap();
+        assert_eq!(files.reopen_thread, None);
+        assert!(files.reader.is_none());
+    }
+
+    #[test]
     fn a_failed_post_keeps_the_text_and_says_why() {
         let cases = [
             (
                 CreateError::Status(ForgeStatus::Offline),
-                format!("{OFFLINE}{MAYBE_POSTED}"),
+                format!("{MAYBE_POSTED} ({NO_ANSWER})"),
             ),
             (
                 CreateError::Status(ForgeStatus::Failed),
-                format!("GitHub gave no usable answer.{MAYBE_POSTED}"),
+                format!("{MAYBE_POSTED} ({NO_USABLE})"),
             ),
             (
                 CreateError::Status(ForgeStatus::NoGh),
@@ -708,8 +738,16 @@ mod tests {
             let effects = written(&mut state, &sent, Ok(Written::Posted));
             assert_eq!(effects, [], "case {i}");
             assert_eq!(state.busy_count(), busy - 1, "case {i}");
-            assert_eq!(state.review.writing, writing, "case {i}");
             assert_eq!(composer(&state).text.text(), "Done", "case {i}");
+            assert_eq!(state.notice.as_deref(), Some("Posting reply…"), "case {i}");
+            if i == 1 {
+                // Its own answer from before the generation moved: the
+                // composer is no longer locked, and nothing was applied.
+                assert_eq!(state.review.writing, None, "case {i}");
+                assert!(!state.composer_posting());
+            } else {
+                assert_eq!(state.review.writing, writing, "case {i}");
+            }
         }
     }
 
@@ -1019,5 +1057,140 @@ mod tests {
         press(&mut state, KeyCode::Esc);
         let bar = draw(&state).last().unwrap().clone();
         assert!(!bar.contains("a comment"), "{bar:?}");
+    }
+
+    /// `state` drawn at `width` x `height`, resized to it first.
+    fn draw_at(state: &mut AppState, width: u16, height: u16) -> Vec<String> {
+        state.update(AppIntent::Resize { width, height });
+        draw(state)
+    }
+
+    const SIZES: [(u16, u16); 5] = [(80, 24), (40, 12), (24, 8), (20, 6), (1, 1)];
+
+    #[test]
+    fn the_may_have_been_posted_warning_survives_an_80_column_bar() {
+        for error in [
+            CreateError::Status(ForgeStatus::Offline),
+            CreateError::Status(ForgeStatus::Failed),
+        ] {
+            for start in [reading as fn() -> AppState, conversing] {
+                let mut state = start();
+                state.update(AppIntent::Resize {
+                    width: 80,
+                    height: 24,
+                });
+                let sent = if matches!(state.review.screen, ReviewScreen::Conversation(_)) {
+                    type_char(&mut state, 'a');
+                    type_text(&mut state, "Done");
+                    ctrl(&mut state, 's');
+                    super::tests::sent(&type_char(&mut state, 'y'))
+                } else {
+                    post_reply(&mut state, "Done")
+                };
+                written(&mut state, &sent, Err(error.clone()));
+                let rows = draw_at(&mut state, 80, 24);
+                let bar = rows.last().unwrap();
+                assert!(
+                    bar.contains("May have been posted - check before posting again"),
+                    "{error:?}: {bar:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_long_reply_label_gives_way_to_the_posting_cue() {
+        let mut state = reading();
+        type_char(&mut state, 'a');
+        if let Some(Composer {
+            kind: ComposerKind::Reply { label, .. },
+            ..
+        }) = &mut state.review.composer
+        {
+            *label = format!("{}/漢字ファイル名.rs · lines 10-14", "deep/".repeat(30));
+        }
+        let rows = draw_at(&mut state, 80, 24);
+        let title = rows
+            .iter()
+            .find(|r| r.contains("Reply to "))
+            .unwrap_or_else(|| panic!("{rows:#?}"));
+        assert!(title.contains("…"), "{title}");
+        assert!(
+            title.contains("lines 10-14 · ctrl-s posts to GitHub"),
+            "{title}"
+        );
+        // Narrower: the label goes, the cue stays.
+        let rows = draw_at(&mut state, 40, 12);
+        assert!(drawn(&rows, "posts to GitHub"), "{rows:#?}");
+        for (width, height) in SIZES {
+            draw_at(&mut state, width, height);
+        }
+    }
+
+    #[test]
+    fn the_composers_and_the_question_draw_at_every_size() {
+        let mut reply = reading();
+        type_char(&mut reply, 'a');
+        type_text(&mut reply, "On it");
+        let mut general = conversing();
+        type_char(&mut general, 'a');
+        type_text(&mut general, "Ship it");
+        let mut asked = conversing();
+        type_char(&mut asked, 'a');
+        type_text(&mut asked, "Ship it");
+        ctrl(&mut asked, 's');
+        for (width, height) in SIZES {
+            for state in [&mut reply, &mut general, &mut asked] {
+                let rows = draw_at(state, width, height);
+                assert_eq!(rows.len(), usize::from(height));
+            }
+        }
+        let rows = draw_at(&mut reply, 80, 24);
+        assert!(drawn(&rows, "ctrl-s posts to GitHub"), "{rows:#?}");
+        assert!(drawn(&rows, "On it"), "{rows:#?}");
+        let rows = draw_at(&mut general, 80, 24);
+        assert!(
+            drawn(&rows, " Comment on #12 · ctrl-s posts to GitHub "),
+            "{rows:#?}"
+        );
+        assert!(drawn(&rows, "Ship it"), "{rows:#?}");
+        // The smallest box still says the text goes to GitHub.
+        let rows = draw_at(&mut general, 30, 10);
+        assert!(drawn(&rows, "posts to GitHub"), "{rows:#?}");
+        let rows = draw_at(&mut asked, 80, 24);
+        assert!(
+            drawn(&rows, "Post this comment on #12 to GitHub? (y/n)"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn the_title_says_posting_while_the_text_is_on_its_way() {
+        let mut state = reading();
+        post_reply(&mut state, "Done");
+        let rows = draw_at(&mut state, 80, 24);
+        let title = rows
+            .iter()
+            .find(|r| r.contains("Reply to "))
+            .unwrap_or_else(|| panic!("{rows:#?}"));
+        assert!(title.contains("· posting…"), "{title}");
+        assert!(!title.contains("ctrl-s posts"), "{title}");
+    }
+
+    #[test]
+    fn the_reader_and_conversation_bars_keep_their_write_keys_at_80_columns() {
+        let mut state = reading();
+        let rows = draw_at(&mut state, 80, 24);
+        let bar = rows.last().unwrap();
+        assert!(bar.contains("a reply"), "{bar:?}");
+        assert!(bar.contains("R resolve"), "{bar:?}");
+        let mut state = conversing();
+        let rows = draw_at(&mut state, 80, 24);
+        let bar = rows.last().unwrap();
+        assert!(bar.contains("a comment"), "{bar:?}");
+        for (width, height) in SIZES {
+            draw_at(&mut reading(), width, height);
+            draw_at(&mut conversing(), width, height);
+        }
     }
 }

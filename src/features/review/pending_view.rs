@@ -16,7 +16,7 @@ use super::pending::{CommentTarget, PendingSlot, lines_label};
 use super::state::ReviewState;
 use super::threads_view::{CommentMarks, clip_line, dim};
 use crate::model::AppState;
-use crate::view::{centered, width_of};
+use crate::view::{centered, elide_left, width_of};
 use kika_forge::anchor::{RowNumber, row_in, to_line_id};
 use kika_forge::discussion::PrDiscussion;
 use kika_forge::pending::PendingComment;
@@ -99,7 +99,7 @@ pub fn render_pending(review: &ReviewState, frame: &mut Frame, area: Rect) {
         render_list(slot, cursor, frame, area);
     }
     if let Some(composer) = &review.composer {
-        render_composer(composer, frame, area);
+        render_composer(composer, review.composer_posting(), frame, area);
     }
 }
 
@@ -109,32 +109,66 @@ fn where_label(target: &CommentTarget) -> String {
     format!("{path}:{}", lines_label(target.start, target.end))
 }
 
-/// The composer's title: what is written and where it goes.
-fn composer_title(composer: &Composer) -> String {
-    match &composer.kind {
+/// The cue on a composer whose text goes to GitHub, longest first: the
+/// first that fits is drawn.
+const POSTS_CUES: [&str; 3] = [
+    " · ctrl-s posts to GitHub ",
+    " ctrl-s posts to GitHub ",
+    " posts to GitHub ",
+];
+const POSTING_CUES: [&str; 2] = [" · posting… ", " posting… "];
+/// The fewest columns a reply's label is cut to before it is dropped.
+const MIN_LABEL: usize = 8;
+
+/// The composer's title for a box `room` columns inside: what is written
+/// and where it goes. For a post the cue that it goes to GitHub, or that
+/// it is on its way, is kept whole; the label gives way first.
+fn composer_title(composer: &Composer, posting: bool, room: usize) -> String {
+    let head = match &composer.kind {
         ComposerKind::Line {
             target,
             editing: Some(_),
-        } => format!(" Edit comment on {} ", where_label(target)),
+        } => return format!(" Edit comment on {} ", where_label(target)),
         ComposerKind::Line {
             target,
             editing: None,
-        } => format!(" Comment on {} ", where_label(target)),
+        } => return format!(" Comment on {} ", where_label(target)),
         ComposerKind::Reply { label, .. } => {
-            format!(
-                " Reply to {} · ctrl-s posts to GitHub ",
-                sanitize(label.as_bytes())
-            )
+            let label = sanitize(label.as_bytes());
+            let fixed = width_of(" Reply to ") + width_of(POSTS_CUES[0]);
+            let cut = room.saturating_sub(fixed);
+            if cut < MIN_LABEL.min(width_of(&label)) {
+                String::new()
+            } else {
+                format!(" Reply to {}", elide_left(&label, cut))
+            }
         }
-        ComposerKind::General { number, .. } => {
-            format!(" Comment on #{number} · ctrl-s posts to GitHub ")
+        ComposerKind::General { number, .. } => format!(" Comment on #{number}"),
+    };
+    let cues: &[&str] = if posting { &POSTING_CUES } else { &POSTS_CUES };
+    let (with_head, alone) = cues
+        .split_first()
+        .map_or((None, cues), |(f, r)| (Some(*f), r));
+    if let Some(cue) = with_head.filter(|_| !head.is_empty()) {
+        let title = format!("{head}{cue}");
+        if width_of(&title) <= room {
+            return title;
         }
     }
+    let fits = alone.iter().find(|cue| width_of(cue) <= room);
+    fits.or(alone.last())
+        .copied()
+        .unwrap_or_default()
+        .to_string()
 }
 
-fn render_composer(composer: &Composer, frame: &mut Frame, area: Rect) {
+fn render_composer(composer: &Composer, posting: bool, frame: &mut Frame, area: Rect) {
     let popup = box_area(area);
-    let block = frame_block(clip_title(&composer_title(composer), popup.width));
+    let room = usize::from(popup.width).saturating_sub(2);
+    let block = frame_block(clip_title(
+        &composer_title(composer, posting, room),
+        popup.width,
+    ));
     let inner = block.inner(popup);
     let lines = editor_lines(
         &composer.text,

@@ -273,7 +273,9 @@ impl AppState {
                 self.review.discussion_fetch.error = Some(self.review_failed(repo, error));
             }
         }
-        // Thread indexes were into the discussion that has gone.
+        // Thread indexes were into the discussion that has gone. The
+        // reply's thread is taken on a failed read too, so no later read
+        // reopens it.
         let reopen = self.review.files.as_mut().and_then(|files| {
             files.thread = None;
             files.jump = None;
