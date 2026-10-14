@@ -1388,9 +1388,11 @@ mod tests {
         let (_, rows) = draw(&hard_reset_leaving_eight(), 80, 24);
         assert!(contains(&rows, "thrown away"), "{rows:#?}");
         assert!(contains(&rows, "and 3 more"), "{rows:#?}");
-        // The keep hint names the old HEAD; wrapping may split the command.
-        assert!(contains(&rows, "git branch <name>"), "{rows:#?}");
+        // The keep hint names the key and the old HEAD; wrapping may
+        // split it.
+        assert!(contains(&rows, "then N to"), "{rows:#?}");
         assert!(contains(&rows, "fedcba9 (y/n)"), "{rows:#?}");
+        assert!(!contains(&rows, "git branch"), "{rows:#?}");
     }
 
     #[test]

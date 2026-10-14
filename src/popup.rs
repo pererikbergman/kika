@@ -304,7 +304,7 @@ impl LeaveCommitsConfirm {
             ids.push_str(&format!(" and {} more", count - Self::LISTED));
         }
         let keep = format!(
-            "To keep them, press n, then run: git branch <name> {}",
+            "To keep them, press n, then N to create a branch at {}",
             self.head_short_oid
         );
         let short_oid = &self.short_oid;
@@ -509,6 +509,8 @@ pub enum PromptKind {
     Command,
     /// The name of a branch to make at the selected one.
     NewBranch,
+    /// The name of a branch to make at the detached `HEAD`.
+    NewBranchAtHead,
     /// A new name for the selected branch.
     RenameBranch,
     /// The message of a stash being made; empty for git's own.
@@ -544,7 +546,7 @@ impl PromptKind {
         match self {
             PromptKind::GoToFile => "Go to file",
             PromptKind::Command => "Command",
-            PromptKind::NewBranch => "New branch",
+            PromptKind::NewBranch | PromptKind::NewBranchAtHead => "New branch",
             PromptKind::RenameBranch => "Rename branch",
             PromptKind::StashMessage => "Stash message (optional)",
             PromptKind::RenameStash => "Rename stash",
@@ -569,6 +571,9 @@ impl PromptKind {
                 AppIntent::CustomCommands(CustomCommandsIntent::PromptAnswered(text))
             }
             PromptKind::NewBranch => AppIntent::Branches(BranchesIntent::CreateNamed(text)),
+            PromptKind::NewBranchAtHead => {
+                AppIntent::Branches(BranchesIntent::CreateAtHeadNamed(text))
+            }
             PromptKind::RenameBranch => AppIntent::Branches(BranchesIntent::RenameTo(text)),
             PromptKind::StashMessage => AppIntent::Stash(StashIntent::MessageAnswered(text)),
             PromptKind::RenameStash => AppIntent::Stash(StashIntent::RenameTo(text)),
@@ -829,7 +834,7 @@ mod tests {
             ask.text,
             "Check out abc1234 and leave 3 commits that no branch or tag reaches behind \
              (000, 111, 222)? Afterwards only the reflog has them. To keep them, press n, \
-             then run: git branch <name> fedcba9 (y/n)"
+             then N to create a branch at fedcba9 (y/n)"
         );
         assert!(
             leave(checkout, 1)
@@ -877,9 +882,10 @@ mod tests {
         ] {
             let q = leave(op, 2).text;
             assert!(
-                q.ends_with("To keep them, press n, then run: git branch <name> fedcba9 (y/n)"),
+                q.ends_with("To keep them, press n, then N to create a branch at fedcba9 (y/n)"),
                 "{q}"
             );
+            assert!(!q.contains("git branch"), "{q}");
         }
         let q = leave(reset(ResetMode::Hard), 1).text;
         assert!(
@@ -996,6 +1002,11 @@ mod tests {
             PromptKind::RenameBranch.submit("r".into()),
             AppIntent::Branches(BranchesIntent::RenameTo("r".into()))
         );
+        assert_eq!(
+            PromptKind::NewBranchAtHead.submit("h".into()),
+            AppIntent::Branches(BranchesIntent::CreateAtHeadNamed("h".into()))
+        );
+        assert_eq!(PromptKind::NewBranchAtHead.title(), "New branch");
     }
 
     #[test]
