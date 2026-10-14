@@ -4,7 +4,8 @@
 //! stream the selected file's diff into the same Diff pane the workspace
 //! uses. The viewed marks come from GitHub's detail, matched by path.
 //! The screen shows the whole pull request, or one of its commits picked
-//! with `c` (`commit_view.rs`); the marks stay the pull request's.
+//! with `c` (`commit_view.rs`); the marks stay the pull request's, and
+//! the selected file stays selected, by path, when the new view lists it.
 
 use super::git::{CommitsHere, FileCounts, PrCommit, PrFileRow};
 use super::state::{ReviewScreen, ReviewState};
@@ -16,6 +17,7 @@ use crate::model::{AppState, Context};
 use kika_forge::review::ViewedState;
 use kika_git::commit_files::{CommitFile, CommitId, CommitRange};
 use kika_git::diff::DiffRequest;
+use kika_git::path::RepoPath;
 
 pub const STILL_MISSING: &str = "PR head is not available locally after fetch";
 pub const FETCHED_BEFORE: &str =
@@ -89,6 +91,9 @@ pub struct PrFiles {
     pub commits: Option<(Vec<PrCommit>, bool)>,
     pub rows: Vec<PrFile>,
     pub cursor: usize,
+    /// The file to select once the view being listed comes, picked by
+    /// path; kept through a view that fails or lists nothing.
+    pub keep: Option<RepoPath>,
     pub focus: FilesFocus,
     pub stage: FilesStage,
     /// This screen fetched already, so a commit still missing is an error
@@ -117,6 +122,7 @@ impl PrFiles {
             commits: None,
             rows: Vec::new(),
             cursor: 0,
+            keep: None,
             focus: FilesFocus::List,
             stage: FilesStage::Checking,
             fetched: false,
@@ -147,6 +153,13 @@ impl PrFiles {
             FilesStage::Checking | FilesStage::Fetching | FilesStage::Listing
         )
     }
+}
+
+/// The row of the file kept across a switch of view, or the first row
+/// when the new view does not list it.
+fn kept_cursor(rows: &[PrFile], keep: Option<&RepoPath>) -> usize {
+    keep.and_then(|path| rows.iter().position(|r| &r.file.path == path))
+        .unwrap_or(0)
 }
 
 /// `rows` with GitHub's viewed state put on each by exact path. A path
@@ -407,7 +420,11 @@ impl AppState {
                 }
                 files.range = Some(range);
                 files.rows = with_viewed(rows, &viewed);
-                files.cursor = 0;
+                files.cursor = kept_cursor(&files.rows, files.keep.as_ref());
+                // An empty list selects nothing, so the file is kept for the next view.
+                if !files.rows.is_empty() {
+                    files.keep = None;
+                }
                 files.stage = FilesStage::Ready;
             }
             Err(message) => {
@@ -418,7 +435,8 @@ impl AppState {
         if files.rows.is_empty() {
             return self.close_diff();
         }
-        // Another pull request's file: start at its top.
+        // Another pull request's file, or the same file over another
+        // range: its lines do not carry over, so start at its top.
         self.review_file_diff(DiffStart::Top)
     }
 

@@ -1,9 +1,10 @@
 //! Reviewing a pull request commit by commit: `c` on the files screen
 //! reads the commits between the merge base and the head once, from local
 //! git, then picks "Whole pull request" or one commit, shown against its
-//! first parent. The file list and diff follow the pick; the viewed marks
-//! stay the pull request's, put on again by path. Nothing reaches the
-//! network.
+//! first parent. The file list and diff follow the pick, and the selected
+//! file stays selected, matched by path, when the new view lists it; the
+//! viewed marks stay the pull request's, put on again by path. Nothing
+//! reaches the network.
 
 use super::files::{FilesStage, ReviewView, files_screen};
 use super::git::{MAX_PR_COMMITS, PrCommit};
@@ -130,8 +131,9 @@ impl AppState {
     }
 
     /// The row picked from the "Review commit" list: show that range's
-    /// files, the first file's diff at its top once they come. The view
-    /// already shown, or the note on a cut list, changes nothing.
+    /// files once they come, on the file selected now when the range has
+    /// it (else the first), its diff at its top. The view already shown,
+    /// or the note on a cut list, changes nothing.
     pub(crate) fn pick_review_commit(&mut self, row: usize) -> Vec<Effect> {
         if let Some(reason) = review_commit_disabled(self) {
             self.notice = Some(reason);
@@ -158,6 +160,11 @@ impl AppState {
         if let Some(files) = &mut self.review.files {
             files.view = view;
             files.range = Some(range.clone());
+            // A view with no row selected leaves the file remembered before.
+            files.keep = files
+                .selected()
+                .map(|r| r.file.path.clone())
+                .or(files.keep.take());
             files.rows.clear();
             files.cursor = 0;
             files.stage = FilesStage::Listing;
@@ -256,6 +263,9 @@ mod tests {
         }));
         assert_eq!(files(&state).stage, FilesStage::Ready);
         assert_eq!(files(&state).whole, Some(whole()));
+        // The first load after `f` opens on the first file.
+        assert_eq!(files(&state).cursor, 0);
+        assert_eq!(files(&state).keep, None);
         state
     }
 
@@ -420,7 +430,8 @@ mod tests {
         assert_local(&effects);
         let shown = files(&state);
         assert_eq!(shown.stage, FilesStage::Ready);
-        assert_eq!(shown.cursor, 0);
+        // `src/cache.rs` was selected, and the commit lists it second.
+        assert_eq!(shown.cursor, 1);
         let marks: Vec<_> = shown.rows.iter().map(|r| r.viewed).collect();
         assert_eq!(
             marks,
@@ -430,7 +441,7 @@ mod tests {
         assert_eq!(shown.whole, Some(whole()));
         let request = streamed(&effects);
         assert_eq!(request.commit, Some(range));
-        assert_eq!(request.path, "docs/café.md".into());
+        assert_eq!(request.path, "src/cache.rs".into());
         assert_eq!(state.diff.scroll, 0);
 
         // The list opens on the commit shown; picking it again does nothing.
@@ -451,6 +462,199 @@ mod tests {
             result: Ok((whole(), vec![row("src/lib.rs")])),
         }));
         assert_eq!(files(&state).rows[0].viewed, Some(ViewedState::Dismissed));
+    }
+
+    /// Open the list with `c` and pick `row`.
+    fn open_and_pick(state: &mut AppState, row: usize) -> Vec<Effect> {
+        type_char(state, 'c');
+        let effects = pick(state, row);
+        assert_local(&effects);
+        effects
+    }
+
+    fn whole_rows() -> Vec<PrFileRow> {
+        vec![row("src/cache.rs"), row("src/lib.rs"), row("docs/café.md")]
+    }
+
+    /// Answer the pick's range load with `rows`, checking nothing reached
+    /// the forge, and return what the answer asked for.
+    fn list(state: &mut AppState, picked: &[Effect], rows: Vec<PrFileRow>) -> Vec<Effect> {
+        assert_local(picked);
+        let (tag, range) = range_load(picked);
+        let effects = state.update(AppIntent::Review(ReviewIntent::FilesLoaded {
+            tag,
+            result: Ok((range, rows)),
+        }));
+        assert_local(&effects);
+        effects
+    }
+
+    /// `picking()` with the list closed and the cursor moved to `row`.
+    fn picking_at(row: usize) -> AppState {
+        let mut state = picking();
+        press(&mut state, KeyCode::Esc);
+        for _ in 0..row {
+            assert_local(&press(&mut state, KeyCode::Down));
+        }
+        assert_eq!(files(&state).cursor, row);
+        state
+    }
+
+    #[test]
+    fn switching_between_the_whole_pull_request_and_a_commit_keeps_the_selected_file() {
+        let mut state = picking_at(1);
+        let picked = open_and_pick(&mut state, 2);
+        let effects = list(
+            &mut state,
+            &picked,
+            vec![row("docs/café.md"), row("src/lib.rs")],
+        );
+        assert_eq!(files(&state).cursor, 1);
+        let request = streamed(&effects);
+        assert_eq!(request.path, "src/lib.rs".into());
+        assert_eq!(request.commit, Some(commits()[1].range.clone()));
+
+        // And back to the whole pull request, on the same file.
+        let picked = open_and_pick(&mut state, 0);
+        let effects = list(&mut state, &picked, whole_rows());
+        assert_eq!(files(&state).cursor, 1);
+        let request = streamed(&effects);
+        assert_eq!(request.path, "src/lib.rs".into());
+        assert_eq!(request.commit, Some(whole()));
+        assert_eq!(files(&state).keep, None);
+    }
+
+    #[test]
+    fn a_file_the_new_view_does_not_list_falls_back_to_the_first() {
+        let mut state = picking_at(1);
+        let picked = open_and_pick(&mut state, 1);
+        let effects = list(
+            &mut state,
+            &picked,
+            vec![row("src/cache.rs"), row("docs/café.md")],
+        );
+        assert_eq!(files(&state).cursor, 0);
+        assert_eq!(streamed(&effects).path, "src/cache.rs".into());
+        assert_eq!(files(&state).keep, None);
+    }
+
+    #[test]
+    fn the_file_is_remembered_through_a_view_that_fails_or_lists_nothing() {
+        for failed in [true, false] {
+            let mut state = picking_at(1);
+            let picked = open_and_pick(&mut state, 1);
+            assert_local(&picked);
+            let (tag, range) = range_load(&picked);
+            let result = if failed {
+                Err("fatal: bad tree".to_string())
+            } else {
+                Ok((range, Vec::new()))
+            };
+            let effects =
+                state.update(AppIntent::Review(ReviewIntent::FilesLoaded { tag, result }));
+            assert_local(&effects);
+            assert_eq!(files(&state).selected(), None);
+
+            let picked = open_and_pick(&mut state, 0);
+            let effects = list(&mut state, &picked, whole_rows());
+            assert_eq!(files(&state).cursor, 1, "failed: {failed}");
+            assert_eq!(streamed(&effects).path, "src/lib.rs".into());
+        }
+    }
+
+    #[test]
+    fn commit_to_commit_keeps_the_file_when_both_list_it() {
+        let mut state = picking();
+        let picked = pick(&mut state, 1);
+        list(
+            &mut state,
+            &picked,
+            vec![row("src/cache.rs"), row("docs/café.md")],
+        );
+        assert_eq!(files(&state).cursor, 0);
+
+        let picked = open_and_pick(&mut state, 3);
+        let effects = list(
+            &mut state,
+            &picked,
+            vec![row("docs/café.md"), row("src/cache.rs")],
+        );
+        assert_eq!(files(&state).cursor, 1);
+        let request = streamed(&effects);
+        assert_eq!(request.path, "src/cache.rs".into());
+        assert_eq!(request.commit, Some(commits()[2].range.clone()));
+    }
+
+    #[test]
+    fn a_stale_answer_leaves_the_kept_file_for_the_answer_that_counts() {
+        let mut state = picking_at(1);
+        let picked = open_and_pick(&mut state, 2);
+        let (tag, range) = range_load(&picked);
+        for stale in [
+            Tag {
+                seq: tag.seq + 1,
+                ..tag
+            },
+            Tag {
+                generation: tag.generation + 1,
+                ..tag
+            },
+        ] {
+            let effects = state.update(AppIntent::Review(ReviewIntent::FilesLoaded {
+                tag: stale,
+                result: Ok((range.clone(), vec![row("src/lib.rs")])),
+            }));
+            assert_eq!(effects, []);
+            assert_eq!(files(&state).keep, Some("src/lib.rs".into()));
+        }
+        let effects = list(
+            &mut state,
+            &picked,
+            vec![row("docs/café.md"), row("src/lib.rs")],
+        );
+        assert_eq!(files(&state).cursor, 1);
+        assert_eq!(streamed(&effects).path, "src/lib.rs".into());
+    }
+
+    #[test]
+    fn a_kept_file_below_the_first_screen_is_drawn_selected_after_switching_back() {
+        use crate::test_support::reversed_at;
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let names: Vec<String> = (0..20).map(|i| format!("src/f{i:02}.rs")).collect();
+        let rows = || names.iter().map(|n| row(n)).collect::<Vec<_>>();
+        let mut state = picking();
+        press(&mut state, KeyCode::Esc);
+        // The whole pull request lists twenty files; select the eighteenth.
+        let picked = open_and_pick(&mut state, 1);
+        list(&mut state, &picked, rows());
+        let picked = open_and_pick(&mut state, 0);
+        list(&mut state, &picked, rows());
+        for _ in 0..17 {
+            press(&mut state, KeyCode::Down);
+        }
+        assert_eq!(files(&state).cursor, 17);
+
+        let picked = open_and_pick(&mut state, 2);
+        list(&mut state, &picked, vec![row("src/f17.rs")]);
+        let picked = open_and_pick(&mut state, 0);
+        list(&mut state, &picked, rows());
+        assert_eq!(files(&state).cursor, 17);
+
+        state.size = (100, 12);
+        let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
+        terminal
+            .draw(|frame| crate::view::render(&state, frame))
+            .unwrap();
+        // The cursor bar is drawn reversed, on the kept file's row.
+        let buffer = terminal.backend().buffer();
+        let drawn = crate::view::buffer_rows(buffer);
+        assert!(reversed_at(buffer, "? src/f17.rs"), "{drawn:#?}");
+        assert!(!reversed_at(buffer, "? src/f16.rs"), "{drawn:#?}");
+        assert!(
+            !drawn.iter().any(|r| r.contains("src/f00.rs")),
+            "{drawn:#?}"
+        );
     }
 
     #[test]
