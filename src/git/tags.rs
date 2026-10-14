@@ -209,8 +209,8 @@ mod tests {
     use super::*;
     use crate::git::CliRunner;
     use crate::git::fake::{FakeRunner, TempDir, git, ok};
+    use crate::git::fake::{STANDARD_ENV, env_list};
     use crate::git::runner::EnvProfile;
-    use crate::test_support::{STANDARD_ENV, env_list};
 
     const C1: &str = "1111111111111111111111111111111111111111";
     const C2: &str = "2222222222222222222222222222222222222222";

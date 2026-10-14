@@ -555,7 +555,7 @@ mod tests {
         detail_from, fixture_detail, fixture_queues, repo,
     };
     use crate::forge::ForgeHost;
-    use crate::forge::review::tests::hostile_detail;
+    use crate::forge::review::fixtures::hostile_detail;
     use crate::model::Context;
     use crate::view::buffer_rows;
 
@@ -767,7 +767,7 @@ mod tests {
         let mut queues = fixture_queues();
         state.review.queue = QueueKind::AllOpen;
         let long = "日本語のとても長いタイトルが続きます".repeat(4);
-        queues = crate::forge::review::tests::with_title(queues, 15, &long);
+        queues = crate::forge::review::fixtures::with_title(queues, 15, &long);
         state.review.queues = Some(queues);
         let rows = draw(&state, 40, 10);
         let row = rows.iter().find(|r| r.contains("#15")).unwrap();

@@ -35,9 +35,10 @@
 //!   and the reflog branches of `key_focus`, `open_filter`, the filter
 //!   apply and `list_escape`: shared core dispatch;
 //! - the `GitOp::Travel` variant, the `HEAD_MOVED` check in `run_op`,
-//!   `failure_title`/`failure_next` and the refresh plan (`refresh.rs`);
-//! - the fixtures in `src/git/fixtures/reflog/`, which core `view.rs` and
-//!   `model.rs` tests read too.
+//!   `failure_title`/`failure_next` and the refresh plan (`refresh.rs`).
+//!
+//! The reflog fixtures live here, in `fixtures/`; core `view.rs` and
+//! `test_support.rs` tests read them too.
 
 pub(crate) mod effects;
 pub(crate) mod git;

@@ -1,9 +1,9 @@
 //! The interactive rebase every log rewrite runs: its argv, with the
 //! plan handed to the sequence editor in the environment.
 
+use crate::git::rebase_plan::PLAN_ENV;
 use crate::git::rebase_plan::{RebasePlan, encode};
 use crate::git::runner::GitCommand;
-use crate::sequence_editor::PLAN_ENV;
 
 /// The plan goes to the sequence editor, which `handoff` names; the
 /// base is hex digits only. The keys are newer config that an older

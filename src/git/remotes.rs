@@ -270,7 +270,7 @@ mod tests {
     use super::*;
     use crate::git::CliRunner;
     use crate::git::fake::{FakeRunner, TempDir, fail, git, ok};
-    use crate::test_support::{STANDARD_ENV, env_list};
+    use crate::git::fake::{STANDARD_ENV, env_list};
 
     const CONFIG: &[&str] = &["config", "-z", "--get-regexp", r"^remote\..*\.url$"];
     const REFS: &[&str] = &[

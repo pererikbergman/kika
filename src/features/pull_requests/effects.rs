@@ -135,7 +135,7 @@ pub(crate) fn open_url(argv: Vec<OsString>, sink: CommandSink, tx: UnboundedSend
         )));
         return;
     };
-    let spawned = crate::program::command(program).and_then(|mut command| {
+    let spawned = crate::git::program::command(program).and_then(|mut command| {
         command
             .args(args)
             .stdin(std::process::Stdio::null())

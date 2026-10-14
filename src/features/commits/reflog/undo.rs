@@ -444,16 +444,15 @@ mod tests {
     use crate::features::commits::reflog::git::parse_records;
     use crate::git::branches::Track;
 
-    const COMMIT: &[u8] = include_bytes!("../../../git/fixtures/reflog/commit.bin");
-    const CHECKOUT: &[u8] = include_bytes!("../../../git/fixtures/reflog/checkout.bin");
-    const DETACHED: &[u8] = include_bytes!("../../../git/fixtures/reflog/checkout_detached.bin");
-    const STASH: &[u8] = include_bytes!("../../../git/fixtures/reflog/stash.bin");
-    const REBASE: &[u8] = include_bytes!("../../../git/fixtures/reflog/rebase.bin");
-    const REBASE_2_15: &[u8] = include_bytes!("../../../git/fixtures/reflog/rebase_2_15.bin");
-    const REBASE_2_15_I: &[u8] =
-        include_bytes!("../../../git/fixtures/reflog/rebase_2_15_interactive.bin");
-    const ABORTED: &[u8] = include_bytes!("../../../git/fixtures/reflog/aborted_rebase.bin");
-    const FROM_OTHER: &[u8] = include_bytes!("../../../git/fixtures/reflog/rebase_from_other.bin");
+    const COMMIT: &[u8] = include_bytes!("fixtures/commit.bin");
+    const CHECKOUT: &[u8] = include_bytes!("fixtures/checkout.bin");
+    const DETACHED: &[u8] = include_bytes!("fixtures/checkout_detached.bin");
+    const STASH: &[u8] = include_bytes!("fixtures/stash.bin");
+    const REBASE: &[u8] = include_bytes!("fixtures/rebase.bin");
+    const REBASE_2_15: &[u8] = include_bytes!("fixtures/rebase_2_15.bin");
+    const REBASE_2_15_I: &[u8] = include_bytes!("fixtures/rebase_2_15_interactive.bin");
+    const ABORTED: &[u8] = include_bytes!("fixtures/aborted_rebase.bin");
+    const FROM_OTHER: &[u8] = include_bytes!("fixtures/rebase_from_other.bin");
 
     fn id(c: char) -> String {
         c.to_string().repeat(40)

@@ -6,6 +6,12 @@ use super::commit_files::CommitId;
 use super::log::CommitRow;
 use super::safe_text::terminal_safe;
 
+/// The env var that carries the plan to Kika's hidden sequence-editor
+/// mode, as [`encode`] writes it. A repo cannot set Kika's env, and
+/// `GIT_SEQUENCE_EDITOR` wins over any `sequence.editor` a repo
+/// configures, so only Kika's own `rebase -i` child reaches that mode.
+pub const PLAN_ENV: &str = "KIKA_REBASE_PLAN";
+
 /// What the user asked to do with the selected commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Edit {

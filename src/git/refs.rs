@@ -58,7 +58,7 @@ fn run(runner: &dyn GitRunner, cmd: &GitCommand) -> Result<GitOutput, String> {
 mod tests {
     use super::*;
     use crate::git::fake::{FakeRunner, fail, ok};
-    use crate::test_support::{STANDARD_ENV, env_list};
+    use crate::git::fake::{STANDARD_ENV, env_list};
 
     const REFS: &[&str] = &["for-each-ref", "--format=%(objectname) %(refname)"];
     const SYMBOLIC: &[&str] = &["symbolic-ref", "-q", "HEAD"];
