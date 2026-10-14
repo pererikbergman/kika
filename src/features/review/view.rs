@@ -966,6 +966,7 @@ mod tests {
                 pr_file('D', b"evil\x1b]52;c;eA==\x07\x1b[2Jname", lines(0, 4), None),
             ],
             cursor: 0,
+            keep: None,
             focus: FilesFocus::List,
             stage: FilesStage::Ready,
             fetched: false,
