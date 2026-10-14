@@ -1,7 +1,8 @@
 //! The I/O behind the review effects: reading the queues and a pull
 //! request through `gh`, checking for and fetching its commits, listing
-//! its files and its commits, and merging it. Each answers with exactly
-//! one intent; none blocks the event loop.
+//! its files and its commits, planning a checkout of its head, and
+//! merging it. Each answers with exactly one intent; none blocks the
+//! event loop.
 
 use std::sync::Arc;
 
@@ -17,6 +18,7 @@ use kika_forge::review::{self, ReviewError, ReviewLoad};
 use kika_forge::task::ForgeContext;
 use kika_forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
 use kika_git::GitRunner;
+use kika_git::branches::BranchName;
 use kika_git::commit_files::{CommitId, CommitRange};
 use kika_git::remotes::RemoteName;
 
@@ -162,6 +164,33 @@ pub(crate) fn check_commits(
         // A panic still answers, or the files screen would wait forever.
         background::crashed("git cat-file"),
         move |result| AppIntent::Review(ReviewIntent::ObjectsChecked { tag, result }),
+    );
+}
+
+/// Plan checking out `head` as `branch`, and find the remote a missing
+/// head would be fetched from. Local only: nothing is fetched here.
+/// Always answered by one `ReviewIntent::CheckoutPlanned`.
+pub(crate) fn plan_checkout(
+    runner: Arc<dyn GitRunner>,
+    tx: UnboundedSender<AppIntent>,
+    tag: Tag,
+    head: CommitId,
+    branch: BranchName,
+    hosts: Vec<ForgeHost>,
+    repo: ForgeRepo,
+) {
+    background::run(
+        tx,
+        move || {
+            let mut plan = pr_objects::plan_checkout(runner.as_ref(), &head, &branch)?;
+            if !plan.head_here {
+                plan.remote = review::fetch_remote(runner.as_ref(), &hosts, &repo);
+            }
+            Ok(plan)
+        },
+        // A panic still answers, or the checkout would wait forever.
+        background::crashed("git"),
+        move |result| AppIntent::Review(ReviewIntent::CheckoutPlanned { tag, result }),
     );
 }
 

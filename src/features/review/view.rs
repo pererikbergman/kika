@@ -703,7 +703,9 @@ mod tests {
         let rows = draw(&state, 80, 30);
         let threads = rows
             .iter()
-            .position(|r| r.contains("Threads: 2 unresolved of 5 · 3 conversation comments"))
+            .position(|r| {
+                r.contains("Threads: 2 unresolved of 5 · 1 addressed · 3 conversation comments")
+            })
             .unwrap_or_else(|| panic!("{rows:#?}"));
         // Right after the reviewers, which wrap to two lines here.
         assert!(rows[threads - 2].contains("Reviewers: "), "{rows:#?}");

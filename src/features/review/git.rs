@@ -3,16 +3,20 @@
 //! changed files between the merge base and the head, and the commits in
 //! between, each of which can be reviewed on its own. Ids reach argv only
 //! as [`CommitId`]s, hex digits, so nothing in it reads as an option; no
-//! ref name from the server ever does, and no ref is written.
+//! ref name from the server ever does. The one ref written is the local
+//! branch `pr/<number>` a checkout makes or moves (see [`plan_checkout`]
+//! and [`pr_checkout_commands`]), named from the number alone.
 
 use std::collections::HashMap;
 
+use kika_git::branches::BranchName;
 use kika_git::commit_files::{
     CommitFile, CommitId, CommitRange, LineCounts, commit_files, numstat,
 };
 use kika_git::error::GitError;
 use kika_git::remote::{AskpassEnv, askpass_for, with_prompts};
 use kika_git::remotes::RemoteName;
+use kika_git::repo_state::{Operation, git_dir_command, git_dir_from, in_progress};
 use kika_git::runner::{GitCommand, GitRunner};
 use kika_git::safe_text::sanitize;
 
@@ -189,6 +193,211 @@ pub fn range_files(runner: &dyn GitRunner, range: &CommitRange) -> Result<Vec<Pr
         .collect())
 }
 
+/// Where the local branch `pr/<number>` stands against the pull
+/// request's head.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchAt {
+    /// No such branch: it is made at the head.
+    Absent,
+    /// It is at the head already.
+    Same,
+    /// It is at this older commit, which the head contains, so it can
+    /// move forward. Before a missing head is fetched this is only what
+    /// the branch holds; the plan made after the fetch checks it.
+    FastForward(CommitId),
+    /// It has commits the head does not: never moved by Kika.
+    Diverged,
+    /// Another worktree has it checked out: never moved by Kika.
+    OtherWorktree,
+}
+
+/// What checking out a pull request's head as `pr/<number>` would do,
+/// read from local git only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckoutPlan {
+    /// The head commit is in the local repository.
+    pub head_here: bool,
+    /// Where a missing head may be fetched from; `None` when it is here
+    /// or no remote names the reviewed repository on a configured host.
+    pub remote: Option<RemoteName>,
+    pub at: BranchAt,
+    /// The branch is the one checked out in this worktree.
+    pub current: bool,
+    /// Operations in progress in this repository, which a checkout
+    /// would mix with.
+    pub in_progress: Vec<Operation>,
+}
+
+/// The local branch a pull request is checked out as: `pr/<number>`,
+/// built from the number only, so no text from the server reaches argv.
+pub fn pr_branch(number: u64) -> BranchName {
+    BranchName(format!("pr/{number}").into_bytes())
+}
+
+/// `git for-each-ref` of `branch`: its full name, commit, whether it is
+/// `HEAD` here, and the worktree that has it checked out, NUL-separated.
+/// `%(worktreepath)` needs git 2.23; an older git fails the read, and the
+/// checkout with it.
+pub fn branch_ref_command(branch: &BranchName) -> GitCommand {
+    query(
+        GitCommand::new("for-each-ref")
+            .arg("--format=%(refname)%00%(objectname)%00%(HEAD)%00%(worktreepath)")
+            .arg(branch.full_ref()),
+    )
+}
+
+/// `git merge-base --is-ancestor <old> <head>`: exit 0 when `head`
+/// contains `old`.
+pub fn is_ancestor_command(old: &CommitId, head: &CommitId) -> GitCommand {
+    query(
+        GitCommand::new("merge-base")
+            .arg("--is-ancestor")
+            .arg(old.as_str())
+            .arg(head.as_str()),
+    )
+}
+
+/// The reflog message of a branch moved to a pull request's new head.
+pub const FAST_FORWARD_MESSAGE: &str = "kika: fast-forward to the pull request head";
+
+/// The git commands that check out `head` as `branch`, which held `old`
+/// (`None`: no such branch) and is checked out here when `current`. Each
+/// takes only fixed words, the branch built from the number and hex ids:
+/// - absent: `checkout -q -b <branch> <head> --`;
+/// - at the head, elsewhere: `checkout -q <branch> --`;
+/// - behind, checked out: `merge --ff-only -q <head>`;
+/// - behind, elsewhere: `update-ref` from `old` to `head`, which fails if
+///   the branch moved since it was read, then `checkout -q <branch> --`.
+///
+/// At the head and checked out, there is nothing to run: none.
+pub fn pr_checkout_commands(
+    branch: &BranchName,
+    head: &CommitId,
+    old: Option<&CommitId>,
+    current: bool,
+) -> Vec<GitCommand> {
+    let switch = || crate::op::checkout_command(branch).write_env();
+    match old {
+        None => vec![
+            GitCommand::new("checkout")
+                .arg("-q")
+                .arg("-b")
+                .arg(branch.as_os_string())
+                .arg(head.as_str())
+                .arg("--")
+                .write_env(),
+        ],
+        Some(old) if old == head && current => vec![],
+        Some(old) if old == head => vec![switch()],
+        // It may run the user's post-merge hook, as any merge does.
+        Some(_) if current => vec![
+            GitCommand::new("merge")
+                .arg("--ff-only")
+                .arg("-q")
+                .arg(head.as_str())
+                .user_env(),
+        ],
+        Some(old) => vec![
+            GitCommand::new("update-ref")
+                .arg("-m")
+                .arg(FAST_FORWARD_MESSAGE)
+                .arg(branch.full_ref())
+                .arg(head.as_str())
+                .arg(old.as_str())
+                .write_env(),
+            switch(),
+        ],
+    }
+}
+
+/// `branch`'s commit, whether it is checked out here, and whether another
+/// worktree has it, or `None` when there is no such branch.
+fn read_branch(
+    runner: &dyn GitRunner,
+    branch: &BranchName,
+) -> Result<Option<(CommitId, bool, bool)>, String> {
+    let output = runner
+        .run_checked(&branch_ref_command(branch))
+        .map_err(|e| e.message_or("git could not list the branch"))?;
+    let full = branch.full_ref();
+    let full = full.as_encoded_bytes();
+    for line in output.stdout.split(|&b| b == b'\n') {
+        let fields: Vec<&[u8]> = line.split(|&b| b == 0).collect();
+        // A pattern matches below a slash too: only the branch itself counts.
+        let [name, oid, head, worktree] = fields.as_slice() else {
+            continue;
+        };
+        if *name != full {
+            continue;
+        }
+        let oid = std::str::from_utf8(oid)
+            .ok()
+            .and_then(CommitId::parse)
+            .ok_or("git listed the branch with an id Kika could not read")?;
+        let current = *head == b"*";
+        return Ok(Some((oid, current, !current && !worktree.is_empty())));
+    }
+    Ok(None)
+}
+
+/// Whether `head` contains `old`. A failure with nothing on stderr is
+/// git's "no"; anything else is an error.
+fn contains(runner: &dyn GitRunner, old: &CommitId, head: &CommitId) -> Result<bool, String> {
+    let output = runner
+        .run(&is_ancestor_command(old, head))
+        .map_err(|e| GitError::io(&e).to_string())?;
+    if output.success {
+        return Ok(true);
+    }
+    if output.stderr.iter().all(u8::is_ascii_whitespace) {
+        return Ok(false);
+    }
+    Err(format!(
+        "git merge-base failed: {}",
+        sanitize(String::from_utf8_lossy(&output.stderr).trim().as_bytes())
+    ))
+}
+
+/// The operations in progress here, read from git's own dir.
+fn operations(runner: &dyn GitRunner) -> Result<Vec<Operation>, String> {
+    let output = runner
+        .run_checked(&git_dir_command())
+        .map_err(|e| e.message_or("git could not say where its dir is"))?;
+    Ok(in_progress(&git_dir_from(&output.stdout)))
+}
+
+/// What checking out `head` as `branch` would do. Local reads only: no
+/// network, and `remote` is left for the caller to fill in.
+pub fn plan_checkout(
+    runner: &dyn GitRunner,
+    head: &CommitId,
+    branch: &BranchName,
+) -> Result<CheckoutPlan, String> {
+    let head_here = missing_commits(runner, &[head])?.is_empty();
+    let (at, current) = match read_branch(runner, branch)? {
+        None => (BranchAt::Absent, false),
+        Some((_, _, true)) => (BranchAt::OtherWorktree, false),
+        Some((old, current, false)) if &old == head => (BranchAt::Same, current),
+        // Only once the head is here can git say whether it contains the branch.
+        Some((old, current, false)) if !head_here => (BranchAt::FastForward(old), current),
+        Some((old, current, false)) => {
+            let at = if contains(runner, &old, head)? {
+                BranchAt::FastForward(old)
+            } else {
+                BranchAt::Diverged
+            };
+            (at, current)
+        }
+    };
+    Ok(CheckoutPlan {
+        head_here,
+        remote: None,
+        at,
+        current,
+        in_progress: operations(runner)?,
+    })
+}
+
 /// The most commits of a pull request offered one by one.
 pub const MAX_PR_COMMITS: usize = 250;
 
@@ -278,7 +487,7 @@ mod tests {
     use super::*;
     use crate::test_support::{STANDARD_ENV, env_list};
     use kika_git::fake::{FakeRunner, fail, ok};
-    use kika_git::runner::EnvProfile;
+    use kika_git::runner::{EnvProfile, GitOutput};
 
     fn id(hex: &str) -> CommitId {
         CommitId::parse(hex).unwrap()
@@ -626,6 +835,157 @@ mod tests {
         assert!(merge_base(&fake, &id("b0"), &id("a1")).is_err());
     }
 
+    const HEAD: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+    const OLD: &str = "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0";
+
+    fn ref_line(name: &str, oid: &str, head: &str, worktree: &str) -> Vec<u8> {
+        format!("{name}\0{oid}\0{head}\0{worktree}\n").into_bytes()
+    }
+
+    const FOR_EACH_REF: [&str; 3] = [
+        "for-each-ref",
+        "--format=%(refname)%00%(objectname)%00%(HEAD)%00%(worktreepath)",
+        "refs/heads/pr/7",
+    ];
+
+    /// A runner that answers the plan's reads: the head here or not, the
+    /// branch's line, then `is_ancestor` when asked.
+    fn plan_runner(here: bool, listed: &[u8], ancestor: Option<GitOutput>) -> FakeRunner {
+        let has = format!("{HEAD}^{{commit}}");
+        let fake = FakeRunner::new()
+            .expect(
+                &["cat-file", "-e", &has],
+                if here { ok(b"") } else { fail("") },
+            )
+            .expect(&FOR_EACH_REF, ok(listed));
+        let fake = match ancestor {
+            Some(answer) => fake.expect(&["merge-base", "--is-ancestor", OLD, HEAD], answer),
+            None => fake,
+        };
+        fake.expect(
+            &["rev-parse", "--absolute-git-dir"],
+            ok(b"/nonexistent/kika-test/.git\n"),
+        )
+    }
+
+    fn plan(fake: &FakeRunner) -> Result<CheckoutPlan, String> {
+        let result = plan_checkout(fake, &id(HEAD), &pr_branch(7));
+        fake.assert_done();
+        result
+    }
+
+    #[test]
+    fn the_branch_is_named_from_the_number_and_its_reads_are_fixed_queries() {
+        assert_eq!(pr_branch(7), BranchName::from("pr/7"));
+        assert_eq!(pr_branch(12345).display(), "pr/12345");
+        assert_eq!(args(&branch_ref_command(&pr_branch(7))), FOR_EACH_REF);
+        assert_eq!(
+            args(&is_ancestor_command(&id(OLD), &id(HEAD))),
+            ["merge-base", "--is-ancestor", OLD, HEAD]
+        );
+        let query = env_list(&[STANDARD_ENV.as_slice(), &[("GIT_NO_LAZY_FETCH", "1")]].concat());
+        for cmd in [
+            branch_ref_command(&pr_branch(7)),
+            is_ancestor_command(&id(OLD), &id(HEAD)),
+        ] {
+            assert_eq!(cmd.process_env(), query, "{cmd:?}");
+        }
+        // Each checkout names only fixed words, the branch and hex ids.
+        let steps = |old: Option<&str>, current| {
+            let old = old.map(id);
+            pr_checkout_commands(&pr_branch(7), &id(HEAD), old.as_ref(), current)
+                .iter()
+                .map(args)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            steps(None, false),
+            [["checkout", "-q", "-b", "pr/7", HEAD, "--"]]
+        );
+        assert_eq!(steps(Some(HEAD), false), [["checkout", "-q", "pr/7", "--"]]);
+        assert!(steps(Some(HEAD), true).is_empty());
+        assert_eq!(steps(Some(OLD), true), [["merge", "--ff-only", "-q", HEAD]]);
+        assert_eq!(
+            steps(Some(OLD), false),
+            [
+                vec![
+                    "update-ref",
+                    "-m",
+                    FAST_FORWARD_MESSAGE,
+                    "refs/heads/pr/7",
+                    HEAD,
+                    OLD
+                ],
+                vec!["checkout", "-q", "pr/7", "--"],
+            ]
+        );
+    }
+
+    #[test]
+    fn each_place_of_the_branch_plans_as_itself() {
+        let pr7 = "refs/heads/pr/7";
+        let absent = plan(&plan_runner(true, b"", None)).unwrap();
+        assert_eq!(
+            absent,
+            CheckoutPlan {
+                head_here: true,
+                remote: None,
+                at: BranchAt::Absent,
+                current: false,
+                in_progress: vec![],
+            }
+        );
+        // Only the branch itself counts, not one below it.
+        let below = ref_line("refs/heads/pr/7/x", OLD, " ", "");
+        assert_eq!(
+            plan(&plan_runner(true, &below, None)).unwrap().at,
+            BranchAt::Absent
+        );
+        let same = plan(&plan_runner(true, &ref_line(pr7, HEAD, "*", "/w"), None)).unwrap();
+        assert_eq!((same.at, same.current), (BranchAt::Same, true));
+        let behind = ref_line(pr7, OLD, " ", "");
+        let ff = plan(&plan_runner(true, &behind, Some(ok(b"")))).unwrap();
+        assert_eq!(ff.at, BranchAt::FastForward(id(OLD)));
+        assert!(!ff.current);
+        let diverged = plan(&plan_runner(true, &behind, Some(fail("")))).unwrap();
+        assert_eq!(diverged.at, BranchAt::Diverged);
+        let elsewhere = ref_line(pr7, OLD, " ", "/other/worktree");
+        assert_eq!(
+            plan(&plan_runner(true, &elsewhere, None)).unwrap().at,
+            BranchAt::OtherWorktree
+        );
+        // A missing head cannot be compared yet: no merge-base runs.
+        let missing = plan(&plan_runner(false, &behind, None)).unwrap();
+        assert!(!missing.head_here);
+        assert_eq!(missing.at, BranchAt::FastForward(id(OLD)));
+    }
+
+    #[test]
+    fn a_failed_read_or_a_garbled_id_refuses_the_plan() {
+        let pr7 = "refs/heads/pr/7";
+        let behind = ref_line(pr7, OLD, " ", "");
+        let has = format!("{HEAD}^{{commit}}");
+        let broken = FakeRunner::new()
+            .expect(&["cat-file", "-e", &has], ok(b""))
+            .expect(&FOR_EACH_REF, ok(&behind))
+            .expect(
+                &["merge-base", "--is-ancestor", OLD, HEAD],
+                fail("fatal: bad object"),
+            );
+        assert!(plan(&broken).unwrap_err().contains("bad object"));
+        let fake = FakeRunner::new()
+            .expect(&["cat-file", "-e", &has], ok(b""))
+            .expect(&FOR_EACH_REF, ok(&ref_line(pr7, "--evil", " ", "")));
+        assert!(plan(&fake).is_err());
+        let fake = FakeRunner::new()
+            .expect(&["cat-file", "-e", &has], ok(b""))
+            .expect(
+                &FOR_EACH_REF,
+                fail("fatal: unknown field name: worktreepath"),
+            );
+        assert!(plan(&fake).unwrap_err().contains("worktreepath"));
+    }
+
     #[test]
     fn against_real_git_a_missing_commit_is_fetched_by_id_without_a_ref() {
         use kika_git::CliRunner;
@@ -699,5 +1059,135 @@ mod tests {
                 removed: 1
             }
         );
+    }
+
+    #[test]
+    fn against_real_git_a_pull_request_branch_is_made_moved_forward_and_never_forced() {
+        use crate::op::{GitOp, run_op};
+        use kika_git::CliRunner;
+        use kika_git::fake::{TempDir, git};
+
+        let tmp = TempDir::new("pr-checkout");
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let run = |args: &[&str]| git(&work, args);
+        let rev = |name: &str| {
+            String::from_utf8(git(&work, &["rev-parse", name]))
+                .unwrap()
+                .trim()
+                .to_string()
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.name", "T"]);
+        run(&["config", "user.email", "t@example.com"]);
+        let commit = |file: &str, text: &str| {
+            std::fs::write(work.join(file), text).unwrap();
+            run(&["add", "-A"]);
+            run(&["commit", "-q", "-m", text]);
+            id(&rev("HEAD"))
+        };
+        let base = commit("a.txt", "base");
+        run(&["checkout", "-q", "-b", "feature"]);
+        let h1 = commit("a.txt", "one");
+        let h2 = commit("a.txt", "two");
+        run(&["checkout", "-q", "main"]);
+        let runner = CliRunner::isolated(&work);
+        let branch = pr_branch(7);
+        let on = || {
+            String::from_utf8(git(&work, &["symbolic-ref", "--short", "HEAD"]))
+                .unwrap()
+                .trim()
+                .to_string()
+        };
+        let op = |head: &CommitId, plan: &CheckoutPlan| GitOp::CheckoutPrBranch {
+            number: 7,
+            branch: branch.clone(),
+            head: head.clone(),
+            old: match &plan.at {
+                BranchAt::Absent => None,
+                BranchAt::Same => Some(head.clone()),
+                BranchAt::FastForward(old) => Some(old.clone()),
+                other => panic!("{other:?}"),
+            },
+            current: plan.current,
+        };
+
+        // Absent: made at the head and checked out.
+        let plan = plan_checkout(&runner, &h1, &branch).unwrap();
+        assert_eq!((plan.at.clone(), plan.head_here), (BranchAt::Absent, true));
+        run_op(&runner, &op(&h1, &plan)).unwrap();
+        assert_eq!(
+            (rev("pr/7"), on()),
+            (h1.as_str().to_string(), "pr/7".into())
+        );
+
+        // A later head, checked out elsewhere: moved forward and switched to.
+        run(&["checkout", "-q", "main"]);
+        let plan = plan_checkout(&runner, &h2, &branch).unwrap();
+        assert_eq!(plan.at, BranchAt::FastForward(h1.clone()));
+        assert!(!plan.current);
+        run_op(&runner, &op(&h2, &plan)).unwrap();
+        assert_eq!(
+            (rev("pr/7"), on()),
+            (h2.as_str().to_string(), "pr/7".into())
+        );
+
+        // Checked out and behind: a fast-forward merge.
+        run(&["reset", "-q", "--hard", h1.as_str()]);
+        let plan = plan_checkout(&runner, &h2, &branch).unwrap();
+        assert_eq!(
+            (plan.at.clone(), plan.current),
+            (BranchAt::FastForward(h1.clone()), true)
+        );
+        run_op(&runner, &op(&h2, &plan)).unwrap();
+        assert_eq!(
+            (rev("pr/7"), on()),
+            (h2.as_str().to_string(), "pr/7".into())
+        );
+        let plan = plan_checkout(&runner, &h2, &branch).unwrap();
+        assert_eq!((plan.at, plan.current), (BranchAt::Same, true));
+
+        // Diverged, as after a force-push: planned as such, left alone.
+        run(&["checkout", "-q", "main"]);
+        let side = commit("b.txt", "side");
+        run(&["branch", "-q", "-f", "pr/7", side.as_str()]);
+        let plan = plan_checkout(&runner, &h2, &branch).unwrap();
+        assert_eq!(plan.at, BranchAt::Diverged);
+        assert_eq!(rev("pr/7"), side.as_str());
+
+        // A stale old id: the swap fails and nothing moves.
+        run(&["branch", "-q", "-f", "pr/7", h1.as_str()]);
+        let stale = GitOp::CheckoutPrBranch {
+            number: 7,
+            branch: branch.clone(),
+            head: h2.clone(),
+            old: Some(base.clone()),
+            current: false,
+        };
+        assert!(run_op(&runner, &stale).is_err());
+        assert_eq!(
+            (rev("pr/7"), on()),
+            (h1.as_str().to_string(), "main".into())
+        );
+
+        // Another worktree's branch is never moved.
+        let other = tmp.path().join("other");
+        let other_path = other.to_string_lossy().into_owned();
+        run(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "pr/8",
+            &other_path,
+            h1.as_str(),
+        ]);
+        let plan = plan_checkout(&runner, &h2, &pr_branch(8)).unwrap();
+        assert_eq!(plan.at, BranchAt::OtherWorktree);
+
+        // An operation in progress is seen.
+        std::fs::write(work.join(".git/BISECT_LOG"), "").unwrap();
+        let plan = plan_checkout(&runner, &h2, &branch).unwrap();
+        assert_eq!(plan.in_progress, [Operation::Bisect]);
     }
 }

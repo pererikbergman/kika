@@ -190,7 +190,7 @@ mod tests {
 
     /// Each question's yes binding, with the answer its question is asked
     /// with.
-    const YES_BINDINGS: [(&str, KeyScope, Answer); 19] = [
+    const YES_BINDINGS: [(&str, KeyScope, Answer); 20] = [
         (
             "discard_confirm.yes",
             KeyScope::DiscardConfirm,
@@ -210,6 +210,11 @@ mod tests {
         ),
         ("travel.yes", KeyScope::Travel, Answer::YOnly),
         ("merge_pr.yes", KeyScope::MergePullRequest, Answer::YOnly),
+        (
+            "checkout_pr.yes",
+            KeyScope::CheckoutPullRequest,
+            Answer::YOnly,
+        ),
         ("reset_hard.yes", KeyScope::ResetHard, Answer::YOnly),
         ("confirm.yes", KeyScope::Confirm, Answer::YOrEnter),
         ("abort_confirm.yes", KeyScope::AbortConfirm, Answer::YOnly),

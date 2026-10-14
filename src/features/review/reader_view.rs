@@ -164,7 +164,7 @@ mod tests {
         let rows = draw(&state, 100, 30);
         let header = row_with(
             &rows,
-            "src/lib.rs · outdated · was line 7 (new) · unresolved · 1 comment",
+            "src/lib.rs · addressed · was line 7 (new) · unresolved · 1 comment",
         );
         for (i, context) in [" context5", "-old6", "+new6", "+new7"].iter().enumerate() {
             assert!(
@@ -173,6 +173,35 @@ mod tests {
             );
         }
         row_with(&rows, "This name was wrong.");
+    }
+
+    #[test]
+    fn the_reader_header_of_an_addressed_thread_is_green_and_of_a_resolved_one_dim() {
+        use ratatui::style::{Color, Modifier};
+        let header_style = |state: &AppState, text: &str| {
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            terminal
+                .draw(|frame| crate::view::render(state, frame))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let rows = buffer_rows(buffer);
+            let y = row_with(&rows, text);
+            let x = rows[y][..rows[y].find(text).unwrap()].chars().count();
+            buffer[(x as u16, y as u16)].style()
+        };
+        let state = opened(fixture_discussion(), 1);
+        let style = header_style(&state, "src/lib.rs · addressed");
+        assert_eq!(style.fg, Some(Color::Green));
+        assert!(!style.add_modifier.contains(Modifier::DIM), "{style:?}");
+
+        let mut discussion = fixture_discussion();
+        discussion.threads[3].resolved = true;
+        let state = opened(discussion, 1);
+        let style = header_style(
+            &state,
+            "src/lib.rs · outdated · was line 7 (new) · resolved",
+        );
+        assert!(style.add_modifier.contains(Modifier::DIM), "{style:?}");
     }
 
     #[test]
