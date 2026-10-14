@@ -1,0 +1,9 @@
+HTTP/2.0 200 OK
+Content-Type: application/json; charset=utf-8
+X-Github-Media-Type: github.v4; format=json
+X-Ratelimit-Limit: 5000
+X-Ratelimit-Remaining: 4979
+X-Ratelimit-Reset: 1700003600
+X-Ratelimit-Resource: graphql
+
+{"data":{"repository":{"pullRequest":{"files":{"pageInfo":{"hasNextPage":false,"endCursor":"Y3Vyc29yOjEwMg=="},"nodes":[{"path":"src/later.rs","viewerViewedState":"VIEWED"},{"path":"docs/later.md","viewerViewedState":"DISMISSED"}]}}}}}

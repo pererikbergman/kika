@@ -480,7 +480,7 @@ impl AppState {
         self.review.detail_fetch.loading = false;
         match result {
             Ok(found) => {
-                self.review_answered(repo, None);
+                self.review_answered(repo, found.as_ref().and_then(PrDetail::viewed_limit));
                 self.review.detail_fetch.error =
                     found.is_none().then_some(ReviewProblem::Missing(number));
                 self.review.detail = found;
@@ -743,7 +743,17 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn detail_from(answer: &str) -> PrDetail {
-        let runner = kika_forge::github::FakeGh::new().reply(kika_forge::github::answer(answer));
+        paged_detail(&[answer.to_string()])
+    }
+
+    /// Pull request 42 read from the detail answer and later pages of
+    /// files in `pages`, one call each.
+    pub(crate) fn paged_detail(pages: &[String]) -> PrDetail {
+        let runner = pages
+            .iter()
+            .fold(kika_forge::github::FakeGh::new(), |r, page| {
+                r.reply(kika_forge::github::answer(page))
+            });
         let host = github()[0].clone();
         let sink = kika_git::recording::CommandSink::new();
         kika_forge::github::Gh::fixture(&runner, &sink, &host, NOW)
@@ -766,10 +776,15 @@ pub(crate) mod tests {
 
     /// The fixture's detail open, with `checks` in place of its own.
     pub(crate) fn in_detail(checks: Vec<Check>) -> AppState {
-        let mut state = in_queues();
-        let (tag, number) = detail_load(&press(&mut state, KeyCode::Enter));
         let mut detail = fixture_detail();
         detail.checks = checks;
+        opened_on(detail)
+    }
+
+    /// `detail` open, as the answer to the first queue row's load.
+    pub(crate) fn opened_on(detail: PrDetail) -> AppState {
+        let mut state = in_queues();
+        let (tag, number) = detail_load(&press(&mut state, KeyCode::Enter));
         state.update(AppIntent::Review(ReviewIntent::PrDetailLoaded {
             tag,
             number,
@@ -927,6 +942,54 @@ pub(crate) mod tests {
         }));
         assert!(state.forge.limited.is_empty());
         assert_eq!(state.forge.status, ForgeView::Off);
+    }
+
+    #[test]
+    fn a_rate_limit_met_paging_the_files_is_kept_while_the_detail_shows() {
+        use kika_forge::github::fixtures::GRAPHQL_RATE_LIMITED;
+        use kika_forge::review::ViewedGap;
+        use kika_forge::review::fixtures::detail_with_files;
+
+        let detail = paged_detail(&[
+            detail_with_files(0..100, 250, Some("c1")),
+            GRAPHQL_RATE_LIMITED.to_string(),
+        ]);
+        let until = 1_700_003_600;
+        assert_eq!(detail.viewed_gap, Some(ViewedGap::Limited { until }));
+        let mut state = in_queues();
+        state.forge.limited.clear();
+        let (tag, number) = detail_load(&press(&mut state, KeyCode::Enter));
+        state.update(AppIntent::Review(ReviewIntent::PrDetailLoaded {
+            tag,
+            number,
+            repo: Some(repo()),
+            result: Ok(Some(detail)),
+        }));
+        let shown = state.review.detail.as_ref().unwrap();
+        assert_eq!(shown.viewed.len(), 100);
+        assert_eq!(state.review.detail_fetch.error, None);
+        assert_eq!(state.forge.limited.get("github.com"), Some(&until));
+        // The detail's `r` now waits for the limit instead of asking.
+        assert_eq!(state.update(AppIntent::Review(ReviewIntent::Refresh)), []);
+        assert_eq!(
+            state.review.detail_fetch.error,
+            Some(ReviewProblem::Limited(until))
+        );
+
+        // A detail whose every page was read clears the host's limit.
+        let mut state = in_queues();
+        state.forge.limited.insert("github.com".into(), NOW - 1);
+        let state = {
+            let (tag, number) = detail_load(&press(&mut state, KeyCode::Enter));
+            state.update(AppIntent::Review(ReviewIntent::PrDetailLoaded {
+                tag,
+                number,
+                repo: Some(repo()),
+                result: Ok(Some(fixture_detail())),
+            }));
+            state
+        };
+        assert!(state.forge.limited.is_empty());
     }
 
     #[test]
