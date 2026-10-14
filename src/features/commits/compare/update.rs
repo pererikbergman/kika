@@ -55,7 +55,7 @@ impl AppState {
             self.diff_mark = None;
             self.notice = Some(MARK_CLEARED.into());
         } else {
-            self.notice_text = Some(format!("Marked {} for diffing", mark.label()));
+            self.notice = Some(format!("Marked {} for diffing", mark.label()).into());
             self.diff_mark = Some(mark);
         }
     }
@@ -110,7 +110,7 @@ impl AppState {
             Ok(range) => range,
             Err(message) => {
                 let first = message.lines().next().unwrap_or_default();
-                self.notice_text = Some(format!("Could not compare: {first}"));
+                self.notice = Some(format!("Could not compare: {first}").into());
                 return vec![];
             }
         };
@@ -155,7 +155,7 @@ mod tests {
         let mut state = with_log(4);
         type_text(&mut state, "jjM");
         assert_eq!(
-            state.notice_text.as_deref(),
+            state.notice.as_deref(),
             Some(format!("Marked {} for diffing", &oid(2)[33..]).as_str())
         );
         type_text(&mut state, "j");
@@ -333,9 +333,28 @@ mod tests {
 
         assert_eq!(state.commits.open, None);
         assert_eq!(
-            state.notice_text.as_deref(),
+            state.notice.as_deref(),
             Some("Could not compare: No branch named topic")
         );
         assert_eq!(state.busy_count(), busy);
+    }
+
+    #[test]
+    fn a_failure_with_terminal_escapes_shows_them_harmlessly() {
+        let mut state = with_branches();
+        type_text(&mut state, "Mj");
+        let (tag, ..) = resolve(&press(&mut state, KeyCode::Enter));
+
+        state.update(AppIntent::Commits(CommitsIntent::Compare(
+            CompareIntent::Resolved {
+                tag,
+                result: Err("No branch \x1b[2Jtopic\u{202E}".into()),
+            },
+        )));
+
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("Could not compare: No branch \u{FFFD}[2Jtopic<U+202E>")
+        );
     }
 }

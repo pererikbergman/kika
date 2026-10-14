@@ -399,10 +399,12 @@ mod tests {
         }
         items(MenuId::Stash)
             .iter()
-            .map(|item| match (item.disabled)(&state) {
-                Some(std::borrow::Cow::Borrowed(reason)) => Some(reason),
-                Some(owned) => panic!("not fixed text: {owned}"),
-                None => None,
+            .map(|item| {
+                (item.disabled)(&state).map(|reason| {
+                    reason
+                        .as_fixed()
+                        .unwrap_or_else(|| panic!("not fixed text: {reason}"))
+                })
             })
             .collect()
     }

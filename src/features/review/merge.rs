@@ -160,7 +160,7 @@ impl AppState {
         }
         let seq = self.take_seq();
         let tag = self.user_tag(seq);
-        self.notice_text = Some(format!("Merging #{}…", confirm.number));
+        self.notice = Some(format!("Merging #{}…", confirm.number).into());
         self.pr_merge = Some(PrMerging {
             seq,
             number: confirm.number,
@@ -199,7 +199,7 @@ impl AppState {
         }
         match result {
             Ok(()) => {
-                self.notice_text = Some(format!("Merged #{number} ({})", merging.method.label()));
+                self.notice = Some(format!("Merged #{number} ({})", merging.method.label()).into());
                 if let Some(detail) = self.review.detail.as_mut().filter(|d| d.number == number) {
                     detail.state = PrState::Merged;
                 }
@@ -614,7 +614,7 @@ mod tests {
                 ci: Some(CiState::Success),
             }
         );
-        assert_eq!(state.notice_text.as_deref(), Some("Merged #12 (squash)"));
+        assert_eq!(state.notice.as_deref(), Some("Merged #12 (squash)"));
         // The badges are asked for again, once.
         let loads: Vec<Tag> = effects
             .iter()

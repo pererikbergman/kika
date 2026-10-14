@@ -216,7 +216,8 @@ pub struct AppState {
     /// The first help row shown, for a list taller than the screen.
     pub help_scroll: usize,
     pub commit: CommitFlow,
-    /// Why the last key did nothing, shown in the bottom bar until the next key.
+    /// One line on the bottom bar until the next key: why the last key did
+    /// nothing, or what just happened ("Copied ...", "Bisect found ...").
     pub notice: Option<Reason>,
     /// Menus, questions, prompts and errors, drawn bottom to top. The top
     /// one takes the keys; closing it shows the one below again.
@@ -281,9 +282,6 @@ pub struct AppState {
     /// The commits a paste cherry-picks. Kept across checkouts, so they
     /// can be copied on one branch and pasted on another.
     pub copied: CopiedCommits,
-    /// A notice whose words are made at run time, such as a count. Shown
-    /// and cleared like `notice`, which wins when both are set.
-    pub notice_text: Option<String>,
     /// The filter or search being typed on the bottom bar, if one is.
     pub input: Option<ListInput>,
     /// Pull requests per branch; off unless the global config names hosts.
@@ -371,7 +369,6 @@ impl AppState {
             stash_draft: None,
             command_log: CommandLog::default(),
             copied: CopiedCommits::default(),
-            notice_text: None,
             input: None,
             diff_mark: None,
             pending_diff: None,
@@ -417,7 +414,6 @@ impl AppState {
         match intent {
             AppIntent::Key(key) => {
                 self.notice = None;
-                self.notice_text = None;
                 let focus = self.key_focus();
                 match keymap::resolve(keymap::registry(), &self.keymap, focus, self, key) {
                     Resolution::Run(binding) => return self.update(binding.intent.clone()),
@@ -602,7 +598,7 @@ impl AppState {
             AppIntent::AbortOperation if bisect::bisect_only(self) => self.ask_bisect_reset(),
             AppIntent::AbortOperation => self.ask_abort(),
             AppIntent::CopyFailed(why) => {
-                self.notice_text = None;
+                self.notice = None;
                 self.push_error(ErrorPopup::new(
                     "Could not copy",
                     &why,
@@ -1686,11 +1682,8 @@ impl AppState {
     /// Send `text` to the clipboard and say so; a failure replaces the
     /// notice with an error.
     pub(crate) fn copy_text(&mut self, what: CopyWhat, text: String) -> Vec<Effect> {
-        self.notice_text = Some(format!(
-            "Copied {}: {}",
-            what.label(),
-            clipboard::preview(&text)
-        ));
+        self.notice =
+            Some(format!("Copied {}: {}", what.label(), clipboard::preview(&text)).into());
         vec![Effect::Clipboard(text)]
     }
 
@@ -2240,6 +2233,22 @@ mod tests {
         assert_eq!(state.files.selected, 0);
         press(&mut state, KeyCode::Char('q'));
         assert!(state.should_quit);
+    }
+
+    #[test]
+    fn the_next_key_clears_a_notice_made_at_run_time() {
+        let mut state = copy_ready();
+        state.update(AppIntent::Commits(CommitsIntent::Copy(
+            CopyIntent::CopyText(CopyWhat::Hash),
+        )));
+        assert!(
+            state
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.starts_with("Copied "))
+        );
+        press(&mut state, KeyCode::Char('x'));
+        assert_eq!(state.notice, None);
     }
 
     #[test]
@@ -4167,7 +4176,7 @@ mod tests {
 
     fn assert_refused(state: &AppState, effects: &[Effect], reason: &str, name: &str) {
         assert_eq!(effects, [], "{name}");
-        assert_eq!(state.notice, Some(reason.into()), "{name}");
+        assert_eq!(state.notice.as_deref(), Some(reason), "{name}");
         assert_eq!(state.popups, [], "{name}");
         assert_eq!(state.held_seq(), None, "{name}");
     }
@@ -4896,7 +4905,7 @@ mod tests {
             [cid(&"0".repeat(40)), cid(&"2".repeat(40))]
         );
         assert_eq!(
-            state.notice_text.as_deref(),
+            state.notice.as_deref(),
             Some("Copied 2 (1 merge skipped, 2 copied)")
         );
         assert_eq!(state.commits.list.range_anchor, None);
@@ -4907,7 +4916,7 @@ mod tests {
         press_char(&mut state, 'c');
         assert!(state.copied.is_empty());
         assert_eq!(
-            state.notice_text.as_deref(),
+            state.notice.as_deref(),
             Some("Removed 2 (1 merge skipped, 0 copied)")
         );
     }
@@ -5127,8 +5136,8 @@ mod tests {
             )));
             assert_eq!(effects, [Effect::Clipboard(text.into())], "{what:?}");
             assert_eq!(
-                state.notice_text,
-                Some(format!("Copied {label}: {text}")),
+                state.notice.as_deref(),
+                Some(format!("Copied {label}: {text}").as_str()),
                 "{what:?}"
             );
         }
@@ -5139,8 +5148,8 @@ mod tests {
         )));
         assert_eq!(effects, [Effect::Clipboard("s".repeat(41))]);
         assert_eq!(
-            state.notice_text,
-            Some(format!("Copied subject: {}…", "s".repeat(40)))
+            state.notice.as_deref(),
+            Some(format!("Copied subject: {}…", "s".repeat(40)).as_str())
         );
     }
 
@@ -5227,10 +5236,7 @@ mod tests {
             },
         )));
         assert_eq!(effects, [Effect::Clipboard("subj\n\nbody".into())]);
-        assert_eq!(
-            state.notice_text.as_deref(),
-            Some("Copied message: subj  body")
-        );
+        assert_eq!(state.notice.as_deref(), Some("Copied message: subj  body"));
         assert_eq!(
             (state.busy_count(), state.pending_copy.clone()),
             (busy, None)
@@ -5259,7 +5265,7 @@ mod tests {
             CopyIntent::CopyText(CopyWhat::Hash),
         )));
         state.update(AppIntent::CopyFailed(clipboard::TOO_LONG.into()));
-        assert_eq!(state.notice_text, None);
+        assert_eq!(state.notice, None);
         assert!(
             matches!(state.popups.last(), Some(Popup::Error(e)) if e.message == clipboard::TOO_LONG)
         );
@@ -5269,10 +5275,10 @@ mod tests {
         state.update(AppIntent::Commits(CommitsIntent::Copy(
             CopyIntent::CopyText(CopyWhat::Hash),
         )));
-        assert!(state.notice_text.is_some());
+        assert!(state.notice.is_some());
         let late = "false failed: exit status: 1. Check clipboard.command in the global config.";
         state.update(AppIntent::CopyFailed(late.into()));
-        assert_eq!(state.notice_text, None);
+        assert_eq!(state.notice, None);
         assert!(matches!(
             state.popups.last(),
             Some(Popup::Error(e)) if e.title == "Could not copy" && e.message == late

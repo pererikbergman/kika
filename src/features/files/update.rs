@@ -130,11 +130,12 @@ impl AppState {
         }
         match result {
             Ok(IgnoreAdded { pattern, added }) => {
-                self.notice_text = Some(if added {
+                let text = if added {
                     format!("Added {pattern} to .gitignore")
                 } else {
                     format!("{pattern} is already in .gitignore")
-                });
+                };
+                self.notice = Some(text.into());
                 self.refresh_status()
             }
             Err(message) => {
@@ -407,7 +408,7 @@ mod tests {
             }),
         }));
         assert_eq!(
-            state.notice_text.as_deref(),
+            state.notice.as_deref(),
             Some("Added /build\\[1].log to .gitignore")
         );
         assert!(

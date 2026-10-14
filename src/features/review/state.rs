@@ -633,7 +633,7 @@ impl AppState {
         };
         // Its own argument, last: never joined into another one.
         argv.push(url.clone().into());
-        self.notice_text = Some(format!("Opening {url}"));
+        self.notice = Some(format!("Opening {url}").into());
         vec![Effect::OpenUrl { argv }]
     }
 }

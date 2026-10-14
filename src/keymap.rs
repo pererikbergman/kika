@@ -22,8 +22,8 @@ use crate::layout::{Panel, SidePanel};
 use crate::model::{AppState, Focus};
 
 /// Why a key or menu item cannot run, shown to the user. Most reasons are
-/// fixed text; some name a branch or a commit.
-pub type Reason = std::borrow::Cow<'static, str>;
+/// fixed text; some name a branch or a commit, which `Notice` makes safe.
+pub type Reason = crate::notice::Notice;
 
 /// A key as pressed: just the code and modifiers, without the event kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

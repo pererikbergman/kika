@@ -741,7 +741,7 @@ mod tests {
     fn a_rewrite_says_why_not_in_order() {
         use crate::git::repo_state::Operation;
         let why = |state: &AppState, choice| {
-            keys::patch_rewrite_disabled(state, choice).map(|r| r.into_owned())
+            keys::patch_rewrite_disabled(state, choice).map(String::from)
         };
         let mut state = with_patch(2);
         let picks = state.custom_patch.take();
