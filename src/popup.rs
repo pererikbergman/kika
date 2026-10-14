@@ -779,7 +779,7 @@ mod tests {
     fn the_detached_checkout_question_warns_and_yes_checks_out() {
         use kika_git::commit_files::CommitId;
         let id = CommitId::parse("abc1234").unwrap();
-        let ask = crate::features::commits::checkout_question("abc1234".into(), id.clone());
+        let ask = crate::features::commits::checkout_question("abc1234".into(), id.clone(), None);
         assert_eq!(ask.title, "Detached checkout");
         assert!(ask.text.contains("detached HEAD"));
         assert_eq!(ask.answer, Answer::YOrEnter);

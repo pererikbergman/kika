@@ -315,6 +315,53 @@ mod tests {
     }
 
     #[test]
+    fn the_detached_checkout_question_refuses_once_head_has_moved() {
+        let detached_elsewhere = |state: &mut AppState| {
+            state.branch.as_mut().unwrap().head = Head::Detached("c2".into());
+        };
+        let onto_a_branch = |state: &mut AppState| state.branch = Some(on_branch("main"));
+        let by_y = |state: &mut AppState| press_char(state, 'y');
+        let by_enter = |state: &mut AppState| press(state, KeyCode::Enter);
+        let by_intent = |state: &mut AppState| state.update(AppIntent::ConfirmYes);
+        type Yes<'a> = &'a dyn Fn(&mut AppState) -> Vec<Effect>;
+        for (name, move_head) in [
+            ("detached", &detached_elsewhere as &dyn Fn(&mut AppState)),
+            ("branch", &onto_a_branch),
+        ] {
+            for (how, answer) in [
+                ("y", &by_y as Yes),
+                ("enter", &by_enter),
+                ("confirm_yes", &by_intent),
+            ] {
+                let (mut state, _) =
+                    checked(AppIntent::Commits(CommitsIntent::Checkout), Ok(vec![]));
+                let asked_from = match state.popups.as_slice() {
+                    [Popup::Question(q)] => q.head.clone(),
+                    popups => panic!("{name}/{how}: {popups:?}"),
+                };
+                assert_eq!(asked_from, Some(cid("c0")), "{name}/{how}");
+                move_head(&mut state);
+                assert_eq!(answer(&mut state), vec![], "{name}/{how}");
+                assert_eq!(state.popups, [], "{name}/{how}");
+                assert_eq!(
+                    state.notice,
+                    Some("HEAD moved; try again".into()),
+                    "{name}/{how}"
+                );
+                assert_eq!(state.held_seq(), None, "{name}/{how}");
+            }
+        }
+
+        // Where it was asked from, the answer checks out the planned commit.
+        let (mut state, _) = checked(AppIntent::Commits(CommitsIntent::Checkout), Ok(vec![]));
+        let effects = press_char(&mut state, 'y');
+        let (tag, op) = op_of(&effects);
+        assert_eq!(op, GitOp::CheckoutCommit(cid("c1")));
+        assert_eq!(state.held_seq(), Some(tag.seq));
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
     fn the_hard_reset_question_waits_for_an_operation_in_progress() {
         for operation in [Operation::Merge, Operation::Rebase] {
             let mut state = on_commit();

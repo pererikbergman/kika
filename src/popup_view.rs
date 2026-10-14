@@ -1115,7 +1115,7 @@ mod tests {
         let id = kika_git::commit_files::CommitId::parse("abcdef0123").unwrap();
         let short_oid = state.commits.short_oid(&id);
         state.popups = vec![Popup::Question(
-            crate::features::commits::checkout_question(short_oid, id),
+            crate::features::commits::checkout_question(short_oid, id, None),
         )];
         let (_, rows) = draw(&state, 100, 12);
         assert!(contains(&rows, " Detached checkout "), "{rows:#?}");

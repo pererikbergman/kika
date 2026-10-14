@@ -51,13 +51,13 @@ impl AppState {
 
     /// What `op` does once nothing would be left behind: a checkout and a
     /// hard reset still ask their own question, soft and mixed run. `head`
-    /// is the detached `HEAD` the hard reset is asked from.
+    /// is the detached `HEAD` either question is asked from.
     fn move_head_now(&mut self, op: GitOp, head: Option<CommitId>) -> Vec<Effect> {
         match op {
             GitOp::CheckoutCommit(id) => {
                 let short_oid = self.commits.short_oid(&id);
                 self.popups
-                    .push(Popup::Question(checkout_question(short_oid, id)));
+                    .push(Popup::Question(checkout_question(short_oid, id, head)));
                 vec![]
             }
             GitOp::Reset {
@@ -182,7 +182,11 @@ mod tests {
         );
         assert_eq!(
             state.popups,
-            [Popup::Question(checkout_question("c1".into(), cid("c1")))]
+            [Popup::Question(checkout_question(
+                "c1".into(),
+                cid("c1"),
+                None
+            ))]
         );
 
         let mut state = on_commit();
@@ -198,7 +202,11 @@ mod tests {
         assert_eq!(effects, vec![]);
         assert_eq!(
             state.popups,
-            [Popup::Question(checkout_question("c1".into(), cid("c1")))]
+            [Popup::Question(checkout_question(
+                "c1".into(),
+                cid("c1"),
+                Some(cid("c0"))
+            ))]
         );
 
         for mode in [ResetMode::Soft, ResetMode::Mixed] {
