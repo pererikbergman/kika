@@ -16,3 +16,7 @@ serde_json = "1.0"
 
 [dev-dependencies]
 kika-git = { path = "../kika-git", features = ["test-support"] }
+
+[target.'cfg(unix)'.dependencies]
+# Only the open flags that keep a store file from being followed or blocking.
+libc = "0.2"

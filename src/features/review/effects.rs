@@ -1,10 +1,12 @@
 //! The I/O behind the review effects: reading the queues and a pull
 //! request through `gh`, checking for and fetching its commits, listing
-//! its files and its commits, planning a checkout of its head, and
-//! merging it. Each answers with exactly one intent; none blocks the
+//! its files and its commits, planning a checkout of its head,
+//! merging it, and reading and writing its pending review in the state
+//! directory. Each answers with exactly one intent; none blocks the
 //! event loop.
 
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -14,6 +16,7 @@ use crate::effect::{AnswerSlot, Bridge, Tag};
 use crate::features::review::ReviewIntent;
 use crate::intent::AppIntent;
 use kika_forge::merge::MergeMethod;
+use kika_forge::pending::{self, PendingError, PendingKey, PendingReview};
 use kika_forge::review::{self, ReviewError, ReviewLoad};
 use kika_forge::task::ForgeContext;
 use kika_forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
@@ -21,6 +24,7 @@ use kika_git::GitRunner;
 use kika_git::branches::BranchName;
 use kika_git::commit_files::{CommitId, CommitRange};
 use kika_git::remotes::RemoteName;
+use kika_git::safe_text::terminal_safe;
 
 /// Read the review queues; always answered by one `ReviewIntent::QueuesLoaded`.
 pub(crate) fn load_queues(
@@ -345,6 +349,64 @@ pub(crate) fn set_file_viewed(
         // A panic still answers, or the mark would stay in flight.
         |_| Err(CreateError::Status(ForgeStatus::Failed)),
         move |result| answer(path, result),
+    );
+}
+
+/// Read the pending review stored for `key` in `store`; with no store
+/// there is none. Local files only. Always answered by one
+/// `ReviewIntent::PendingLoaded`.
+pub(crate) fn load_pending(
+    store: Option<PathBuf>,
+    tx: UnboundedSender<AppIntent>,
+    tag: Tag,
+    key: PendingKey,
+) {
+    let file = store.as_ref().map(|dir| dir.join(key.file_name()));
+    background::run(
+        tx,
+        move || match store {
+            Some(dir) => pending::read(&dir, &key),
+            None => Ok(None),
+        },
+        |_| Err(PendingError::Unreadable("reading it crashed")),
+        move |result| AppIntent::Review(ReviewIntent::PendingLoaded { tag, result, file }),
+    );
+}
+
+/// The newest save written to each pending-review file this run, so a
+/// save that lost a race with a later one never puts older comments back.
+static WRITTEN: Mutex<Vec<(PathBuf, u64)>> = Mutex::new(Vec::new());
+
+/// Write `review` for `key` in `store`. Saves of one file run one at a
+/// time, and one older (by `tag.seq`) than a save already written is
+/// skipped. Local files only. Always answered by one
+/// `ReviewIntent::PendingSaved`.
+pub(crate) fn save_pending(
+    store: Option<PathBuf>,
+    tx: UnboundedSender<AppIntent>,
+    tag: Tag,
+    key: PendingKey,
+    review: PendingReview,
+) {
+    background::run(
+        tx,
+        move || {
+            let Some(dir) = store else {
+                return Err("No place to keep the pending review".to_string());
+            };
+            let file = dir.join(key.file_name());
+            let mut written = WRITTEN.lock().unwrap_or_else(|e| e.into_inner());
+            if written.iter().any(|(f, seq)| *f == file && *seq > tag.seq) {
+                return Ok(());
+            }
+            let result = pending::write(&dir, &key, &review)
+                .map_err(|e| terminal_safe(e.to_string().as_bytes()));
+            written.retain(|(f, _)| *f != file);
+            written.push((file, tag.seq));
+            result
+        },
+        background::crashed("Saving the pending review"),
+        move |result| AppIntent::Review(ReviewIntent::PendingSaved { tag, result }),
     );
 }
 

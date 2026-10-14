@@ -4,7 +4,9 @@
 //! host the global config lists.
 
 use super::checkout::PrCheckout;
+use super::comment_editor::Composer;
 use super::files::PrFiles;
+use super::pending::PendingSlot;
 use crate::effect::{Effect, Tag};
 use crate::intent::AppIntent;
 use crate::keymap::Reason;
@@ -115,6 +117,12 @@ pub struct ReviewState {
     pub conversation: Option<RenderedBody>,
     /// The first line of the conversation shown.
     pub conversation_scroll: usize,
+    /// The open pull request's pending review, from its files screen on.
+    pub pending: Option<PendingSlot>,
+    /// A comment being written, over the files screen.
+    pub composer: Option<Composer>,
+    /// The cursor of the pending-comment list, while it is open.
+    pub pending_list: Option<usize>,
 }
 
 /// A description as drawn at `width`.
@@ -147,6 +155,9 @@ impl Default for ReviewState {
             discussion_fetch: ReviewFetch::default(),
             conversation: None,
             conversation_scroll: 0,
+            pending: None,
+            composer: None,
+            pending_list: None,
         }
     }
 }
@@ -626,17 +637,19 @@ impl AppState {
     /// Back to the workspace, review mode started afresh next time, and
     /// the workspace loaded or refreshed.
     pub(super) fn leave_review(&mut self) -> Vec<Effect> {
+        // A pending-review change still waiting on a save goes out first.
+        let mut effects = self.drop_pending_slot();
         self.context = Context::Workspace;
         self.review.restart();
         if self.workspace_started {
-            let mut effects = self.update(AppIntent::RefreshStatus);
+            effects.extend(self.update(AppIntent::RefreshStatus));
             // The review may have streamed its own diff into the
             // pane; a commit's or stash's open file gets it back.
             effects.extend(self.reload_open_file_diff());
-            effects
         } else {
-            self.start()
+            effects.extend(self.start());
         }
+        effects
     }
 
     /// Esc: from a pull request back to the same queue and row; in the
@@ -657,12 +670,13 @@ impl AppState {
                 self.review.detail_fetch = ReviewFetch::default();
                 self.review.discussion = None;
                 self.review.discussion_fetch = ReviewFetch::default();
+                let mut effects = self.drop_pending_slot();
                 // A session started on one pull request loads its queues
                 // only now.
                 if self.review.queues.is_none() && !self.review.queues_fetch.loading {
-                    return self.load_review_queues();
+                    effects.extend(self.load_review_queues());
                 }
-                vec![]
+                effects
             }
             ReviewScreen::Queue if !self.review.filter.is_empty() => {
                 self.review.filter.clear();

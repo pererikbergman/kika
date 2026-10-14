@@ -7,6 +7,7 @@
 //! with `c` (`commit_view.rs`); the marks stay the pull request's, and
 //! the selected file stays selected, by path, when the new view lists it.
 
+use super::comment_pick::CommentPick;
 use super::git::{CommitsHere, FileCounts, PrCommit, PrFileRow};
 use super::reader::ThreadReader;
 use super::state::{ReviewScreen, ReviewState};
@@ -111,6 +112,8 @@ pub struct PrFiles {
     pub jump: Option<usize>,
     /// The thread read in full over the screen, while it is open.
     pub reader: Option<ThreadReader>,
+    /// The diff rows a comment is being picked on, in pick mode.
+    pub pick: Option<CommentPick>,
 }
 
 impl PrFiles {
@@ -134,6 +137,7 @@ impl PrFiles {
             thread: None,
             jump: None,
             reader: None,
+            pick: None,
         }
     }
 
@@ -294,7 +298,9 @@ impl AppState {
         let tag = self.files_tag();
         self.review.screen = ReviewScreen::Files(number);
         self.review.files = Some(PrFiles::begin(number, head, base, tag.seq));
-        self.check_review_commits(tag)
+        let mut effects = self.check_review_commits(tag);
+        effects.extend(self.load_pending_review(number));
+        effects
     }
 
     fn check_review_commits(&mut self, tag: Tag) -> Vec<Effect> {
@@ -452,6 +458,8 @@ impl AppState {
 
     /// Stream the selected file's diff over the range shown, from `start`.
     pub(super) fn review_file_diff(&mut self, start: DiffStart) -> Vec<Effect> {
+        // Rows picked on the diff shown are not this one's.
+        self.end_comment_pick();
         let request = self.review.files.as_ref().and_then(|files| {
             let range = files.range.as_ref()?;
             let row = files.selected()?;
@@ -502,6 +510,8 @@ impl AppState {
             return vec![];
         };
         self.review.screen = ReviewScreen::Detail(files.number);
+        self.review.composer = None;
+        self.review.pending_list = None;
         self.close_diff()
     }
 
@@ -587,6 +597,11 @@ pub(crate) mod tests {
     }
 
     fn check_tag(effects: &[Effect]) -> Tag {
+        // Opening the screen also reads its pending review.
+        let effects = match effects {
+            [check @ .., Effect::LoadPendingReview { .. }] => check,
+            all => all,
+        };
         match effects {
             [
                 Effect::CheckReviewCommits {
