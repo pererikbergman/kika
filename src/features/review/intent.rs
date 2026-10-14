@@ -5,7 +5,7 @@
 use super::{CommitsHere, PrFileRow};
 use crate::effect::Tag;
 use kika_forge::review::{PrDetail, Queues, ReviewError};
-use kika_forge::{CreateError, ForgeRepo};
+use kika_forge::{CreateError, ForgeHost, ForgeRepo};
 use kika_git::commit_files::CommitRange;
 
 // `PrDetailLoaded` carries the pull request as it did in `AppIntent`,
@@ -79,6 +79,8 @@ pub(crate) enum ReviewIntent {
     /// or why not.
     ViewedSet {
         tag: Tag,
+        /// The host the mark went to, where a rate limit is recorded.
+        host: ForgeHost,
         number: u64,
         path: String,
         viewed: bool,

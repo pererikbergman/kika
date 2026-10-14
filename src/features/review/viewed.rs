@@ -109,6 +109,7 @@ impl AppState {
     pub(crate) fn viewed_set(
         &mut self,
         tag: Tag,
+        host: &ForgeHost,
         number: u64,
         path: String,
         viewed: bool,
@@ -135,12 +136,10 @@ impl AppState {
         match result {
             Ok(()) => self.take_viewed_mark(number, sent),
             Err(error) => {
-                // Remembered as for a merge, so the next `v` asks nobody
-                // until it resets.
-                if let CreateError::RateLimited { until } = error
-                    && let Ok((host, _)) = self.review_forge_target()
-                {
-                    self.forge.record_rate_limit(&host, until);
+                // Remembered against the host it came from, as for a
+                // merge, so the next `v` asks nobody until it resets.
+                if let CreateError::RateLimited { until } = error {
+                    self.forge.record_rate_limit(host, until);
                 }
                 self.notice = Some(error.message().into());
             }
@@ -149,6 +148,8 @@ impl AppState {
 
     /// Show the mark GitHub took on its row and in the detail's list.
     fn take_viewed_mark(&mut self, number: u64, mark: ViewedMark) {
+        let word = if mark.viewed { "viewed" } else { "not viewed" };
+        self.notice = Some(format!("Marked {} {word}", mark.path).into());
         let state = match mark.viewed {
             true => ViewedState::Viewed,
             false => ViewedState::Unviewed,
@@ -166,11 +167,6 @@ impl AppState {
                 None => detail.viewed.push((mark.path, state)),
             }
         }
-        let done = match mark.viewed {
-            true => "Marked viewed",
-            false => "Marked not viewed",
-        };
-        self.notice = Some(done.into());
     }
 }
 
@@ -187,7 +183,7 @@ mod tests {
     use crate::intent::AppIntent;
     use kika_forge::allow::AllowRule;
     use kika_forge::review::ViewedState;
-    use kika_forge::{ForgeHost, ForgeStatus, REFRESH_LIMITED};
+    use kika_forge::{ForgeStatus, REFRESH_LIMITED};
     use kika_git::commit_files::{CommitFile, CommitId, CommitRange};
 
     const NOW: i64 = 1_700_000_000;
@@ -283,9 +279,23 @@ mod tests {
         sent: &(Tag, u64, String, bool),
         result: Result<(), CreateError>,
     ) {
+        answer_from(state, &github_host(), sent, result);
+    }
+
+    fn github_host() -> ForgeHost {
+        ForgeHost::parse("github.com").unwrap()
+    }
+
+    fn answer_from(
+        state: &mut AppState,
+        host: &ForgeHost,
+        sent: &(Tag, u64, String, bool),
+        result: Result<(), CreateError>,
+    ) {
         let (tag, number, path, viewed) = sent.clone();
         state.update(AppIntent::Review(ReviewIntent::ViewedSet {
             tag,
+            host: host.clone(),
             number,
             path,
             viewed,
@@ -375,7 +385,7 @@ mod tests {
             viewed_in_detail(&state, "docs/café.md"),
             Some(ViewedState::Viewed)
         );
-        assert_eq!(state.notice.as_deref(), Some("Marked viewed"));
+        assert_eq!(state.notice.as_deref(), Some("Marked docs/café.md viewed"));
 
         // Back to not viewed.
         let sent = mark(&mut state);
@@ -387,7 +397,10 @@ mod tests {
             viewed_in_detail(&state, "docs/café.md"),
             Some(ViewedState::Unviewed)
         );
-        assert_eq!(state.notice.as_deref(), Some("Marked not viewed"));
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("Marked docs/café.md not viewed")
+        );
 
         // A file GitHub's list lacked is added to it.
         select(&mut state, 3);
@@ -450,6 +463,25 @@ mod tests {
         assert_eq!(marks(&state)[0], Some(ViewedState::Viewed));
         assert_eq!(type_char(&mut state, 'v'), []);
         assert_eq!(state.notice.as_deref(), Some(REFRESH_LIMITED));
+    }
+
+    #[test]
+    fn a_rate_limit_is_recorded_against_the_host_the_mark_went_to() {
+        let mut state = ready();
+        let sent = mark(&mut state);
+        // The repository's remote changes host while the call runs.
+        state.forge.repo = Some(kika_forge::ForgeRepo {
+            host: "gitlab.example".into(),
+            ..repo()
+        });
+        answer_from(
+            &mut state,
+            &github_host(),
+            &sent,
+            Err(CreateError::RateLimited { until: NOW + 600 }),
+        );
+        assert_eq!(state.forge.limited.get("github.com"), Some(&(NOW + 600)));
+        assert_eq!(state.forge.limited.get("gitlab.example"), None);
     }
 
     #[test]
@@ -555,13 +587,43 @@ mod tests {
         assert_eq!(path, "docs/café.md");
     }
 
-    fn draw(state: &AppState) -> Vec<String> {
+    fn terminal(state: &AppState, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| crate::view::render(state, frame))
             .unwrap();
-        crate::view::buffer_rows(terminal.backend().buffer())
+        terminal.backend().buffer().clone()
+    }
+
+    fn draw_at(state: &AppState, width: u16, height: u16) -> Vec<String> {
+        crate::view::buffer_rows(&terminal(state, width, height))
+    }
+
+    fn draw(state: &AppState) -> Vec<String> {
+        draw_at(state, 80, 24)
+    }
+
+    /// The style of the first cell where `text` starts on screen.
+    fn style_at(state: &AppState, width: u16, height: u16, text: &str) -> ratatui::style::Style {
+        let buffer = terminal(state, width, height);
+        for y in 0..height {
+            for x in 0..width {
+                let from: String = (x..width).map(|x| buffer[(x, y)].symbol()).collect();
+                if from.starts_with(text) {
+                    return buffer[(x, y)].style();
+                }
+            }
+        }
+        panic!("{text:?} not drawn");
+    }
+
+    /// The drawn row of `path`.
+    fn file_row(rows: &[String], path: &str) -> String {
+        rows.iter()
+            .find(|r| r.contains(path) && r.contains("+1"))
+            .cloned()
+            .unwrap_or_else(|| panic!("{path:?} not in {rows:#?}"))
     }
 
     #[test]
@@ -572,17 +634,109 @@ mod tests {
         let rows = draw(&state);
         let bar = rows.last().unwrap();
         assert!(bar.contains("v viewed"), "{bar:?}");
-        let row = |rows: &[String]| {
-            rows.iter()
-                .find(|r| r.contains("docs/café.md") && r.contains("+1"))
-                .cloned()
-                .unwrap_or_else(|| panic!("{rows:#?}"))
-        };
-        assert!(row(&rows).contains("M   docs/café.md"), "{rows:#?}");
+        let dimmed = Some(ratatui::style::Color::DarkGray);
+        assert_ne!(style_at(&state, 80, 24, "v viewed").fg, dimmed);
+        assert!(file_row(&rows, "docs/café.md").contains("M   docs/café.md"));
+        assert!(rows.iter().any(|r| r.contains("files (1/4)")), "{rows:#?}");
         let sent = mark(&mut state);
         answer(&mut state, &sent, Ok(()));
         let rows = draw(&state);
-        assert!(row(&rows).contains("M ✓ docs/café.md"), "{rows:#?}");
+        assert!(file_row(&rows, "docs/café.md").contains("M ✓ docs/café.md"));
         assert!(rows.iter().any(|r| r.contains("files (2/4)")), "{rows:#?}");
+        assert!(
+            rows.last().unwrap().contains("Marked docs/café.md viewed"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn a_mark_in_flight_shows_a_dim_pending_glyph_in_the_mark_column() {
+        let mut state = ready();
+        state.size = (80, 24);
+        select(&mut state, 2);
+        mark(&mut state);
+        let rows = draw(&state);
+        assert!(file_row(&rows, "docs/café.md").contains("M … docs/café.md"));
+        // One column, so the paths stay lined up with the other rows.
+        let col = |path: &str| {
+            let row = file_row(&rows, path);
+            row[..row.find(path).unwrap()].chars().count()
+        };
+        assert_eq!(col("docs/café.md"), col("src/lib.rs"));
+        let pending = style_at(&state, 80, 24, "… docs/café.md");
+        assert!(pending.add_modifier.contains(ratatui::style::Modifier::DIM));
+        // Only the file asked about.
+        assert!(file_row(&rows, "src/lib.rs").contains("M ~ src/lib.rs"));
+        assert!(file_row(&rows, "src/cache.rs").contains("M ✓ src/cache.rs"));
+    }
+
+    #[test]
+    fn an_unmark_clears_the_tick_and_lowers_the_count() {
+        let mut state = ready();
+        state.size = (80, 24);
+        let sent = mark(&mut state);
+        assert!(file_row(&draw(&state), "src/cache.rs").contains("M … src/cache.rs"));
+        answer(&mut state, &sent, Ok(()));
+        let rows = draw(&state);
+        assert!(file_row(&rows, "src/cache.rs").contains("M   src/cache.rs"));
+        assert!(rows.iter().any(|r| r.contains("files (0/4)")), "{rows:#?}");
+        assert!(
+            rows.last()
+                .unwrap()
+                .contains("Marked src/cache.rs not viewed"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_mark_draws_the_old_mark_and_the_reason() {
+        let mut state = ready();
+        state.size = (80, 24);
+        select(&mut state, 2);
+        let sent = mark(&mut state);
+        let error = CreateError::Refused("Could not resolve to a node".into());
+        answer(&mut state, &sent, Err(error));
+        let rows = draw(&state);
+        assert!(file_row(&rows, "docs/café.md").contains("M   docs/café.md"));
+        assert!(rows.iter().any(|r| r.contains("files (1/4)")), "{rows:#?}");
+        assert!(
+            rows.last().unwrap().contains("Could not resolve to a node"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn on_a_narrow_bar_v_viewed_shows_whole_or_not_at_all() {
+        for (width, height) in [(60, 15), (50, 15), (40, 12), (30, 10), (20, 8)] {
+            let mut state = ready();
+            state.size = (width, height);
+            let rows = draw_at(&state, width, height);
+            let bar = rows.last().unwrap();
+            assert_eq!(bar.chars().count(), usize::from(width), "{bar:?}");
+            if bar.contains("v view") {
+                assert!(bar.contains("v viewed"), "clipped at {width}: {bar:?}");
+            }
+            if width >= 50 {
+                assert!(bar.contains("v viewed"), "dropped at {width}: {bar:?}");
+            }
+            // Drawing with a mark in flight never panics either.
+            mark(&mut state);
+            state.notice = None;
+            draw_at(&state, width, height);
+        }
+    }
+
+    #[test]
+    fn a_disabled_v_stays_on_the_bar_dimmed_like_the_other_disabled_keys() {
+        let mut state = ready();
+        state.size = (80, 24);
+        state.forge.limited.insert("github.com".into(), NOW + 60);
+        assert!(review_viewed_disabled(&state).is_some());
+        let rows = draw(&state);
+        assert!(rows.last().unwrap().contains("v viewed"), "{rows:#?}");
+        let style = style_at(&state, 80, 24, "v viewed");
+        assert_eq!(style.fg, Some(ratatui::style::Color::DarkGray));
+        // An enabled key beside it is not dimmed.
+        assert_ne!(style_at(&state, 80, 24, "Tab list/diff").fg, style.fg);
     }
 }

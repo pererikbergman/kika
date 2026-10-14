@@ -214,9 +214,11 @@ pub(crate) fn set_file_viewed(
     path: String,
     viewed: bool,
 ) {
+    let sent_to = host.clone();
     let answer = move |path: String, result| {
         AppIntent::Review(ReviewIntent::ViewedSet {
             tag,
+            host: sent_to.clone(),
             number,
             path,
             viewed,
@@ -448,9 +450,11 @@ mod tests {
             path: "src/a.rs".into(),
             viewed: false,
         };
-        let answered = |result| {
+        // The answer names the host the mark was sent to.
+        let answered = |host: &ForgeHost, result| {
             Some(AppIntent::Review(ReviewIntent::ViewedSet {
                 tag: forge_tag(),
+                host: host.clone(),
                 number: 42,
                 path: "src/a.rs".into(),
                 viewed: false,
@@ -462,7 +466,7 @@ mod tests {
         Runtime::new(git.clone(), tx)
             .with_forge(client())
             .spawn(mark(github.clone()));
-        assert_eq!(rx.recv().await, answered(Ok(())));
+        assert_eq!(rx.recv().await, answered(&github, Ok(())));
         let [call] = gh.calls().try_into().unwrap();
         let GhCall::Graphql { body } = &call.kind else {
             panic!("{call:?}");
@@ -472,18 +476,18 @@ mod tests {
 
         // Without a forge client, or for a repository `[forge.allow]`
         // leaves out, nothing is asked.
-        let failed = || answered(Err(CreateError::Status(ForgeStatus::Failed)));
+        let failed = |host| answered(host, Err(CreateError::Status(ForgeStatus::Failed)));
         let (tx, mut rx) = mpsc::unbounded_channel();
-        Runtime::new(git.clone(), tx).spawn(mark(github));
-        assert_eq!(rx.recv().await, failed());
+        Runtime::new(git.clone(), tx).spawn(mark(github.clone()));
+        assert_eq!(rx.recv().await, failed(&github));
         let left_out = ForgeHost::parse("github.com")
             .unwrap()
             .with_allow(vec![AllowRule::parse("other").unwrap()]);
         let (tx, mut rx) = mpsc::unbounded_channel();
         Runtime::new(git.clone(), tx)
             .with_forge(client())
-            .spawn(mark(left_out));
-        assert_eq!(rx.recv().await, failed());
+            .spawn(mark(left_out.clone()));
+        assert_eq!(rx.recv().await, failed(&left_out));
         assert_eq!(gh.calls().len(), 1);
         git.assert_done();
     }

@@ -457,7 +457,8 @@ pull request, then to the queue, then to the workspace.
   the Command log; the pull request's id and the file's path travel on its
   input. It is asked only when you press `v`, only on an allowed `github`
   host, and not while that host is rate limited. GitHub keeps the mark per
-  file for the whole pull request. A file past the first 100 can still be
+  file for the whole pull request. While GitHub has not answered yet, the
+  file's mark shows a dim `…`. A file past the first 100 can still be
   marked; its `?` turns to the mark once GitHub takes it. A file whose
   name is not UTF-8 cannot be marked.
 

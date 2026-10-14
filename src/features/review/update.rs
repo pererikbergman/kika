@@ -39,11 +39,12 @@ pub(crate) fn update(state: &mut AppState, intent: ReviewIntent) -> Vec<Effect> 
         ReviewIntent::ToggleViewed => return state.toggle_viewed(),
         ReviewIntent::ViewedSet {
             tag,
+            host,
             number,
             path,
             viewed,
             result,
-        } => state.viewed_set(tag, number, path, viewed, result),
+        } => state.viewed_set(tag, &host, number, path, viewed, result),
         ReviewIntent::QueuesLoaded { tag, repo, result } => {
             state.review_queues_loaded(tag, repo, result)
         }

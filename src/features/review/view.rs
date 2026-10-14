@@ -326,7 +326,14 @@ fn file_lines(files: &PrFiles, inner: Rect) -> Vec<Line<'static>> {
         .enumerate()
         .skip(start)
         .take(height)
-        .map(|(i, row)| file_row(row, i == files.cursor, width))
+        .map(|(i, row)| {
+            // The mark GitHub has been asked for and not yet answered.
+            let pending = files
+                .marking
+                .as_ref()
+                .is_some_and(|m| row.file.path.as_bytes() == m.path.as_bytes());
+            file_row(row, i == files.cursor, pending, width)
+        })
         .collect()
 }
 
@@ -335,10 +342,12 @@ const MIN_PATH: usize = 6;
 
 /// `<status> <viewed> <path>  +A −D`, exactly `width` wide (at least the
 /// four columns of status and mark): the path loses its start to fit, and
-/// on a list too narrow for both the counts give way to it.
-fn file_row(row: &PrFile, cursor: bool, width: usize) -> Line<'static> {
+/// on a list too narrow for both the counts give way to it. While its
+/// viewed mark is `pending` on GitHub, the mark is a dim `…`.
+fn file_row(row: &PrFile, cursor: bool, pending: bool, width: usize) -> Line<'static> {
     let colour = status_colour(row.file.status);
     let (mark, mark_style) = match row.viewed {
+        _ if pending => ("…", dim()),
         Some(ViewedState::Viewed) => ("✓", Style::new().fg(Color::Green)),
         Some(ViewedState::Dismissed) => ("~", Style::new().fg(Color::Yellow)),
         Some(ViewedState::Unviewed) => (" ", Style::new()),
@@ -1061,18 +1070,18 @@ mod tests {
         for width in [60, 30, 21, 17] {
             for row in [&wide, &rename] {
                 for cursor in [false, true] {
-                    let line = file_row(row, cursor, width);
+                    let line = file_row(row, cursor, false, width);
                     assert_eq!(row_width(&line), width, "{:?}", row_text(&line));
                 }
             }
         }
-        let text = row_text(&file_row(&rename, false, 60));
+        let text = row_text(&file_row(&rename, false, false, 60));
         assert!(
             text.contains("src/older/name.rs → src/old/name.rs"),
             "{text:?}"
         );
         // Cut from the start, keeping the file name and the counts.
-        let text = row_text(&file_row(&wide, false, 30));
+        let text = row_text(&file_row(&wide, false, false, 30));
         assert!(
             text.contains('…') && text.contains("数据文件.rs"),
             "{text:?}"
@@ -1091,11 +1100,11 @@ mod tests {
             },
             Some(ViewedState::Viewed),
         );
-        let text = row_text(&file_row(&row, false, 12));
+        let text = row_text(&file_row(&row, false, false, 12));
         assert_eq!(width_of(&text), 12, "{text:?}");
         assert!(!text.contains('+'), "{text:?}");
         assert!(text.starts_with("M ✓ …"), "{text:?}");
-        let text = row_text(&file_row(&row, false, 30));
+        let text = row_text(&file_row(&row, false, false, 30));
         assert!(text.ends_with("+120 −45"), "{text:?}");
     }
 
