@@ -16,6 +16,7 @@ use crate::keymap::Reason;
 use crate::model::AppState;
 use kika_forge::anchor::Placement;
 use kika_forge::discussion::PrDiscussion;
+use kika_git::safe_text::sanitize;
 
 const NO_FILE_THREADS: &str = "No review threads on this file";
 const NO_MORE: &str = "No more threads on this file";
@@ -78,6 +79,18 @@ fn where_label(scope: &ThreadScope, t: usize) -> String {
         Some(placement) => top_label(thread, placement),
         None => String::new(),
     }
+}
+
+/// The shown thread's file and place, as its header names them, made
+/// safe to draw: what a reply's composer says it answers.
+pub(super) fn thread_label(files: &PrFiles, discussion: &PrDiscussion, t: usize) -> String {
+    let path = files
+        .selected()
+        .map(|row| sanitize(row.file.path.as_bytes()))
+        .unwrap_or_default();
+    let scope = ThreadScope::of(files, discussion);
+    let place = sanitize(where_label(&scope, t).as_bytes());
+    format!("{path} · {place}")
 }
 
 /// Every line of thread `t` of the file at `path`, at `width`: a header,
@@ -239,6 +252,25 @@ impl AppState {
         files.thread = reader.shown();
         files.jump = None;
         self.render_thread_reader();
+    }
+
+    /// Open the reader again on the thread GitHub knows as `node_id`,
+    /// after the discussion was read again; nothing when it is no longer
+    /// one of the selected file's threads.
+    pub(super) fn reopen_thread_reader(&mut self, node_id: &str) {
+        let Ok((files, discussion)) = ready_threads(self) else {
+            return;
+        };
+        let found = file_order(files, discussion)
+            .into_iter()
+            .find(|&t| discussion.threads[t].node_id.as_deref() == Some(node_id));
+        let Some(t) = found else {
+            return;
+        };
+        if let Some(files) = &mut self.review.files {
+            files.thread = Some(t);
+        }
+        self.open_thread_reader();
     }
 
     /// `esc`: back to the files screen as it was.

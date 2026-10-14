@@ -1890,6 +1890,7 @@ where it was. Uncommitted changes come along, or git refuses.
 | `review.merge` | `M` | Merge the open pull request on GitHub, after a question only y answers | locked |
 | `review.checkout` | `b` | Check out the open pull request as branch pr/<number> and go to the workspace, after a question only y answers | locked |
 | `review.conversation` | `C` | Show the pull request's conversation: its comments and review bodies, oldest first | |
+| `review.comment_general` | `a` | Write a comment on the pull request, posted to GitHub after a question only y answers | locked |
 | `review.page_down` | `pgdn` | Scroll the pull request or its conversation down a page | |
 | `review.page_up` | `pgup` | Scroll the pull request or its conversation up a page | |
 
@@ -1934,6 +1935,8 @@ lines changed still read `outdated`.
 | `review_thread.page_up` | `pgup` | Scroll the thread up a page | |
 | `review_thread.next` | `]` | Read the file's next review thread, resolved ones included | |
 | `review_thread.prev` | `[` | Read the file's previous review thread, resolved ones included | |
+| `review_thread.reply` | `a` | Write a reply to the thread, posted to GitHub after a question only y answers | locked |
+| `review_thread.resolve` | `R` | Resolve the thread on GitHub, or unresolve it if it is resolved | locked |
 | `review_thread.close` | `esc` | Close the thread and go back to the files | |
 | `review_thread.quit` | `ctrl-c` | Quit Kika | locked |
 
@@ -1957,7 +1960,7 @@ and `?` are typed.
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
-| `review_comment.save` | `ctrl-s` | Keep the comment in the pending review; nothing is posted | |
+| `review_comment.save` | `ctrl-s` | Keep a line comment in the pending review, or ask to post a reply or general comment | |
 | `review_comment.cancel` | `esc` | Close the comment, asking first when it has text | |
 | `review_comment.quit` | `ctrl-c` | Quit Kika | locked |
 
@@ -1978,7 +1981,7 @@ The comment is lost, so `enter` does not answer it.
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
-| `review_comment_confirm.yes` | `y` | Yes, delete or discard the comment | locked |
+| `review_comment_confirm.yes` | `y` | Yes: delete or discard the comment, or post it to GitHub | locked |
 | `review_comment_confirm.no` | `n`, `esc` | No, keep the comment | locked |
 | `review_comment_confirm.quit` | `ctrl-c` | Quit Kika | locked |
 

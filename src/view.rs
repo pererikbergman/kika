@@ -833,6 +833,12 @@ fn list_hints(state: &AppState, focus: KeyScope) -> (Vec<&'static str>, Vec<&'st
             let leading = if clears { vec![ids[0]] } else { vec![] };
             (leading, vec![ids[1], ids[2]])
         }
+        // On the conversation, writing a comment is what there is to do.
+        KeyScope::Review
+            if matches!(state.review.screen, review::ReviewScreen::Conversation(_)) =>
+        {
+            (vec!["review.comment_general"], vec![])
+        }
         KeyScope::Reflog => {
             let leading = if state.commits.reflog.list.filter.is_empty() {
                 vec![]
