@@ -74,7 +74,7 @@ Binding ids and order did not change: `registry_order_is_pinned` passes unedited
 
 ### Security
 
-Destructive `GitOp`s are reached only through a confirm question (`src/confirm_question.rs`) or the range question, never by a feature's `update` returning the run effect directly. Skip (`GitOp::Skip`) first checks, as an effect when it is pressed, for conflict-resolution work done since the stop: a conflict resolved in the index, a conflicted file edited, or, in a rebase, an unstaged change to a tracked file. If the check finds such work, or fails, Skip asks a `y`-only confirm question (#424). Otherwise it runs without one, as a step of the running operation, since there is nothing to lose. The security reviews of #390, #391 and #392 a/b/c confirmed the earlier no-question Skip; with #424, Decision 2's rule holds without an exception for work that can be lost.
+Destructive `GitOp`s are reached only through a confirm question (`src/confirm_question.rs`) or the range question, never by a feature's `update` returning the run effect directly. Skip (`GitOp::Skip`) first checks, as an effect when it is pressed, for work done since the stop: a conflict resolved in the index, a conflicted file edited, in a rebase, an unstaged change to a tracked file, or, at a rebase `edit` or `break` stop, a staged change (#434). If the check finds such work, or fails, Skip asks a `y`-only confirm question (#424). Otherwise it runs without one, as a step of the running operation, since there is nothing to lose. The security reviews of #390, #391 and #392 a/b/c confirmed the earlier no-question Skip; with #424, Decision 2's rule holds without an exception for work that can be lost.
 
 ### Deviations kept
 

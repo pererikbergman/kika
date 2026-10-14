@@ -1683,11 +1683,12 @@ and resetting a bisect drops its marks, so `enter` does not answer it.
 
 ### Skip the stopped commit?
 
-Skipping a rebase, cherry-pick or revert commit loses the conflict resolution
-done since the stop, so `enter` does not answer it. It is only asked when
-there is such work: a conflict resolved in the index, a conflicted file
-edited, or, in a rebase, an unstaged change to a tracked file. If Kika cannot
-tell, it asks. With no work since the stop, `s` skips right away.
+Skipping a rebase, cherry-pick or revert commit loses the work done since
+the stop, so `enter` does not answer it. It is only asked when there is such
+work: a conflict resolved in the index, a conflicted file edited, in a rebase,
+an unstaged change to a tracked file, or, at a rebase `edit` or `break` stop,
+a staged change. If Kika cannot tell, it asks. With no work since the stop,
+`s` skips right away.
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
