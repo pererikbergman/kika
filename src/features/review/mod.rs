@@ -7,17 +7,19 @@
 //! over the files screen (`reader.rs`, drawn by `reader_view.rs`), its
 //! conversation of comments and review bodies (`conversation.rs`, drawn
 //! by `conversation_view.rs`), merging it from the detail
-//! (`merge.rs`), the markdown renderer for its body (`markdown.rs`), the
-//! pending review of line comments kept on disk (`pending.rs`), picking
-//! the lines a comment goes on (`comment_pick.rs`) and typing it
-//! (`comment_editor.rs`), all drawn by `pending_view.rs`, and the local
-//! git reads behind the files screen (`git.rs`). The feature
+//! (`merge.rs`), checking its head out as the local branch `pr/<number>`
+//! and going to the workspace (`checkout.rs`), the markdown renderer for
+//! its body (`markdown.rs`), the pending review of line comments kept on
+//! disk (`pending.rs`), picking the lines a comment goes on
+//! (`comment_pick.rs`) and typing it (`comment_editor.rs`), all drawn by
+//! `pending_view.rs`, and the local git reads behind the files screen and
+//! the checkout (`git.rs`). The feature
 //! also owns its key bindings (`keys.rs`), its screen (`view.rs`) and the
 //! I/O behind `LoadReviewQueues`, `LoadPrDetail`, `LoadPrDiscussion`,
 //! `CheckReviewCommits`, `FetchReviewCommits`, `LoadReviewFiles`,
 //! `LoadReviewCommits`, `LoadReviewRange`, `SetFileViewed`,
-//! `MergePullRequest`, `LoadPendingReview` and `SavePendingReview`
-//! (`effects.rs`). The credential
+//! `PlanPrCheckout`, `MergePullRequest`, `LoadPendingReview` and
+//! `SavePendingReview` (`effects.rs`). The credential
 //! plumbing that `FetchReviewCommits` shares with sync and the merge
 //! question popup stay in core; the forge client is the `kika_forge` crate.
 //!
@@ -25,8 +27,8 @@
 //! `AppIntent::Review`, and its one `update` arm calls [`update`] here.
 //! `update.rs` holds only that function; it dispatches to the handlers in
 //! `state.rs`, `files.rs`, `commit_view.rs`, `viewed.rs`, `threads.rs`,
-//! `reader.rs`, `conversation.rs`, `merge.rs`, `pending.rs`,
-//! `comment_pick.rs` and `comment_editor.rs`.
+//! `reader.rs`, `conversation.rs`, `merge.rs`, `checkout.rs`,
+//! `pending.rs`, `comment_pick.rs` and `comment_editor.rs`.
 //! The review guards on core arms (`ScrollDiff`, `OpenSearch`,
 //! `DiffEscape`) stay in core.
 //!
@@ -39,18 +41,21 @@
 //!   `thread_reader_open`, `composer_open`, `pending_list_open` and
 //!   `comment_pick_open`, which core focus uses, and those in `keys.rs`;
 //! - the handlers in `state.rs`, `files.rs`, `commit_view.rs`, `viewed.rs`,
-//!   `threads.rs` and `merge.rs` that `update` calls, including the
-//!   `review_files_shown` guard;
+//!   `threads.rs`, `merge.rs` and `checkout.rs` that `update` calls,
+//!   including the `review_files_shown` guard;
+//! - `pr_branch`, `verify_pr_branch` and `pr_checkout_commands`
+//!   (`git.rs`), which core's `GitOp::CheckoutPrBranch` is named, checked
+//!   and run by;
 //! - `review_jump_landed` (`threads.rs`), which core's `AppIntent::Diff`
 //!   arm calls after each diff chunk, so a thread `]`/`[` waits for is
 //!   scrolled to once its row streams in;
 //! - the chunks `keys::{REVIEW_KEYS, REVIEW_COMMENT_KEYS,
-//!   REVIEW_MERGE_CONFIRM, REVIEW_COMMENT_CONFIRM}`, and
-//!   `keys::HIDDEN_WHEN_OFF`, the bar hints left out while refused;
+//!   REVIEW_MERGE_CONFIRM, REVIEW_CHECKOUT_CONFIRM, REVIEW_COMMENT_CONFIRM}`,
+//!   and `keys::HIDDEN_WHEN_OFF`, the bar hints left out while refused;
 //! - `view::render`;
 //! - `effects::{load_queues, load_detail, load_discussion, check_commits,
 //!   fetch_commits, load_files, load_commits, load_range_files,
-//!   set_file_viewed, merge, load_pending, save_pending}`.
+//!   set_file_viewed, plan_checkout, merge, load_pending, save_pending}`.
 //!
 //! Kept cross-feature reads and calls:
 //! - `merge.rs` reloads the badges after a merge by asking core
@@ -62,6 +67,7 @@
 //!   scroll to keep the pick in view, which `pending_view.rs` draws;
 //! - `state.rs` reads `files` (files).
 
+mod checkout;
 mod comment_editor;
 mod comment_pick;
 mod commit_view;
@@ -88,7 +94,9 @@ mod viewed;
 pub(crate) use comment_editor::composer_open;
 pub(crate) use comment_pick::comment_pick_open;
 pub(crate) use files::review_diff_focused;
-pub(crate) use git::{CommitsHere, PrCommit, PrFileRow};
+pub(crate) use git::{
+    CommitsHere, PrCommit, PrFileRow, pr_branch, pr_checkout_commands, verify_pr_branch,
+};
 pub(crate) use intent::ReviewIntent;
 pub(crate) use merge::PrMerging;
 pub(crate) use pending::pending_list_open;

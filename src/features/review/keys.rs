@@ -1,7 +1,8 @@
 //! The review-mode key bindings: `G` from the workspace, the queue, detail
-//! and files screens, and the merge question. `CHUNKS` in `keymap.rs`
+//! and files screens, and the merge and checkout questions. `CHUNKS` in `keymap.rs`
 //! places both chunks, so their position there is behaviour.
 
+use super::checkout::pr_checkout_disabled;
 use super::commit_view::review_commit_disabled;
 use super::conversation::{conversation_disabled, page_disabled};
 use super::files::{review_files_disabled, review_search_step_disabled};
@@ -131,6 +132,17 @@ pub(crate) static REVIEW_KEYS: &[Binding] = &[
         label: "merge",
         bar: true,
         disabled: merge_disabled,
+    },
+    // It moves HEAD and may fetch, so a repository file may not move it.
+    Binding {
+        id: "review.checkout",
+        keys: &[KeyPattern::exact(KeyCode::Char('b'), NONE)],
+        scope: KeyScope::Review,
+        intent: AppIntent::Review(ReviewIntent::CheckoutPr),
+        description: "Check out the open pull request as branch pr/<number> and go to the workspace, after a question only y answers",
+        label: "checkout",
+        bar: true,
+        disabled: pr_checkout_disabled,
     },
     Binding {
         id: "review.back",
@@ -452,6 +464,45 @@ pub(crate) static REVIEW_MERGE_CONFIRM: &[Binding] = &[
         id: "merge_pr.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::MergePullRequest,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+];
+
+// Chunk 71c: review
+pub(crate) static REVIEW_CHECKOUT_CONFIRM: &[Binding] = &[
+    // The checkout moves HEAD and may fetch first, so Enter is left
+    // unbound.
+    Binding {
+        id: "checkout_pr.yes",
+        keys: Answer::YOnly.keys(),
+        scope: KeyScope::CheckoutPullRequest,
+        intent: AppIntent::Review(ReviewIntent::ConfirmCheckoutPr),
+        description: "Yes, check out the pull request's branch",
+        label: "check out",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "checkout_pr.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::CheckoutPullRequest,
+        intent: AppIntent::ConfirmNo,
+        description: "No, check out nothing",
+        label: "cancel",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "checkout_pr.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::CheckoutPullRequest,
         intent: AppIntent::Quit,
         description: "Quit Kika",
         label: "quit",

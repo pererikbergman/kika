@@ -321,6 +321,8 @@ pub enum KeyScope {
     CreatePullRequest,
     /// "Merge this pull request?" on top of the popup stack.
     MergePullRequest,
+    /// "Check out this pull request?" on top of the popup stack.
+    CheckoutPullRequest,
 }
 
 impl KeyScope {
@@ -382,6 +384,7 @@ impl KeyScope {
             | KeyScope::PickList
             | KeyScope::CreatePullRequest
             | KeyScope::MergePullRequest
+            | KeyScope::CheckoutPullRequest
             | KeyScope::ReviewThread
             | KeyScope::ReviewPick
             | KeyScope::ReviewComment
@@ -452,6 +455,7 @@ impl KeyScope {
             KeyScope::PickList => "Pick one",
             KeyScope::CreatePullRequest => "Create pull request",
             KeyScope::MergePullRequest => "Merge pull request",
+            KeyScope::CheckoutPullRequest => "Check out pull request",
         }
     }
 
@@ -656,6 +660,10 @@ pub const REPO_LOCKED: &[&str] = &[
     "merge_pr.yes",
     "merge_pr.no",
     "merge_pr.quit",
+    "review.checkout",
+    "checkout_pr.yes",
+    "checkout_pr.no",
+    "checkout_pr.quit",
     "review_thread.quit",
     "review_pick.quit",
     "review_comment.quit",
@@ -2506,6 +2514,7 @@ static CHUNKS: &[&[Binding]] = &[
     repos::keys::REPOS_RECENT,
     pull_requests::keys::PULL_REQUESTS_PICK_CREATE,
     review::keys::REVIEW_MERGE_CONFIRM,
+    review::keys::REVIEW_CHECKOUT_CONFIRM,
     review::keys::REVIEW_COMMENT_CONFIRM,
     CORE_FILTER_SEARCH,
     commits::keys::COMMITS_LOG_FILTER,
@@ -3991,6 +4000,64 @@ mod tests {
     }
 
     #[test]
+    fn only_y_answers_the_checkout_question_and_its_keys_are_locked() {
+        let state = AppState::new(Context::Workspace);
+        let resolve_in =
+            |scope, key| match resolve(registry(), &Keymap::default(), scope, &state, key) {
+                Resolution::Run(binding) => Some(binding.intent.clone()),
+                Resolution::Unbound => None,
+                other => panic!("{key:?}: {other:?}"),
+            };
+        let none = KeyModifiers::NONE;
+        let ask = KeyScope::CheckoutPullRequest;
+        assert_eq!(
+            resolve_in(ask, plain('y')),
+            Some(AppIntent::Review(ReviewIntent::ConfirmCheckoutPr))
+        );
+        assert_eq!(resolve_in(ask, key(KeyCode::Enter, none)), None);
+        assert_eq!(resolve_in(ask, plain('q')), None);
+        assert_eq!(resolve_in(ask, plain('Y')), None);
+        assert_eq!(resolve_in(ask, plain('b')), None);
+        assert_eq!(resolve_in(ask, plain('n')), Some(AppIntent::ConfirmNo));
+        assert_eq!(
+            resolve_in(ask, key(KeyCode::Esc, none)),
+            Some(AppIntent::ConfirmNo)
+        );
+        assert_eq!(
+            resolve_in(ask, key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(AppIntent::Quit)
+        );
+        assert_eq!(ask.parent(), None);
+        assert_eq!(ask.title(), "Check out pull request");
+        let checkout = registry()
+            .iter()
+            .find(|b| b.id == "review.checkout")
+            .unwrap();
+        assert_eq!(checkout.scope, KeyScope::Review);
+        assert_eq!(checkout.intent, AppIntent::Review(ReviewIntent::CheckoutPr));
+        assert!(checkout.matches(plain('b')));
+        for id in [
+            "review.checkout",
+            "checkout_pr.yes",
+            "checkout_pr.no",
+            "checkout_pr.quit",
+        ] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+            let expected = format!("{id:?} can only be changed in the global config file");
+            assert_eq!(
+                build(&[(id, &["enter"])], Trust::Repo).unwrap_err(),
+                expected
+            );
+        }
+        // The chunk sits right after the merge question's.
+        let at = |chunk: &[Binding]| CHUNKS.iter().position(|c| std::ptr::eq(*c, chunk));
+        assert_eq!(
+            at(review::keys::REVIEW_CHECKOUT_CONFIRM),
+            at(review::keys::REVIEW_MERGE_CONFIRM).map(|i| i + 1)
+        );
+    }
+
+    #[test]
     fn undo_redo_and_the_travel_answers_are_locked() {
         for id in [
             "workspace.undo",
@@ -4699,6 +4766,7 @@ mod tests {
             KeyScope::PickList => "pick_list",
             KeyScope::CreatePullRequest => "create_pull_request",
             KeyScope::MergePullRequest => "merge_pr",
+            KeyScope::CheckoutPullRequest => "checkout_pr",
         }
     }
 
@@ -5204,6 +5272,9 @@ mod tests {
                     // A merge reaches GitHub and cannot be undone.
                     | Review(ReviewIntent::OpenMergePr)
                     | Review(ReviewIntent::ConfirmMergePr)
+                    // A checkout moves HEAD and may fetch the head.
+                    | Review(ReviewIntent::CheckoutPr)
+                    | Review(ReviewIntent::ConfirmCheckoutPr)
                     // It may fetch the pull request's commits.
                     | Review(ReviewIntent::OpenFiles)
                     // A viewed mark reaches GitHub.
@@ -5331,10 +5402,12 @@ mod tests {
                 "review.refresh",
                 "review.open_check",
                 "review.merge",
+                "review.checkout",
                 "review.back",
                 "review.files",
                 "review_files.viewed",
                 "merge_pr.yes",
+                "checkout_pr.yes",
             ]
         );
         for feature in ["blame", "custom_commands", "operation", "files"] {
@@ -5832,6 +5905,7 @@ mod tests {
         "review.refresh",
         "review.open_check",
         "review.merge",
+        "review.checkout",
         "review.back",
         "review.files",
         "review.conversation",
@@ -6074,6 +6148,9 @@ mod tests {
         "merge_pr.yes",
         "merge_pr.no",
         "merge_pr.quit",
+        "checkout_pr.yes",
+        "checkout_pr.no",
+        "checkout_pr.quit",
         "review_comment_confirm.yes",
         "review_comment_confirm.no",
         "review_comment_confirm.quit",

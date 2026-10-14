@@ -64,9 +64,15 @@ pub fn thread_summary(review: &ReviewState) -> Option<String> {
     }
     let discussion = review.discussion.as_ref()?;
     let unresolved = discussion.threads.iter().filter(|t| !t.resolved).count();
+    let addressed = discussion.threads.iter().filter(|t| addressed(t)).count();
+    let addressed = if addressed == 0 {
+        String::new()
+    } else {
+        format!(" · {addressed} addressed")
+    };
     // Issue comments and review bodies: what is said off the lines.
     Some(format!(
-        "Threads: {unresolved} unresolved of {} · {} conversation comments",
+        "Threads: {unresolved} unresolved of {}{addressed} · {} conversation comments",
         discussion.threads_total,
         discussion.conversation.len()
     ))
@@ -112,6 +118,24 @@ pub(super) fn dim() -> Style {
     Style::new().add_modifier(Modifier::DIM)
 }
 
+/// An unresolved thread the head has moved past: GitHub marks it outdated
+/// against the latest push, so the author has likely acted on it.
+pub(super) fn addressed(thread: &ReviewThread) -> bool {
+    thread.outdated && !thread.resolved
+}
+
+/// How a thread's header is drawn: resolved ones dim, addressed ones
+/// green so a returning reviewer sees what changed, the rest yellow.
+pub(super) fn header_style(thread: &ReviewThread, placement: Option<Placement>) -> Style {
+    if thread.resolved {
+        dim()
+    } else if addressed(thread) && placement == Some(Placement::Outdated) {
+        Style::new().fg(Color::Green)
+    } else {
+        Style::new().fg(Color::Yellow)
+    }
+}
+
 /// What the header of a thread above the diff says before its author.
 pub(super) fn top_label(thread: &ReviewThread, placement: Placement) -> String {
     match placement {
@@ -124,9 +148,15 @@ pub(super) fn top_label(thread: &ReviewThread, placement: Placement) -> String {
                 Some(GhSide::Right) => " (new)",
                 None => "",
             };
+            // Still open after the push made it outdated: addressed.
+            let word = if addressed(thread) {
+                "addressed"
+            } else {
+                "outdated"
+            };
             match thread.original_line {
-                Some(n) => format!("outdated · was line {n}{side}"),
-                None => "outdated".into(),
+                Some(n) => format!("{word} · was line {n}{side}"),
+                None => word.into(),
             }
         }
     }
@@ -146,7 +176,6 @@ pub(super) fn span_label(thread: &ReviewThread) -> Option<String> {
 /// leads with why it is there; its lines show only when they are real
 /// lines of another view.
 fn header(thread: &ReviewThread, top: Option<Placement>, selected: bool) -> Line<'static> {
-    let outdated = top == Some(Placement::Outdated);
     let first = thread.comments.first();
     let mut parts: Vec<String> = top.map(|p| top_label(thread, p)).into_iter().collect();
     parts.push(first.map_or_else(|| "ghost".to_string(), |c| c.author.clone()));
@@ -171,11 +200,7 @@ fn header(thread: &ReviewThread, top: Option<Placement>, selected: bool) -> Line
     } else {
         format!("{n} comments")
     });
-    let mut style = if thread.resolved || outdated {
-        dim()
-    } else {
-        Style::new().fg(Color::Yellow)
-    };
+    let mut style = header_style(thread, top);
     if selected {
         style = style.add_modifier(Modifier::BOLD);
     }
@@ -489,6 +514,61 @@ mod tests {
             .unwrap_or_else(|| panic!("{text:?} not in {rows:#?}"))
     }
 
+    /// The style of the cell where `text` starts on the screen.
+    fn style_at(state: &AppState, text: &str) -> Style {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::view::render(state, frame))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows = buffer_rows(buffer);
+        let y = row_with(&rows, text);
+        let x = rows[y][..rows[y].find(text).unwrap()].chars().count();
+        buffer[(x as u16, y as u16)].style()
+    }
+
+    #[test]
+    fn an_unresolved_outdated_thread_is_addressed_in_green_and_a_resolved_one_stays_dim() {
+        let mut discussion = fixture_discussion();
+        discussion.threads[3].path = "src/cache.rs".into();
+        let state = cache_shown(discussion.clone());
+        let addressed = "┌ addressed · was line 7 (new) · erin";
+        let style = style_at(&state, addressed);
+        assert_eq!(style.fg, Some(Color::Green));
+        assert!(!style.add_modifier.contains(Modifier::DIM), "{style:?}");
+
+        discussion.threads[3].resolved = true;
+        let state = cache_shown(discussion.clone());
+        let rows = draw(&state, 100, 30);
+        assert!(!rows.iter().any(|r| r.contains("addressed")), "{rows:#?}");
+        let style = style_at(&state, "┌ outdated · was line 7 (new) · erin");
+        assert!(style.add_modifier.contains(Modifier::DIM), "{style:?}");
+        assert_ne!(style.fg, Some(Color::Green));
+
+        // Placed on top for another reason, a thread GitHub does not call
+        // outdated is not addressed.
+        discussion.threads[3].resolved = false;
+        discussion.threads[3].outdated = false;
+        discussion.threads[3].line = None;
+        let state = cache_shown(discussion);
+        let style = style_at(&state, "┌ outdated");
+        assert_eq!(style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn the_summary_leaves_out_addressed_when_none_is() {
+        let mut review = ReviewState::default();
+        let mut discussion = fixture_discussion();
+        for thread in &mut discussion.threads {
+            thread.outdated = false;
+        }
+        review.discussion = Some(discussion);
+        assert_eq!(
+            thread_summary(&review).as_deref(),
+            Some("Threads: 2 unresolved of 5 · 3 conversation comments")
+        );
+    }
+
     #[test]
     fn short_time_reads_rfc3339_and_cuts_anything_else() {
         for (created, want) in [
@@ -586,7 +666,7 @@ mod tests {
         let rows = draw(&state, 100, 30);
         let top = row_with(
             &rows,
-            "outdated · was line 7 (new) · erin · 2023-11-13 10:00",
+            "addressed · was line 7 (new) · erin · 2023-11-13 10:00",
         );
         let diff_header = row_with(&rows, "diff --git a/src/lib.rs");
         assert!(top < diff_header, "{rows:#?}");
@@ -605,7 +685,7 @@ mod tests {
         // Scrolled off the top, the block goes with it.
         state.diff.scroll = 1;
         let rows = draw(&state, 100, 30);
-        assert!(!rows.iter().any(|r| r.contains("outdated")), "{rows:#?}");
+        assert!(!rows.iter().any(|r| r.contains("addressed")), "{rows:#?}");
     }
 
     fn type_char_j(state: &mut AppState) {
@@ -671,7 +751,7 @@ mod tests {
         // `]` to the last of them: thread 8.
         state.review.files.as_mut().unwrap().thread = Some(8);
         let rows = draw(&state, 100, 30);
-        let picked = row_with(&rows, "▶ outdated · was line 7 (new) · author3");
+        let picked = row_with(&rows, "▶ addressed · was line 7 (new) · author3");
         assert_eq!(picked, 2, "{rows:#?}");
         assert!(rows[picked + 1].contains("│  context5"), "{rows:#?}");
         let body = row_with(&rows, "│ This name was wrong.");
@@ -733,13 +813,14 @@ mod tests {
             state.size = (w, h);
             state.diff.scroll = 0;
             let rows = draw(&state, w, h);
-            let top = row_with(&rows, "┌ outdated");
+            // Cut at 40 columns, so only its start is matched.
+            let top = row_with(&rows, "┌ address");
             let header = row_with(&rows, "diff --git");
             assert!(top < header, "{w}x{h}: {rows:#?}");
             // Scrolled to the hunk, a line thread sits under its row.
             state.diff.scroll = 4;
             let rows = draw(&state, w, h);
-            assert!(!rows.iter().any(|r| r.contains("outdated")), "{rows:#?}");
+            assert!(!rows.iter().any(|r| r.contains("address")), "{rows:#?}");
             let line3 = row_with(&rows, "let cache");
             assert!(rows[line3 + 1].contains("┌ alice"), "{w}x{h}: {rows:#?}");
             for row in &rows {
@@ -847,7 +928,7 @@ mod tests {
         review.discussion = Some(fixture_discussion());
         assert_eq!(
             thread_summary(&review).as_deref(),
-            Some("Threads: 2 unresolved of 5 · 3 conversation comments")
+            Some("Threads: 2 unresolved of 5 · 1 addressed · 3 conversation comments")
         );
     }
 }

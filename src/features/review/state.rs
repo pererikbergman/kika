@@ -3,6 +3,7 @@
 //! enters review mode, opens a pull request or refreshes, and only on a
 //! host the global config lists.
 
+use super::checkout::PrCheckout;
 use super::comment_editor::Composer;
 use super::files::PrFiles;
 use super::pending::PendingSlot;
@@ -105,6 +106,9 @@ pub struct ReviewState {
     /// Each pull request head fetched this session, so none is fetched
     /// twice. Kept when review mode is left and entered again.
     pub fetched_heads: Vec<(u64, CommitId)>,
+    /// The checkout of the open pull request's head, from `b` until its
+    /// op starts or it is given up.
+    pub checkout: Option<PrCheckout>,
     /// The open pull request's review threads and conversation, read
     /// right after its detail.
     pub discussion: Option<PrDiscussion>,
@@ -146,6 +150,7 @@ impl Default for ReviewState {
             files: None,
             merge_pick: None,
             fetched_heads: Vec::new(),
+            checkout: None,
             discussion: None,
             discussion_fetch: ReviewFetch::default(),
             conversation: None,
@@ -629,6 +634,24 @@ impl AppState {
         }
     }
 
+    /// Back to the workspace, review mode started afresh next time, and
+    /// the workspace loaded or refreshed.
+    pub(super) fn leave_review(&mut self) -> Vec<Effect> {
+        // A pending-review change still waiting on a save goes out first.
+        let mut effects = self.drop_pending_slot();
+        self.context = Context::Workspace;
+        self.review.restart();
+        if self.workspace_started {
+            effects.extend(self.update(AppIntent::RefreshStatus));
+            // The review may have streamed its own diff into the
+            // pane; a commit's or stash's open file gets it back.
+            effects.extend(self.reload_open_file_diff());
+        } else {
+            effects.extend(self.start());
+        }
+        effects
+    }
+
     /// Esc: from a pull request back to the same queue and row; in the
     /// queue, clear the filter, else go back to the workspace.
     pub(crate) fn close_review(&mut self) -> Vec<Effect> {
@@ -660,19 +683,7 @@ impl AppState {
                 self.review.reconcile();
                 vec![]
             }
-            ReviewScreen::Queue => {
-                self.context = Context::Workspace;
-                self.review.restart();
-                if self.workspace_started {
-                    let mut effects = self.update(AppIntent::RefreshStatus);
-                    // The review may have streamed its own diff into the
-                    // pane; a commit's or stash's open file gets it back.
-                    effects.extend(self.reload_open_file_diff());
-                    effects
-                } else {
-                    self.start()
-                }
-            }
+            ReviewScreen::Queue => self.leave_review(),
         }
     }
 

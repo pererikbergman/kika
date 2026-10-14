@@ -737,7 +737,9 @@ mod tests {
         let rows = draw(&state, 80, 30);
         let threads = rows
             .iter()
-            .position(|r| r.contains("Threads: 2 unresolved of 5 · 3 conversation comments"))
+            .position(|r| {
+                r.contains("Threads: 2 unresolved of 5 · 1 addressed · 3 conversation comments")
+            })
             .unwrap_or_else(|| panic!("{rows:#?}"));
         // Right after the reviewers, which wrap to two lines here.
         assert!(rows[threads - 2].contains("Reviewers: "), "{rows:#?}");
@@ -1286,7 +1288,7 @@ mod tests {
         // The count gives way only to the short view label.
         let files = state.review.files.as_ref().unwrap();
         assert!(files_title(files, 3, 70).contains("· 3 pending"));
-        assert!(files_title(files, 3, 26).contains("3 pending"));
+        assert!(files_title(files, 3, 30).contains("3 pending"));
         for (width, height) in [(80, 24), (40, 10), (20, 5), (10, 3), (3, 2), (1, 1)] {
             state.size = (width, height);
             draw(&state, width, height);

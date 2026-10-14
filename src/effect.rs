@@ -385,6 +385,17 @@ pub enum Effect {
         hosts: Vec<ForgeHost>,
         repo: ForgeRepo,
     },
+    /// Read where the local `branch` (`pr/<number>`) stands against the
+    /// pull request's `head`, and which remote a missing head may come
+    /// from. Local only. Always answered by one
+    /// `ReviewIntent::CheckoutPlanned`.
+    PlanPrCheckout {
+        tag: Tag,
+        head: CommitId,
+        branch: BranchName,
+        hosts: Vec<ForgeHost>,
+        repo: ForgeRepo,
+    },
     /// Fetch `oids` from `remote` by id, with git's and ssh's questions
     /// sent as `CredentialAsked`. Always answered by one
     /// `ReviewIntent::HeadFetched`.
@@ -1284,6 +1295,13 @@ impl Runtime {
                 hosts,
                 repo,
             } => review::effects::check_commits(runner, tx, tag, head, base, hosts, repo),
+            Effect::PlanPrCheckout {
+                tag,
+                head,
+                branch,
+                hosts,
+                repo,
+            } => review::effects::plan_checkout(runner, tx, tag, head, branch, hosts, repo),
             Effect::FetchReviewCommits { tag, remote, oids } => review::effects::fetch_commits(
                 runner,
                 tx,

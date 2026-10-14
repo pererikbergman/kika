@@ -388,6 +388,9 @@ impl AppState {
         tag: Tag,
         result: Result<(), String>,
     ) -> Vec<Effect> {
+        if self.checkout_fetch(tag) {
+            return self.pr_checkout_fetched(tag, result);
+        }
         // Every user effect reports back once, stale or not.
         let held = self.holds_op(tag);
         self.release_op(tag);

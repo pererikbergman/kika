@@ -2,9 +2,10 @@
 //! `AppIntent::Review`, and hands them to this feature's `update`
 //! (see `docs/adr/0002-nested-intents.md`).
 
-use super::{CommitsHere, PrCommit, PrFileRow};
 use std::path::PathBuf;
 
+use super::git::CheckoutPlan;
+use super::{CommitsHere, PrCommit, PrFileRow};
 use crate::effect::Tag;
 use crate::intent::Scroll;
 use crate::keymap::KeyPress;
@@ -172,5 +173,16 @@ pub(crate) enum ReviewIntent {
     PendingSaved {
         tag: Tag,
         result: Result<(), String>,
+    },
+    /// Check out the open pull request's head as `pr/<number>`: plan it
+    /// from local git, then ask.
+    CheckoutPr,
+    /// Do the checkout the open question describes.
+    ConfirmCheckoutPr,
+    /// Where `pr/<number>` stands against the head, or why git could not
+    /// say.
+    CheckoutPlanned {
+        tag: Tag,
+        result: Result<CheckoutPlan, String>,
     },
 }

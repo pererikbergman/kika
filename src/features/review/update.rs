@@ -92,6 +92,11 @@ pub(crate) fn update(state: &mut AppState, intent: ReviewIntent) -> Vec<Effect> 
             state.pending_loaded(tag, result, file)
         }
         ReviewIntent::PendingSaved { tag, result } => return state.pending_saved(tag, result),
+        ReviewIntent::CheckoutPr => return state.open_pr_checkout(),
+        ReviewIntent::ConfirmCheckoutPr => return state.confirm_pr_checkout(),
+        ReviewIntent::CheckoutPlanned { tag, result } => {
+            return state.pr_checkout_planned(tag, result);
+        }
     }
     Vec::new()
 }
