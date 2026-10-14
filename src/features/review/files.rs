@@ -8,6 +8,7 @@
 //! the selected file stays selected, by path, when the new view lists it.
 
 use super::git::{CommitsHere, FileCounts, PrCommit, PrFileRow};
+use super::reader::ThreadReader;
 use super::state::{ReviewScreen, ReviewState};
 use crate::diff_pane::DiffStart;
 use crate::effect::{Effect, Tag};
@@ -108,6 +109,8 @@ pub struct PrFiles {
     pub thread: Option<usize>,
     /// A thread whose row has not streamed in yet, scrolled to when it does.
     pub jump: Option<usize>,
+    /// The thread read in full over the screen, while it is open.
+    pub reader: Option<ThreadReader>,
 }
 
 impl PrFiles {
@@ -130,6 +133,7 @@ impl PrFiles {
             marking: None,
             thread: None,
             jump: None,
+            reader: None,
         }
     }
 
@@ -210,6 +214,9 @@ fn detail_oids(review: &ReviewState) -> Result<(u64, CommitId, CommitId), Reason
 /// Why `f` cannot open the files: no loaded pull request with both
 /// commit ids, no known repository on a forge host, or git is busy.
 pub(crate) fn review_files_disabled(state: &AppState) -> Option<Reason> {
+    if let Some(reason) = super::conversation::on_conversation(state) {
+        return Some(reason);
+    }
     if let Err(reason) = detail_oids(&state.review) {
         return Some(reason);
     }
@@ -472,6 +479,7 @@ impl AppState {
         files.cursor = next;
         files.thread = None;
         files.jump = None;
+        files.reader = None;
         self.review_file_diff(DiffStart::Keep)
     }
 

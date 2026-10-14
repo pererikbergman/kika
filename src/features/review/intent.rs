@@ -4,6 +4,7 @@
 
 use super::{CommitsHere, PrCommit, PrFileRow};
 use crate::effect::Tag;
+use crate::intent::Scroll;
 use kika_forge::discussion::PrDiscussion;
 use kika_forge::review::{PrDetail, Queues, ReviewError};
 use kika_forge::{CreateError, ForgeHost, ForgeRepo};
@@ -109,6 +110,19 @@ pub(crate) enum ReviewIntent {
         repo: Option<ForgeRepo>,
         result: Result<Option<PrDiscussion>, ReviewError>,
     },
+    /// Show the open pull request's conversation: its comments and review
+    /// bodies, as already read.
+    OpenConversation,
+    /// Scroll the pull request or its conversation a page down, or up.
+    PageDown,
+    PageUp,
+    /// Read the selected review thread, or the file's first, in full.
+    OpenThreadReader,
+    /// Scroll the open thread by a line or a page.
+    ThreadReaderScroll(Scroll),
+    /// Show the file's next thread (`1`) or previous one (`-1`).
+    ThreadReaderStep(i32),
+    CloseThreadReader,
     /// The range shown, merge base to head or one commit against its first
     /// parent, and its changed files, or why not.
     FilesLoaded {

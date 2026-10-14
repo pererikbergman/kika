@@ -3,8 +3,10 @@
 //! places both chunks, so their position there is behaviour.
 
 use super::commit_view::review_commit_disabled;
+use super::conversation::{conversation_disabled, page_disabled};
 use super::files::{review_files_disabled, review_search_step_disabled};
 use super::merge::merge_disabled;
+use super::reader::thread_reader_disabled;
 use super::state::{
     open_check_disabled, open_pr_disabled, queue_keys_disabled, refresh_review_disabled,
 };
@@ -15,6 +17,10 @@ use crate::features::review::ReviewIntent;
 use crate::intent::{AppIntent, Scroll};
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, never};
 use crossterm::event::{KeyCode, KeyModifiers};
+
+/// Bar hints left out, rather than dimmed, while their key is refused:
+/// they belong to one screen only.
+pub(crate) const HIDDEN_WHEN_OFF: &[&str] = &["review.conversation"];
 
 // Chunk 27: review
 pub(crate) static REVIEW_KEYS: &[Binding] = &[
@@ -130,7 +136,7 @@ pub(crate) static REVIEW_KEYS: &[Binding] = &[
         keys: &[KeyPattern::any(KeyCode::Esc)],
         scope: KeyScope::Review,
         intent: AppIntent::Review(ReviewIntent::CloseDetail),
-        description: "Back to the pull request from its files, else to the queue; in the queue, clear the filter, else back to the workspace",
+        description: "Back to the pull request from its files or conversation, else to the queue; in the queue, clear the filter, else back to the workspace",
         label: "back",
         bar: true,
         disabled: never,
@@ -144,6 +150,37 @@ pub(crate) static REVIEW_KEYS: &[Binding] = &[
         label: "files",
         bar: true,
         disabled: review_files_disabled,
+    },
+    // Shows what was already read, so a repository file may move it.
+    Binding {
+        id: "review.conversation",
+        keys: &[KeyPattern::any(KeyCode::Char('C'))],
+        scope: KeyScope::Review,
+        intent: AppIntent::Review(ReviewIntent::OpenConversation),
+        description: "Show the pull request's conversation: its comments and review bodies, oldest first",
+        label: "conversation",
+        bar: true,
+        disabled: conversation_disabled,
+    },
+    Binding {
+        id: "review.page_down",
+        keys: &[KeyPattern::any(KeyCode::PageDown)],
+        scope: KeyScope::Review,
+        intent: AppIntent::Review(ReviewIntent::PageDown),
+        description: "Scroll the pull request or its conversation down a page",
+        label: "",
+        bar: false,
+        disabled: page_disabled,
+    },
+    Binding {
+        id: "review.page_up",
+        keys: &[KeyPattern::any(KeyCode::PageUp)],
+        scope: KeyScope::Review,
+        intent: AppIntent::Review(ReviewIntent::PageUp),
+        description: "Scroll the pull request or its conversation up a page",
+        label: "",
+        bar: false,
+        disabled: page_disabled,
     },
     Binding {
         id: "review_files.focus",
@@ -197,6 +234,17 @@ pub(crate) static REVIEW_KEYS: &[Binding] = &[
         label: "prev thread",
         bar: false,
         disabled: thread_nav_disabled,
+    },
+    // Reads a thread already loaded, so a repository file may move it.
+    Binding {
+        id: "review_files.thread",
+        keys: &[KeyPattern::any(KeyCode::Enter)],
+        scope: KeyScope::ReviewFiles,
+        intent: AppIntent::Review(ReviewIntent::OpenThreadReader),
+        description: "Read the selected review thread, or the file's first, with every comment in full",
+        label: "read thread",
+        bar: true,
+        disabled: thread_reader_disabled,
     },
     Binding {
         id: "review_diff.down",
@@ -284,6 +332,92 @@ pub(crate) static REVIEW_KEYS: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+    Binding {
+        id: "review_thread.down",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::ReviewThread,
+        intent: AppIntent::Review(ReviewIntent::ThreadReaderScroll(Scroll::LineDown)),
+        description: "Scroll the thread down a line",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review_thread.up",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::ReviewThread,
+        intent: AppIntent::Review(ReviewIntent::ThreadReaderScroll(Scroll::LineUp)),
+        description: "Scroll the thread up a line",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review_thread.page_down",
+        keys: &[KeyPattern::any(KeyCode::PageDown)],
+        scope: KeyScope::ReviewThread,
+        intent: AppIntent::Review(ReviewIntent::ThreadReaderScroll(Scroll::PageDown)),
+        description: "Scroll the thread down a page",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review_thread.page_up",
+        keys: &[KeyPattern::any(KeyCode::PageUp)],
+        scope: KeyScope::ReviewThread,
+        intent: AppIntent::Review(ReviewIntent::ThreadReaderScroll(Scroll::PageUp)),
+        description: "Scroll the thread up a page",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review_thread.next",
+        keys: &[KeyPattern::exact(KeyCode::Char(']'), NONE)],
+        scope: KeyScope::ReviewThread,
+        intent: AppIntent::Review(ReviewIntent::ThreadReaderStep(1)),
+        description: "Read the file's next review thread, resolved ones included",
+        label: "next thread",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_thread.prev",
+        keys: &[KeyPattern::exact(KeyCode::Char('['), NONE)],
+        scope: KeyScope::ReviewThread,
+        intent: AppIntent::Review(ReviewIntent::ThreadReaderStep(-1)),
+        description: "Read the file's previous review thread, resolved ones included",
+        label: "prev thread",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review_thread.close",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::ReviewThread,
+        intent: AppIntent::Review(ReviewIntent::CloseThreadReader),
+        description: "Close the thread and go back to the files",
+        label: "close",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_thread.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::ReviewThread,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
 ];
 
 // Chunk 71b: review
@@ -328,7 +462,47 @@ pub(crate) static REVIEW_MERGE_CONFIRM: &[Binding] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keymap::REPO_LOCKED;
+    use crate::keymap::{REPO_LOCKED, registry};
+
+    #[test]
+    fn the_reader_and_conversation_keys_sit_in_their_scopes_unlocked_but_quit() {
+        let binding = |id: &str| registry().iter().find(|b| b.id == id).unwrap();
+        let thread = binding("review_files.thread");
+        assert_eq!(thread.scope, KeyScope::ReviewFiles);
+        assert_eq!(thread.keys, [KeyPattern::any(KeyCode::Enter)]);
+        assert!(thread.bar);
+        let conversation = binding("review.conversation");
+        assert_eq!(conversation.scope, KeyScope::Review);
+        assert!(HIDDEN_WHEN_OFF.contains(&"review.conversation"));
+        let mut ids = vec!["review_files.thread", "review.conversation"];
+        ids.extend(["review.page_down", "review.page_up"]);
+        let in_thread: Vec<&str> = REVIEW_KEYS
+            .iter()
+            .filter(|b| b.scope == KeyScope::ReviewThread)
+            .map(|b| b.id)
+            .collect();
+        assert_eq!(
+            in_thread,
+            [
+                "review_thread.down",
+                "review_thread.up",
+                "review_thread.page_down",
+                "review_thread.page_up",
+                "review_thread.next",
+                "review_thread.prev",
+                "review_thread.close",
+                "review_thread.quit",
+            ]
+        );
+        ids.extend(in_thread.iter().filter(|id| **id != "review_thread.quit"));
+        for id in ids {
+            assert!(!REPO_LOCKED.contains(&id), "{id}");
+        }
+        // Quitting is locked, as in every popup.
+        assert!(REPO_LOCKED.contains(&"review_thread.quit"));
+        assert_eq!(KeyScope::ReviewThread.parent(), None);
+        assert_eq!(KeyScope::ReviewThread.title(), "Review thread");
+    }
 
     #[test]
     fn the_thread_keys_sit_after_the_commit_key_in_the_files_scope_and_are_not_locked() {

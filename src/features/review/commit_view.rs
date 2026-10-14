@@ -171,6 +171,7 @@ impl AppState {
             files.seq = Some(tag.seq);
             files.thread = None;
             files.jump = None;
+            files.reader = None;
         }
         let mut effects = self.close_diff();
         effects.push(Effect::LoadReviewRange { tag, range });
@@ -179,7 +180,7 @@ impl AppState {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crossterm::event::KeyCode;
 
     use super::*;
@@ -335,7 +336,7 @@ mod tests {
     }
 
     /// Nothing in this batch may reach the forge.
-    fn assert_local(effects: &[Effect]) {
+    pub(crate) fn assert_local(effects: &[Effect]) {
         for effect in effects {
             assert!(
                 !matches!(

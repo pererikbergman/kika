@@ -237,6 +237,8 @@ pub enum KeyScope {
     ReviewFiles,
     /// Review mode's files screen with the diff focused.
     ReviewDiff,
+    /// One review thread read in full over the files screen.
+    ReviewThread,
     Help,
     /// "Stage everything and commit?"
     CommitConfirm,
@@ -370,7 +372,8 @@ impl KeyScope {
             | KeyScope::CommandLog
             | KeyScope::PickList
             | KeyScope::CreatePullRequest
-            | KeyScope::MergePullRequest => None,
+            | KeyScope::MergePullRequest
+            | KeyScope::ReviewThread => None,
         }
     }
 
@@ -396,6 +399,7 @@ impl KeyScope {
             KeyScope::Review => "Review",
             KeyScope::ReviewFiles => "Pull request files",
             KeyScope::ReviewDiff => "Pull request diff",
+            KeyScope::ReviewThread => "Review thread",
             KeyScope::Help => "Help",
             KeyScope::CommitConfirm => "Stage all and commit",
             KeyScope::CommitEditor => "Commit message",
@@ -634,6 +638,7 @@ pub const REPO_LOCKED: &[&str] = &[
     "merge_pr.yes",
     "merge_pr.no",
     "merge_pr.quit",
+    "review_thread.quit",
     "command_log.quit",
     "command_log.escape",
     "commits.paste",
@@ -4593,6 +4598,7 @@ mod tests {
             KeyScope::Review => "review",
             KeyScope::ReviewFiles => "review_files",
             KeyScope::ReviewDiff => "review_diff",
+            KeyScope::ReviewThread => "review_thread",
             KeyScope::Help => "help",
             KeyScope::CommitConfirm => "commit_confirm",
             KeyScope::CommitEditor => "commit_editor",
@@ -5763,11 +5769,15 @@ mod tests {
         "review.merge",
         "review.back",
         "review.files",
+        "review.conversation",
+        "review.page_down",
+        "review.page_up",
         "review_files.focus",
         "review_files.viewed",
         "review_files.commit",
         "review_files.next_thread",
         "review_files.prev_thread",
+        "review_files.thread",
         "review_diff.down",
         "review_diff.up",
         "review_diff.page_down",
@@ -5776,6 +5786,14 @@ mod tests {
         "review_diff.search_next",
         "review_diff.search_prev",
         "review_diff.escape",
+        "review_thread.down",
+        "review_thread.up",
+        "review_thread.page_down",
+        "review_thread.page_up",
+        "review_thread.next",
+        "review_thread.prev",
+        "review_thread.close",
+        "review_thread.quit",
         "files.blame",
         "files.hunks",
         "files.mergetool",

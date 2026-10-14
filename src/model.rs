@@ -729,6 +729,7 @@ impl AppState {
             (Context::Workspace, Focus::Blame(_)) => KeyScope::Blame,
             (Context::Workspace, Focus::Conflict(_)) => KeyScope::Conflict,
             (Context::Review { .. }, _) => match &self.review.files {
+                Some(_) if review::thread_reader_open(self) => KeyScope::ReviewThread,
                 Some(_) if review::review_diff_focused(self) => KeyScope::ReviewDiff,
                 Some(_) if matches!(self.review.screen, review::ReviewScreen::Files(_)) => {
                     KeyScope::ReviewFiles

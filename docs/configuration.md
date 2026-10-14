@@ -484,8 +484,8 @@ pull request, then to the queue, then to the workspace.
   on, old or new side, with its author, time and whether it is resolved;
   this is in the whole pull request view only, and a commit's view shows
   the file's threads above its diff as "on the whole pull request".
-  Resolved threads are folded to one line; for now their text can be
-  read only on GitHub. Outdated threads show at the top of the file with
+  Resolved threads are folded to one line there; `enter` reads them in
+  full (see below). Outdated threads show at the top of the file with
   the lines they were written on, as do comments on the whole file and
   threads whose line is not in the diff; that block takes at most half the
   diff and counts the threads it has no room for. `]` and `[` jump to the
@@ -496,6 +496,20 @@ pull request, then to the queue, then to the workspace.
   `thread 2/5` after a jump; a `+` there means GitHub has more threads
   than were read. At most 100 threads, 50 comments in each, and 200
   conversation items (100 comments and 100 reviews) are read.
+- `C` on a pull request shows its conversation: the comments on the pull
+  request and the review bodies, oldest first, each with its author, time
+  and what it did (`commented`, `approved`, `requested changes`). `j`/`k`
+  and `pgdn`/`pgup` scroll it (`pgdn`/`pgup` scroll the pull request too),
+  and `esc` goes back to the pull request. It ends with
+  `More on GitHub (showing the first N)` when GitHub has more than were
+  read. `enter` on the files screen opens the selected thread (the one
+  `]`/`[` went to), or the file's first, in a box over the screen with
+  every comment in full, resolved threads included, and the lines an
+  outdated thread was written on. In it `]`/`[` step through all of the
+  file's threads, resolved ones too, `j`/`k`/`pgdn`/`pgup` scroll, and
+  `esc` closes it; `]` on the diff then goes on from the thread read
+  last. Neither one asks GitHub anything: both show what was read with
+  the pull request.
 
 - GitHub is asked only when you enter review mode, open a pull request
   (which reads its viewed marks in up to 10 calls), press `r` or answer
@@ -1812,9 +1826,12 @@ GitHub and cannot be undone, so `enter` does not answer it.
 | `review.filter` | `/` | Filter the queue by number, title or author | |
 | `review.refresh` | `r` | Ask GitHub again for the queues or the open pull request | locked |
 | `review.open_check` | `o` | Open a failing check's page in the browser | locked |
-| `review.back` | `esc` | Back to the pull request from its files, else to the queue; in the queue, clear the filter, else back to the workspace | locked |
+| `review.back` | `esc` | Back to the pull request from its files or conversation, else to the queue; in the queue, clear the filter, else back to the workspace | locked |
 | `review.files` | `f` | Show the pull request's changed files and diff, fetching its commits once if they are not here | locked |
 | `review.merge` | `M` | Merge the open pull request on GitHub, after a question only y answers | locked |
+| `review.conversation` | `C` | Show the pull request's conversation: its comments and review bodies, oldest first | |
+| `review.page_down` | `pgdn` | Scroll the pull request or its conversation down a page | |
+| `review.page_up` | `pgup` | Scroll the pull request or its conversation up a page | |
 
 ### Review files (one pull request's changed files and diff)
 
@@ -1828,6 +1845,7 @@ diff, `esc` goes back to the pull request.
 | `review_files.commit` | `c` | Review the whole pull request or one of its commits | |
 | `review_files.next_thread` | `]` | Go to the next unresolved review thread | |
 | `review_files.prev_thread` | `[` | Go to the previous unresolved review thread | |
+| `review_files.thread` | `enter` | Read the selected review thread, or the file's first, with every comment in full | |
 | `review_diff.down` | `j`, `down` | Scroll the diff down a line | |
 | `review_diff.up` | `k`, `up` | Scroll the diff up a line | |
 | `review_diff.page_down` | `pgdn` | Scroll the diff down a page | |
@@ -1836,6 +1854,21 @@ diff, `esc` goes back to the pull request.
 | `review_diff.search_next` | `n` | Go to the next match of the search | |
 | `review_diff.search_prev` | `N` | Go to the previous match of the search | |
 | `review_diff.escape` | `esc` | Clear the search, else go back to the file list | |
+
+### Review thread (one review thread read in full over the files screen)
+
+`q` and `?` do nothing here; `esc` closes the thread.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `review_thread.down` | `j`, `down` | Scroll the thread down a line | |
+| `review_thread.up` | `k`, `up` | Scroll the thread up a line | |
+| `review_thread.page_down` | `pgdn` | Scroll the thread down a page | |
+| `review_thread.page_up` | `pgup` | Scroll the thread up a page | |
+| `review_thread.next` | `]` | Read the file's next review thread, resolved ones included | |
+| `review_thread.prev` | `[` | Read the file's previous review thread, resolved ones included | |
+| `review_thread.close` | `esc` | Close the thread and go back to the files | |
+| `review_thread.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Submodule list
 
