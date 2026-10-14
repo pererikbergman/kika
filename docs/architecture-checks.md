@@ -17,7 +17,7 @@ and cycles cost points; gravity wells, red flags, zone flags and low cohesion ar
 
 The job writes the score and Issue list to the GitHub job summary. It fails only when
 the scan finds an Issue that the committed baseline does not list. The score on its own
-never fails the build. The mark next to the score in the summary (a red cross today) only
+never fails the build. The mark next to the score in the summary only
 rates the score against the thresholds in `settings.json`. It does not mean the gate
 failed. The job's own status tells you that.
 
@@ -26,7 +26,7 @@ failed. The job's own status tells you that.
 | File | Purpose |
 |---|---|
 | `.noupling/settings.json` | Scan settings: only `.rs` files; `target`, `factory` and `docs` are ignored. |
-| `.noupling/baseline.json` | Accepted Issues, one fingerprint each (for example `coupling_violation:src/model -> src/git`). |
+| `.noupling/baseline.json` | Accepted Issues, one fingerprint each (for example `coupling_violation:src/e2e -> src/features`). |
 
 Everything else noupling writes under `.noupling/` (`history.db`, `pr.md`, reports) is
 git-ignored.
@@ -77,51 +77,43 @@ else. The audit then reports the moved Issue as not in the baseline and the old 
 resolved. Read the list in the job log. If the Issues are acceptable, save the baseline
 on purpose as above and explain the change in the PR.
 
-## Feature folders and the baseline
+## Crates, feature folders and the baseline
 
-Kika is moving to feature folders under `src/features/` (see
-`docs/adr/0001-vertical-slices.md`). Two deny rules in `dependency_rules` in
-`.noupling/settings.json` keep the shared plumbing below the features:
+Kika is a Cargo workspace (see `docs/adr/0003-git-forge-crates.md`):
 
-| From | To | Message |
-|---|---|---|
-| `src/git/**` | `src/features/**` | git plumbing never imports a feature (ADR-0001) |
-| `src/forge/**` | `src/features/**` | git plumbing never imports a feature (ADR-0001) |
+| Crate | Path | Holds | Depends on |
+|---|---|---|---|
+| `kika` | `src/` | the binary: core and the feature folders under `src/features/` (ADR-0001) | `kika-git`, `kika-forge` |
+| `kika-git` | `crates/kika-git/` | git CLI plumbing and program lookup | no Kika crate |
+| `kika-forge` | `crates/kika-forge/` | the forge client | `kika-git` only |
 
-A break of either rule is a `rule_violation:*` Issue, which is never accepted.
+The `dependency_rules` in `.noupling/settings.json` are empty. The two deny rules that
+kept `src/git` and `src/forge` below the features went in #324: Cargo now enforces the
+direction, because a binary crate cannot be a dependency, so neither plumbing crate can
+import the app. noupling treats an import of another crate as external, so
+`kika_git::` and `kika_forge::` imports do not score, but it still checks the imports
+inside each `crates/*/src` tree.
 
-Each slice PR that moves code into a feature folder runs:
+The health score is 99.1 (noupling 0.9.2). The gate is baseline-only, so the score
+never fails CI.
+
+A PR that moves code runs:
 
 ```sh
 noupling scan .
 noupling baseline save .
 ```
 
-and lists the fingerprint diff of `.noupling/baseline.json` in its description. Only
-these changes are allowed:
-
-| Allowed to appear | Allowed to disappear |
-|---|---|
-| `coupling_violation:src/features -> src/git` | `coupling_violation:src/model -> src/git` |
-| `coupling_violation:src/features -> src/forge` | `coupling_violation:src/model -> src/forge` |
-| `coupling_violation:src/e2e -> src/features` | `coupling_violation:src/e2e -> src/model` |
-| `red_flag:fused_sibling:src/features -> src/git` | `red_flag:fused_sibling:src/model -> src/git` |
-| `gravity_well:*`, `zone_flag:src/features/*`, `low_cohesion:src/features/*` (noupling says these do not score) | `low_cohesion:src/model`, and the remaining `src/model` fingerprints once that directory is empty |
+and lists the fingerprint diff of `.noupling/baseline.json` in its description.
 
 Never allowed:
 - any `cycle:*`;
 - any `rule_violation:*`;
-- `coupling_violation:src/features/<a> -> src/features/<b>` for sibling features;
-- `coupling_violation:src/git -> src/features`;
-- `coupling_violation:src/forge -> src/features`.
+- `coupling_violation:src/features/<a> -> src/features/<b>` for sibling features.
 
-The health score drops as features move, because files under `src/features/` keep
-importing `src/git` and `src/forge` and noupling scores every sibling import. The gate
-is baseline-only, so the score never fails CI.
-
-`baseline.json` conflicts on almost every rebase during the move. Never merge it by
-hand: after a rebase, run `noupling scan .` and `noupling baseline save .` again and
-commit the regenerated file.
+`baseline.json` conflicts when two PRs both re-save it. Never merge it by hand: after a
+merge from main, run `noupling scan .` and `noupling baseline save .` again and commit
+the regenerated file.
 
 ## Bumping noupling
 

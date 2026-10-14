@@ -4,8 +4,8 @@
 //! features read.
 
 use crate::filtered_list::Row;
-use crate::git::path::RepoPath;
-use crate::git::status::FileEntry;
+use kika_git::path::RepoPath;
+use kika_git::status::FileEntry;
 
 impl Row for FileEntry {
     type Key = RepoPath;

@@ -7,10 +7,10 @@ use crate::diff_mark::{DiffEnd, DiffMark};
 use crate::effect::{Effect, Tag};
 use crate::features::commits::CommitFilesList;
 use crate::features::commits::CommitsTab;
-use crate::git::commit_files::{CommitId, CommitRange};
 use crate::keymap::KeyScope;
 use crate::layout::{Panel, SidePanel};
 use crate::model::AppState;
+use kika_git::commit_files::{CommitId, CommitRange};
 
 /// Comparing commits' half of `update`, which `commits::update` passes
 /// `CommitsIntent::Compare` to. A free function, so its name cannot clash
@@ -133,10 +133,10 @@ mod tests {
 
     use super::*;
     use crate::features::commits::CommitsIntent;
-    use crate::git::branches::{Branch, BranchName, Track};
     use crate::intent::AppIntent;
     use crate::model::Focus;
     use crate::test_support::{load_list, oid, press, type_text, with_log};
+    use kika_git::branches::{Branch, BranchName, Track};
 
     /// The one `ResolveDiff` in `effects`.
     fn resolve(effects: &[Effect]) -> (Tag, DiffEnd, DiffEnd) {

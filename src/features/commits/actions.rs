@@ -6,10 +6,10 @@
 use super::keys;
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::Effect;
-use crate::git::commit_files::CommitId;
 use crate::keymap::{KeyScope, Reason};
 use crate::model::{AppState, Context};
 use crate::op::{GitOp, ResetMode};
+use kika_git::commit_files::CommitId;
 
 /// The selected commit's actions: checkout, revert and reset.
 impl AppState {
@@ -120,12 +120,12 @@ mod tests {
     use super::*;
     use crate::confirm_question::quit_question;
     use crate::features::commits::CommitsIntent;
-    use crate::git::repo_state::Operation;
     use crate::intent::AppIntent;
     use crate::keymap;
     use crate::menu::MenuId;
     use crate::popup::Popup;
     use crate::test_support::{attached_of, cid, on_branch, on_commit, op_of, press, press_char};
+    use kika_git::repo_state::Operation;
 
     #[test]
     fn space_asks_before_a_detached_checkout_and_y_checks_out_the_commit() {

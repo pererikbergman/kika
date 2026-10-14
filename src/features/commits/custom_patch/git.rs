@@ -8,13 +8,13 @@
 use std::collections::BTreeSet;
 
 use super::state::{CustomPatch, FilePick, PatchAction};
-use crate::git::commit_files::CommitId;
-use crate::git::diff::{DiffOptions, commit_patch_command, run_diff};
-use crate::git::error::GitError;
-use crate::git::patch::{self, Direction, PatchSelection};
-use crate::git::rebase_plan::{RebasePlan, TodoAction};
-use crate::git::repo_state::{Operation, git_dir_command, git_dir_from, in_progress};
-use crate::git::runner::{GitCommand, GitRunner};
+use kika_git::commit_files::CommitId;
+use kika_git::diff::{DiffOptions, commit_patch_command, run_diff};
+use kika_git::error::GitError;
+use kika_git::patch::{self, Direction, PatchSelection};
+use kika_git::rebase_plan::{RebasePlan, TodoAction};
+use kika_git::repo_state::{Operation, git_dir_command, git_dir_from, in_progress};
+use kika_git::runner::{GitCommand, GitRunner};
 
 /// What is done at one stop of the rebase, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,7 +62,7 @@ pub fn stop_work(plan: &RebasePlan, action: &PatchAction, source: &CommitId) -> 
 /// One file's change in the source commit, as the patch engine reads it:
 /// git's default context, whitespace kept, renames off, the name read
 /// literally after `--`.
-pub fn diff_command(patch: &CustomPatch, path: &crate::git::path::RepoPath) -> GitCommand {
+pub fn diff_command(patch: &CustomPatch, path: &kika_git::path::RepoPath) -> GitCommand {
     commit_patch_command(&patch.source, path, DiffOptions::default())
 }
 
@@ -137,7 +137,7 @@ pub fn build(runner: &dyn GitRunner, picks: &CustomPatch) -> Result<Vec<u8>, Str
         let stdout = run_diff(
             runner,
             &diff_command(picks, path),
-            crate::git::diff::DiffSide::Index,
+            kika_git::diff::DiffSide::Index,
         )?;
         let file = patch::parse(&stdout).map_err(|e| format!("{}: {e}", path.display()))?;
         let all: BTreeSet<_> = file
@@ -353,12 +353,12 @@ fn stdout_of(runner: &dyn GitRunner, cmd: &GitCommand) -> Result<Vec<u8>, String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::commit_files::CommitRange;
-    use crate::git::fake::{FakeRunner, TempDir, fail, ok};
-    use crate::git::patch::LineId;
-    use crate::git::path::RepoPath;
-    use crate::git::rebase_plan::Step;
     use crate::op::{GitOp, op_command};
+    use kika_git::commit_files::CommitRange;
+    use kika_git::fake::{FakeRunner, TempDir, fail, ok};
+    use kika_git::patch::LineId;
+    use kika_git::path::RepoPath;
+    use kika_git::rebase_plan::Step;
 
     fn id(digit: char) -> CommitId {
         CommitId::parse(&digit.to_string().repeat(40)).unwrap()
@@ -418,7 +418,7 @@ mod tests {
         assert!(!args.contains(&"-w".to_string()));
         assert_eq!(
             cmd.env_profile(),
-            Some(crate::git::runner::EnvProfile::Standard)
+            Some(kika_git::runner::EnvProfile::Standard)
         );
         assert_eq!(
             cmd.process_env(),
@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn index_writes_reads_and_user_commands_each_get_their_profile() {
-        use crate::git::runner::EnvProfile;
+        use kika_git::runner::EnvProfile;
         let write = env(&[("LC_ALL", "C"), ("GIT_LITERAL_PATHSPECS", "1")]);
         let read = env(&[
             ("LC_ALL", "C"),
@@ -828,7 +828,7 @@ mod tests {
 
     #[test]
     fn the_worktree_check_reads_real_changes_and_not_a_touched_file() {
-        use crate::git::fake::git;
+        use kika_git::fake::git;
         let tmp = TempDir::new("custom-patch-dirty");
         let dir = tmp.path();
         git(dir, &["init", "-q"]);
@@ -847,7 +847,7 @@ mod tests {
                 "a",
             ],
         );
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         std::fs::write(dir.join("u.txt"), "untracked\n").unwrap();
         // Rewritten with the same bytes: only its stat data changed.
         std::fs::write(dir.join("a.txt"), "a\n").unwrap();

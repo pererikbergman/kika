@@ -4,9 +4,9 @@
 //! core intents, because bisect shares them.
 
 use crate::effect::Tag;
-use crate::git::commit_files::CommitId;
-use crate::git::repo_state::Operation;
 use crate::op::MergeStrategy;
+use kika_git::commit_files::CommitId;
+use kika_git::repo_state::Operation;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OperationIntent {

@@ -10,20 +10,18 @@ use crate::clipboard::CopyWhat;
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::Effect;
 use crate::features::pull_requests::PullRequestsIntent;
-use crate::forge::remote::{allowed, matches};
-use crate::forge::url::{ForgeKind, commit_url, forge_for, gitlab_mrs_url, pull_url, repo_of};
-use crate::forge::{
-    CreateError, ForgeHost, ForgeRepo, PrBadge, PrState, REFRESH_LIMITED, same_repo,
-};
-use crate::git::branches::BranchName;
-use crate::git::commit_files::CommitId;
-use crate::git::remotes::RemoteName;
-use crate::git::safe_text::terminal_safe;
 use crate::intent::AppIntent;
 use crate::keymap::{KeyScope, Reason, no_commit_selected};
 use crate::model::{AppState, Context};
 use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::{ErrorPopup, LineInput, Popup, PromptKind};
+use kika_forge::remote::{allowed, matches};
+use kika_forge::url::{ForgeKind, commit_url, forge_for, gitlab_mrs_url, pull_url, repo_of};
+use kika_forge::{CreateError, ForgeHost, ForgeRepo, PrBadge, PrState, REFRESH_LIMITED, same_repo};
+use kika_git::branches::BranchName;
+use kika_git::commit_files::CommitId;
+use kika_git::remotes::RemoteName;
+use kika_git::safe_text::terminal_safe;
 
 const NO_BRANCH: &str = "No branch selected";
 const NO_FORGE: &str = "The remote is on no forge host in the global config";
@@ -578,15 +576,15 @@ mod tests {
 
     use super::*;
     use crate::effect::Tag;
-    use crate::forge::{CiState, ForgeHost, ForgeStatus, ForgeView};
-    use crate::git::branches::{Branch, Track};
-    use crate::git::log::CommitRow;
-    use crate::git::remotes::{Remote, RemoteBranch};
     use crate::intent::AppIntent;
     use crate::layout::SidePanel;
     use crate::menu::{self, MenuId};
     use crate::model::Focus;
     use crate::test_support::{load_list, load_remotes};
+    use kika_forge::{CiState, ForgeHost, ForgeStatus, ForgeView};
+    use kika_git::branches::{Branch, Track};
+    use kika_git::log::CommitRow;
+    use kika_git::remotes::{Remote, RemoteBranch};
 
     const OID: &str = "0123456789abcdef0123456789abcdef01234567";
 
@@ -1105,7 +1103,7 @@ mod tests {
     /// `remotes` on github.com, which `[forge.allow]` narrows to `acme`.
     fn acme_only(remotes: Vec<Remote>) -> AppState {
         let mut state = on_github(remotes);
-        let rule = crate::forge::allow::AllowRule::parse("acme").unwrap();
+        let rule = kika_forge::allow::AllowRule::parse("acme").unwrap();
         state.forge.hosts = vec![host("github.com").with_allow(vec![rule])];
         state
     }

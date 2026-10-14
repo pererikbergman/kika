@@ -9,8 +9,8 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use super::state::{BlameView, CommitView};
 use crate::diff_pane_view::{clipped_marked, found_note, marks_of, styled_diff_line};
-use crate::git::blame::BlameLine;
 use crate::view::{PanelLook, elide_right, pad, reversed, short_hash};
+use kika_git::blame::BlameLine;
 
 /// Columns the author takes in a blame row; longer names are elided.
 const BLAME_AUTHOR: usize = 16;
@@ -120,7 +120,6 @@ mod tests {
     use ratatui::style::{Color, Modifier};
 
     use super::*;
-    use crate::git::diff::{EmojiZwj, LineKind};
     use crate::model::Focus;
     use crate::test_support::OID;
     use crate::test_support::screen::{
@@ -128,6 +127,7 @@ mod tests {
         find, loaded,
     };
     use crate::view::buffer_rows;
+    use kika_git::diff::{EmojiZwj, LineKind};
 
     fn reversed_at(buffer: &ratatui::buffer::Buffer, needle: &str) -> bool {
         let (x, y) = find(buffer, needle);
@@ -179,7 +179,7 @@ mod tests {
     #[test]
     fn a_blamed_word_keeps_its_zwnj() {
         let out = format!("{OID} 1 1 1\nauthor Ann\n\tمی\u{200C}خواهمX\n");
-        let lines = crate::git::blame::parse_blame(out.as_bytes(), EmojiZwj::Escape).unwrap();
+        let lines = kika_git::blame::parse_blame(out.as_bytes(), EmojiZwj::Escape).unwrap();
         let buffer = draw_buffer(&blamed(lines, 0), 120, 20);
         let rows = buffer_rows(&buffer);
         assert!(contains(&rows, "می\u{200C}خواهمX"), "{rows:#?}");
@@ -193,7 +193,7 @@ mod tests {
     fn with_keep_a_blamed_emoji_sequence_is_one_cell_and_the_border_holds() {
         let family = "👨\u{200D}👩\u{200D}👧";
         let out = format!("{OID} 1 1 1\nauthor Ann\n\t{family}X\n");
-        let lines = crate::git::blame::parse_blame(out.as_bytes(), EmojiZwj::Keep).unwrap();
+        let lines = kika_git::blame::parse_blame(out.as_bytes(), EmojiZwj::Keep).unwrap();
         let buffer = draw_buffer(&blamed(lines, 0), 120, 20);
         let area = buffer.area;
         let (x, y) = (0..area.height)
@@ -205,7 +205,7 @@ mod tests {
 
         let long = format!("می\u{200C}خواهم क्\u{200D}ष {family} ").repeat(8);
         let out = format!("{OID} 1 1 1\nauthor Ann\n\t{long}\n");
-        let lines = crate::git::blame::parse_blame(out.as_bytes(), EmojiZwj::Keep).unwrap();
+        let lines = kika_git::blame::parse_blame(out.as_bytes(), EmojiZwj::Keep).unwrap();
         let state = blamed(lines, 0);
         for width in 30..=60 {
             let buffer = draw_buffer(&state, width, 12);

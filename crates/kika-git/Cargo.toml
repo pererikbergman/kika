@@ -1,0 +1,17 @@
+[package]
+name = "kika-git"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+# Exposes the test builders (`fake`, fixtures) to other crates' tests.
+# Only `[dev-dependencies]` turn it on, so release builds never carry them.
+test-support = []
+
+[dependencies]
+# Only `Span::width` in `diff.rs`, so emoji widths stay exactly as drawn.
+ratatui = "0.30"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

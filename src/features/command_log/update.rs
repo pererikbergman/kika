@@ -4,9 +4,9 @@
 
 use super::{CommandLogIntent, CommandLogView};
 use crate::effect::Effect;
-use crate::git::recording::CommandEvent;
 use crate::model::AppState;
 use crate::popup::Popup;
+use kika_git::recording::CommandEvent;
 
 /// The feature's half of `update`: core's one `AppIntent::CommandLog` arm
 /// lands here. A free function, so its name cannot clash with handlers.
@@ -70,7 +70,7 @@ mod tests {
 
     fn log_started(state: &mut AppState, id: u64) {
         state.update(AppIntent::CommandLog(CommandLogIntent::Logged(
-            crate::git::recording::CommandEvent::Started {
+            kika_git::recording::CommandEvent::Started {
                 id,
                 line: format!("git cmd{id}"),
                 attached: false,
@@ -87,7 +87,7 @@ mod tests {
 
     #[test]
     fn the_command_log_records_in_order_and_stays_bounded() {
-        use crate::git::recording::{CommandEvent, CommandOutcome};
+        use kika_git::recording::{CommandEvent, CommandOutcome};
 
         let mut state = AppState::new(Context::Workspace);
         for id in 0..3 {

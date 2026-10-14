@@ -10,11 +10,11 @@ use super::push::{self, StashSet};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::diff_pane::DiffStart;
 use crate::effect::{Effect, Tag};
-use crate::git::diff::DiffRequest;
 use crate::keymap::{self, KeyScope};
 use crate::model::{AppState, Context, Focus};
 use crate::op::GitOp;
 use crate::popup::{DeleteRangeConfirm, LineInput, Popup, PromptKind, RangeKind};
+use kika_git::diff::DiffRequest;
 
 /// The Stash panel's half of `update`: core's one `AppIntent::Stash` arm
 /// lands here. A free function, so its name cannot clash with handlers.
@@ -395,10 +395,6 @@ pub(crate) fn drop_stash_question(label: &str, op: GitOp) -> ConfirmQuestion {
 mod tests {
     use super::*;
     use crate::diff_pane::DiffPane;
-    use crate::git::FileEntry;
-    use crate::git::commit_files::CommitRange;
-    use crate::git::path::RepoPath;
-    use crate::git::status::EntryKind;
     use crate::intent::AppIntent;
     use crate::keymap::KeyScope;
     use crate::list_filter::InputTarget;
@@ -407,6 +403,10 @@ mod tests {
     use crate::refresh;
     use crate::test_support::*;
     use crossterm::event::KeyCode;
+    use kika_git::FileEntry;
+    use kika_git::commit_files::CommitRange;
+    use kika_git::path::RepoPath;
+    use kika_git::status::EntryKind;
 
     #[test]
     fn the_diff_cannot_take_focus_from_an_open_stash() {

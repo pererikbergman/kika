@@ -159,10 +159,10 @@ pub(crate) static OPERATION_SKIP_CONFIRM: &[Binding] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::status::Head;
     use crate::keymap::{Keymap, Resolution, registry, resolve};
     use crate::model::Context;
     use crate::test_support::{key, plain};
+    use kika_git::status::Head;
 
     #[test]
     fn the_abort_question_has_no_enter_and_n_or_esc_keeps_the_operation() {
@@ -216,11 +216,11 @@ mod tests {
         assert_eq!(KeyScope::Status.title(), "Status");
         // A rebase is in progress, so all three keys are enabled.
         let mut state = AppState::new(Context::Workspace);
-        state.branch = Some(crate::git::status::BranchStatus {
+        state.branch = Some(kika_git::status::BranchStatus {
             head: Head::Branch("main".into()),
             upstream: None,
             ahead_behind: None,
-            in_progress: vec![crate::git::repo_state::Operation::Rebase],
+            in_progress: vec![kika_git::repo_state::Operation::Rebase],
             bisect: None,
         });
         let status = |c| match resolve(

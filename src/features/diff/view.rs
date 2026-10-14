@@ -7,9 +7,9 @@ use ratatui::layout::Rect;
 
 use crate::diff_pane::DiffPane;
 use crate::diff_pane_view::{diff_pane_body, diff_position, found_note};
-use crate::git::diff::{DiffOptions, DiffSide};
 use crate::hunk_view::HunkView;
 use crate::view::PanelLook;
+use kika_git::diff::{DiffOptions, DiffSide};
 
 /// The diff options that differ from the defaults, for the pane title, so
 /// a changed setting is never mistaken for the file's real diff.
@@ -85,10 +85,10 @@ pub(crate) fn hunk_title_parts(view: &HunkView, options: DiffOptions) -> (&'stat
 
 #[cfg(test)]
 mod tests {
-    use crate::git::diff::{DiffSide, LineKind};
     use crate::test_support::screen::{
         TWO_HUNKS, contains, diff_line, draw, draw_buffer, find, hunks, with_diff,
     };
+    use kika_git::diff::{DiffSide, LineKind};
     use ratatui::style::{Color, Modifier};
 
     #[test]
@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn the_diff_title_names_the_diff_options_that_differ_from_the_defaults() {
-        use crate::git::diff::DiffOptions;
+        use kika_git::diff::DiffOptions;
         let mut state = with_diff(vec![diff_line(LineKind::Added, "+new")]);
         let rows = draw(&state, 120, 12);
         assert!(contains(&rows, "┌ [0] Diff a.rs · 1/1 ─"), "{rows:#?}");

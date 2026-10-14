@@ -1,5 +1,5 @@
 //! Guards that every process Kika starts goes through
-//! [`crate::git::program`]: a scan of the sources for processes built by
+//! [`kika_git::program`]: a scan of the sources for processes built by
 //! hand, and a run of each spawn site from a directory full of decoys.
 //! They read or run the whole tree, so they live in the main crate.
 
@@ -23,8 +23,8 @@ mod tests {
     #[cfg(unix)]
     mod unix {
         use super::super::*;
-        use crate::git::fake::TempDir;
-        use crate::git::program::NOT_FOUND;
+        use kika_git::fake::TempDir;
+        use kika_git::program::NOT_FOUND;
         use std::io;
         use std::os::unix::fs::PermissionsExt;
         use std::path::{Path, PathBuf};
@@ -99,8 +99,8 @@ mod tests {
             use crate::features::diff::renderers::external_diff::{
                 ExternalRenderer, LIMITS, RendererKind,
             };
-            use crate::forge::github::{CliGh, GhCall, GhCommand, GhRunner};
-            use crate::git::runner::{CliRunner, GitCommand, GitRunner};
+            use kika_forge::github::{CliGh, GhCall, GhCommand, GhRunner};
+            use kika_git::runner::{CliRunner, GitCommand, GitRunner};
 
             if !in_decoy_child() {
                 return;
@@ -112,7 +112,7 @@ mod tests {
             assert!(runner.run(&version).is_err_and(not_found));
             assert!(runner.spawn(&version).is_err_and(not_found));
             assert!(runner.run_attached(&version).is_err_and(not_found));
-            let refused = crate::git::version::check(&runner).unwrap_err();
+            let refused = kika_git::version::check(&runner).unwrap_err();
             assert!(refused.contains("git was not found"), "{refused}");
 
             let gh = GhCommand {
@@ -149,19 +149,18 @@ mod tests {
     }
 
     /// No production code builds a process by itself: outside
-    /// `git/program.rs` and test-only code, `Command::new(` never appears.
+    /// `kika_git::program` and test-only code, `Command::new(` never appears.
     /// `GitCommand::new(` and the like are other types.
     #[test]
     fn every_spawn_site_goes_through_this_module() {
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let skipped = [
-            src.join("git").join("program.rs"),
-            src.join("e2e"),
-            src.join("git").join("fake.rs"),
-        ];
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let git = root.join("crates").join("kika-git").join("src");
+        let forge = root.join("crates").join("kika-forge").join("src");
+        let src = root.join("src");
+        let skipped = [git.join("program.rs"), src.join("e2e"), git.join("fake.rs")];
         let mut offenders = Vec::new();
         let mut checked = 0;
-        let mut dirs = vec![src.clone()];
+        let mut dirs = vec![src, git, forge];
         while let Some(dir) = dirs.pop() {
             for entry in std::fs::read_dir(&dir).unwrap() {
                 let path = entry.unwrap().path();

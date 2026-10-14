@@ -136,11 +136,11 @@ mod tests {
     use super::*;
     use crate::diff_pane::DiffStart;
     use crate::features::stash::StashFile;
-    use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
-    use crate::git::diff::{DiffChunk, DiffLine, LineKind};
     use crate::layout::{ScreenMode, SidePanel};
     use crate::model::{AppState, Context, Focus};
     use crate::view::{buffer_rows, render};
+    use kika_git::commit_files::{CommitFile, CommitId, CommitRange};
+    use kika_git::diff::{DiffChunk, DiffLine, LineKind};
 
     fn entry(index: usize, oid: &str, subject: &str) -> StashEntry {
         StashEntry {

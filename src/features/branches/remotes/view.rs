@@ -8,8 +8,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use super::{RemoteLine, RemotesList};
-use crate::git::remotes::Remote;
 use crate::view::{PanelLook, elide_right, no_matches, range_row, scrolled};
+use kika_git::remotes::Remote;
 
 /// What the tab shows when there are no remotes.
 const NO_REMOTES: &str = "No remotes. Press a to add one.";
@@ -119,11 +119,11 @@ mod tests {
 
     use super::*;
     use crate::features::branches::BranchesTab;
-    use crate::git::remotes::{RemoteBranch, RemoteName};
     use crate::layout::SidePanel;
     use crate::model::{AppState, Context, Focus};
     use crate::test_support::{load_list, load_remotes};
     use crate::view::{buffer_rows, render};
+    use kika_git::remotes::{RemoteBranch, RemoteName};
 
     fn draw(state: &AppState, width: u16, height: u16) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -209,7 +209,7 @@ mod tests {
 
     #[test]
     fn a_url_with_credentials_and_control_characters_draws_redacted_and_safe() {
-        use crate::git::fake::{FakeRunner, ok};
+        use kika_git::fake::{FakeRunner, ok};
         let fake = FakeRunner::new()
             .expect(
                 &["config", "-z", "--get-regexp", r"^remote\..*\.url$"],
@@ -223,7 +223,7 @@ mod tests {
                 ],
                 ok(b""),
             );
-        let remotes = crate::git::remotes::list_remotes(&fake).unwrap();
+        let remotes = kika_git::remotes::list_remotes(&fake).unwrap();
         let state = focused(remotes);
         let rows = draw(&state, 80, 24);
         assert!(

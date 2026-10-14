@@ -22,16 +22,16 @@ use crate::features::stash::StashIntent;
 use crate::features::submodules::SubmoduleList;
 use crate::features::worktrees::WorktreeList;
 use crate::features::worktrees::WorktreesIntent;
-use crate::forge::merge::MergeMethod;
-use crate::forge::{ForgeHost, ForgeRepo};
-use crate::git::askpass::Secret;
-use crate::git::commit_files::CommitId;
-use crate::git::safe_text::terminal_safe;
 use crate::intent::AppIntent;
 use crate::keymap::{KeyPress, KeyScope};
 use crate::menu::MenuId;
 use crate::op::GitOp;
 use crate::pick_list::PickList;
+use kika_forge::merge::MergeMethod;
+use kika_forge::{ForgeHost, ForgeRepo};
+use kika_git::askpass::Secret;
+use kika_git::commit_files::CommitId;
+use kika_git::safe_text::terminal_safe;
 
 /// One entry on the popup stack. The top one takes the keys.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -705,7 +705,7 @@ mod tests {
     #[test]
     fn the_abort_question_names_the_operation_and_yes_aborts_that_one() {
         use crate::features::operation::abort_question;
-        use crate::git::repo_state::Operation;
+        use kika_git::repo_state::Operation;
         let yes = |op| {
             Then::Intent(Box::new(AppIntent::Operation(
                 OperationIntent::ConfirmAbort(op),
@@ -741,7 +741,7 @@ mod tests {
     #[test]
     fn the_drop_stash_question_names_the_entry_and_says_it_is_gone_for_good() {
         use crate::features::stash::StashRef;
-        use crate::git::commit_files::CommitId;
+        use kika_git::commit_files::CommitId;
         let ask = crate::features::stash::drop_stash_question(
             "stash@{2}: On main: wip",
             GitOp::StashDrop(StashRef {
@@ -772,7 +772,7 @@ mod tests {
 
     #[test]
     fn the_detached_checkout_question_warns_and_yes_checks_out() {
-        use crate::git::commit_files::CommitId;
+        use kika_git::commit_files::CommitId;
         let id = CommitId::parse("abc1234").unwrap();
         let ask = crate::features::commits::checkout_question("abc1234".into(), id.clone());
         assert_eq!(ask.title, "Detached checkout");
@@ -783,8 +783,8 @@ mod tests {
 
     #[test]
     fn the_hard_reset_question_names_the_target_and_what_is_lost() {
-        use crate::git::commit_files::CommitId;
         use crate::op::ResetMode;
+        use kika_git::commit_files::CommitId;
         let ask = crate::features::commits::reset_hard_question(
             "abc1234".into(),
             GitOp::Reset {
@@ -804,7 +804,7 @@ mod tests {
     fn leave(op: GitOp, count: usize) -> ConfirmQuestion {
         LeaveCommitsConfirm {
             op,
-            head: crate::git::commit_files::CommitId::parse("fedcba9").unwrap(),
+            head: kika_git::commit_files::CommitId::parse("fedcba9").unwrap(),
             head_short_oid: "fedcba9".into(),
             short_oid: "abc1234".into(),
             left: (0..count).map(|i| format!("{i}{i}{i}")).collect(),
@@ -814,14 +814,14 @@ mod tests {
 
     fn reset(mode: crate::op::ResetMode) -> GitOp {
         GitOp::Reset {
-            to: crate::git::commit_files::CommitId::parse("abc1234").unwrap(),
+            to: kika_git::commit_files::CommitId::parse("abc1234").unwrap(),
             mode,
         }
     }
 
     #[test]
     fn the_leave_commits_question_names_the_action_count_and_ids() {
-        use crate::git::commit_files::CommitId;
+        use kika_git::commit_files::CommitId;
         let checkout = GitOp::CheckoutCommit(CommitId::parse("abc1234").unwrap());
         let ask = leave(checkout.clone(), 3);
         assert_eq!(ask.title, "Leave commits behind");
@@ -866,8 +866,8 @@ mod tests {
 
     #[test]
     fn every_leave_commits_question_says_how_to_keep_them() {
-        use crate::git::commit_files::CommitId;
         use crate::op::ResetMode;
+        use kika_git::commit_files::CommitId;
         let checkout = GitOp::CheckoutCommit(CommitId::parse("abc1234").unwrap());
         for op in [
             checkout,
@@ -891,7 +891,7 @@ mod tests {
     #[test]
     fn the_travel_question_is_the_preview_then_y_or_n() {
         use crate::features::commits::reflog::{Direction, Expected, Step};
-        use crate::git::commit_files::CommitId;
+        use kika_git::commit_files::CommitId;
         let ask = crate::features::commits::reflog::travel_question(
             "Undo",
             &["Undo: commit: x".into(), "Branch main moves.".into()],

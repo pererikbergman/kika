@@ -5,7 +5,6 @@
 
 use crate::features::commits::CommitsIntent;
 use crate::features::commits::copy::CopyIntent;
-use crate::git::status::{EntryKind, Head};
 use crate::intent::AppIntent;
 use crate::keymap::{
     Binding, KeyPattern, KeyScope, NONE, OP_RUNNING, Reason, in_progress_disabled, list_guard,
@@ -14,6 +13,7 @@ use crate::keymap::{
 use crate::menu::MenuId;
 use crate::model::AppState;
 use crossterm::event::KeyCode;
+use kika_git::status::{EntryKind, Head};
 
 /// Why the selected commit cannot be copied. A merge commit needs a
 /// mainline chosen to be picked, which Kika does not ask for. Copying
@@ -126,11 +126,11 @@ pub(crate) static COPY_COMMITS: &[Binding] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::commit_files::CommitId;
     use crate::keymap::{Keymap, REPO_LOCKED, Resolution, Trust, registry, resolve};
     use crate::model::Context;
     use crate::test_support::{binding, build, key, plain};
     use crossterm::event::KeyModifiers;
+    use kika_git::commit_files::CommitId;
 
     #[test]
     fn c_v_and_shift_c_copy_paste_and_clear_in_the_commits_panel() {
@@ -138,7 +138,7 @@ mod tests {
         // Everything enabled: a commit to copy, one copied, a clean branch.
         let mut state = AppState::new(Context::Workspace);
         let oid = "a".repeat(40);
-        state.commits.list.rows = vec![crate::git::log::CommitRow {
+        state.commits.list.rows = vec![kika_git::log::CommitRow {
             oid: oid.clone(),
             short_oid: "aaaaaaa".into(),
             parents: vec![],
@@ -152,7 +152,7 @@ mod tests {
             short: "aaaaaaa".into(),
             subject: "s".into(),
         });
-        state.branch = Some(crate::git::status::BranchStatus {
+        state.branch = Some(kika_git::status::BranchStatus {
             head: Head::Branch("main".into()),
             upstream: None,
             ahead_behind: None,

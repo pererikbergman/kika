@@ -12,11 +12,11 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::background;
 use crate::effect::Tag;
 use crate::features::diff::DiffIntent;
-use crate::git::GitRunner;
-use crate::git::diff::{Classifier, DiffChunk, DiffRequest, EmojiZwj, diff_command};
-use crate::git::error::GitError;
-use crate::git::runner::{ChildHandle, GitCommand};
 use crate::intent::AppIntent;
+use kika_git::GitRunner;
+use kika_git::diff::{Classifier, DiffChunk, DiffRequest, EmojiZwj, diff_command};
+use kika_git::error::GitError;
+use kika_git::runner::{ChildHandle, GitCommand};
 
 /// Owns the single diff stream for the Diff pane.
 pub struct DiffStreamer {
@@ -253,8 +253,8 @@ mod tests {
 
     use super::*;
     use crate::features::diff::DiffIntent;
-    use crate::git::diff::{DiffSide, LineKind};
-    use crate::git::fake::{FakeChild, FakeRunner, fail};
+    use kika_git::diff::{DiffSide, LineKind};
+    use kika_git::fake::{FakeChild, FakeRunner, fail};
 
     /// Run `pump` on a thread over a spawned fake, collecting what it emits.
     struct Pumped {
@@ -431,7 +431,7 @@ mod tests {
     /// reason is drawn safely with no credentials.
     #[test]
     fn a_diff_that_cannot_start_says_why_safely() {
-        use crate::git::runner::{GitChild, GitOutput};
+        use kika_git::runner::{GitChild, GitOutput};
         struct NoGit;
         impl GitRunner for NoGit {
             fn run(&self, _: &GitCommand) -> std::io::Result<GitOutput> {
@@ -621,9 +621,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_commit_files_diff_streams_only_that_files_change_in_that_commit() {
-        use crate::git::CliRunner;
-        use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
-        use crate::git::fake::{TempDir, git};
+        use kika_git::CliRunner;
+        use kika_git::commit_files::{CommitFile, CommitId, CommitRange};
+        use kika_git::fake::{TempDir, git};
 
         let tmp = TempDir::new("commit-file-diff");
         let dir = tmp.path();
@@ -679,8 +679,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_streamer_set_to_keep_draws_emoji_joiners_in_body_lines() {
-        use crate::git::CliRunner;
-        use crate::git::fake::{TempDir, git};
+        use kika_git::CliRunner;
+        use kika_git::fake::{TempDir, git};
 
         let family = "👨\u{200D}👩\u{200D}👧";
         let tmp = TempDir::new("emoji-diff");

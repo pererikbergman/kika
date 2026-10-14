@@ -6,17 +6,15 @@
 use super::state::{NO_FORGE, ReviewScreen};
 use crate::confirm_question::{Answer, Then};
 use crate::effect::{Effect, Tag};
-use crate::forge::merge::{MergeMethod, merge_options};
-use crate::forge::remote::allowed;
-use crate::forge::review::MergeState;
-use crate::forge::{
-    CreateError, ForgeHost, ForgeRepo, PrBadge, PrState, REFRESH_LIMITED, same_repo,
-};
 use crate::keymap::{KeyScope, Reason};
 use crate::model::{AppState, Context};
 use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::{ErrorPopup, MergePrConfirm, Popup};
 use crate::refresh::{RefreshPlan, Scope};
+use kika_forge::merge::{MergeMethod, merge_options};
+use kika_forge::remote::allowed;
+use kika_forge::review::MergeState;
+use kika_forge::{CreateError, ForgeHost, ForgeRepo, PrBadge, PrState, REFRESH_LIMITED, same_repo};
 
 const NO_PR_SHOWN: &str = "Open a pull request first";
 const MERGING: &str = "A merge is already running";
@@ -270,12 +268,12 @@ mod tests {
     use crate::confirm_question::ConfirmQuestion;
     use crate::features::review::ReviewIntent;
     use crate::features::review::state::tests::{fixture_detail, in_queues, press, repo};
-    use crate::forge::review::{MergeState, Mergeability, PrDetail, QueueKind};
-    use crate::forge::{CiState, ForgeView};
-    use crate::git::branches::{Branch, BranchName, Track};
     use crate::intent::AppIntent;
     use crate::keymap::KeyPress;
     use crate::test_support::{load_list, pull_requests_fetched};
+    use kika_forge::review::{MergeState, Mergeability, PrDetail, QueueKind};
+    use kika_forge::{CiState, ForgeView};
+    use kika_git::branches::{Branch, BranchName, Track};
 
     const NOW: i64 = 1_700_000_000;
 
@@ -495,7 +493,7 @@ mod tests {
 
     #[test]
     fn a_repository_the_allow_list_leaves_out_is_never_merged() {
-        use crate::forge::allow::AllowRule;
+        use kika_forge::allow::AllowRule;
         let other = || vec![AllowRule::parse("other").unwrap()];
         // Left out by the time `M` is pressed: no question.
         let mut state = on_detail(squash_only);

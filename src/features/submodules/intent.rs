@@ -3,7 +3,7 @@
 //! (see `docs/adr/0002-nested-intents.md`).
 
 use crate::effect::Tag;
-use crate::git::submodule::Submodule;
+use kika_git::submodule::Submodule;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SubmodulesIntent {

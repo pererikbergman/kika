@@ -1,9 +1,9 @@
 //! The interactive rebase every log rewrite runs: its argv, with the
 //! plan handed to the sequence editor in the environment.
 
-use crate::git::rebase_plan::PLAN_ENV;
-use crate::git::rebase_plan::{RebasePlan, encode};
-use crate::git::runner::GitCommand;
+use kika_git::rebase_plan::PLAN_ENV;
+use kika_git::rebase_plan::{RebasePlan, encode};
+use kika_git::runner::GitCommand;
 
 /// The plan goes to the sequence editor, which `handoff` names; the
 /// base is hex digits only. The keys are newer config that an older
@@ -43,7 +43,7 @@ mod tests {
 
     #[test]
     fn an_interactive_rebase_passes_only_the_plan_in_its_env() {
-        let plan = crate::git::rebase_plan::sample();
+        let plan = kika_git::rebase_plan::sample();
         let cmd = op_command(&GitOp::InteractiveRebase(plan.clone()));
         assert_eq!(
             argv(&cmd),
@@ -75,11 +75,11 @@ mod tests {
 
     #[test]
     fn an_interactive_rebase_runs_in_the_user_s_env_plus_the_plan() {
-        use crate::git::runner::EnvProfile;
-        let plan = crate::git::rebase_plan::sample();
+        use kika_git::runner::EnvProfile;
+        let plan = kika_git::rebase_plan::sample();
         let cmd = op_command(&GitOp::InteractiveRebase(plan.clone()));
         assert_eq!(cmd.env_profile(), Some(EnvProfile::UserEnv));
-        let encoded = crate::git::rebase_plan::encode(&plan.steps);
+        let encoded = kika_git::rebase_plan::encode(&plan.steps);
         assert_eq!(
             cmd.process_env(),
             [("KIKA_REBASE_PLAN".into(), encoded.into())]
@@ -88,7 +88,7 @@ mod tests {
 
     #[test]
     fn with_update_refs_the_rebase_passes_the_flag_and_not_the_key() {
-        let mut plan = crate::git::rebase_plan::sample();
+        let mut plan = kika_git::rebase_plan::sample();
         plan.update_refs = true;
         let cmd = op_command(&GitOp::InteractiveRebase(plan.clone()));
         assert_eq!(

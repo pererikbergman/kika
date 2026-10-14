@@ -5,17 +5,17 @@
 
 use super::files::PrFiles;
 use crate::effect::{Effect, Tag};
-use crate::forge::merge::MergeMethod;
-use crate::forge::remote::{allowed, matches};
-use crate::forge::review::{CheckStatus, PrDetail, PrSummary, QueueKind, Queues, ReviewError};
-use crate::forge::{ForgeHost, ForgeRepo, ForgeStatus};
-use crate::git::commit_files::CommitId;
 use crate::intent::AppIntent;
 use crate::keymap::Reason;
 use crate::list_filter;
 use crate::model::{AppState, Context};
 use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::{MergePrConfirm, Popup};
+use kika_forge::merge::MergeMethod;
+use kika_forge::remote::{allowed, matches};
+use kika_forge::review::{CheckStatus, PrDetail, PrSummary, QueueKind, Queues, ReviewError};
+use kika_forge::{ForgeHost, ForgeRepo, ForgeStatus};
+use kika_git::commit_files::CommitId;
 use ratatui::text::Line;
 
 pub const NO_FORGE: &str =
@@ -646,11 +646,11 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::features::review::ReviewIntent;
-    use crate::forge::ForgeView;
-    use crate::forge::review::Check;
-    use crate::forge::review::fixtures::{DETAIL, QUEUES};
     use crate::keymap::KeyPress;
     use crate::list_filter::InputTarget;
+    use kika_forge::ForgeView;
+    use kika_forge::review::Check;
+    use kika_forge::review::fixtures::{DETAIL, QUEUES};
 
     const NOW: i64 = 1_700_000_000;
 
@@ -706,11 +706,10 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn fixture_queues() -> Queues {
-        let runner =
-            crate::forge::github::FakeGh::new().reply(crate::forge::github::answer(QUEUES));
+        let runner = kika_forge::github::FakeGh::new().reply(kika_forge::github::answer(QUEUES));
         let host = github()[0].clone();
-        let sink = crate::git::recording::CommandSink::new();
-        crate::forge::github::Gh::fixture(&runner, &sink, &host, NOW)
+        let sink = kika_git::recording::CommandSink::new();
+        kika_forge::github::Gh::fixture(&runner, &sink, &host, NOW)
             .fetch_queues(&repo())
             .unwrap()
     }
@@ -720,11 +719,10 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn detail_from(answer: &str) -> PrDetail {
-        let runner =
-            crate::forge::github::FakeGh::new().reply(crate::forge::github::answer(answer));
+        let runner = kika_forge::github::FakeGh::new().reply(kika_forge::github::answer(answer));
         let host = github()[0].clone();
-        let sink = crate::git::recording::CommandSink::new();
-        crate::forge::github::Gh::fixture(&runner, &sink, &host, NOW)
+        let sink = kika_git::recording::CommandSink::new();
+        kika_forge::github::Gh::fixture(&runner, &sink, &host, NOW)
             .fetch_detail(&repo(), 42)
             .unwrap()
             .unwrap()
@@ -850,7 +848,7 @@ pub(crate) mod tests {
 
         // The known repository is one `[forge.allow]` leaves out.
         let mut state = workspace();
-        let rule = crate::forge::allow::AllowRule::parse("someone-else").unwrap();
+        let rule = kika_forge::allow::AllowRule::parse("someone-else").unwrap();
         state.forge.hosts = vec![state.forge.hosts[0].clone().with_allow(vec![rule])];
         assert!(state.forge.repo.is_some());
         assert_eq!(state.update(AppIntent::Review(ReviewIntent::Enter)), []);

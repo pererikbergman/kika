@@ -16,11 +16,20 @@ integration.
 | Purpose | Command |
 |---|---|
 | Build | `cargo build` |
-| Test | `cargo test` |
-| Lint | `cargo clippy --all-targets -- -D warnings` |
-| Format check | `cargo fmt --check` |
+| Test | `cargo test --workspace` |
+| Lint | `cargo clippy --workspace --all-targets -- -D warnings` |
+| Format check | `cargo fmt --all --check` |
 
 A change is only done when all four pass.
+
+## Crates
+Kika is a Cargo workspace (`docs/adr/0003-git-forge-crates.md`, ADR-0003). The `kika`
+binary in `src/` depends on both plumbing crates; neither depends on it.
+
+| Crate | Holds | Depends on |
+|---|---|---|
+| `crates/kika-git` (`kika_git`) | git CLI plumbing, program lookup | no Kika crate |
+| `crates/kika-forge` (`kika_forge`) | the forge client | `kika-git` only |
 
 ## Architecture: MVI core with feature folders
 The layout is decided in `docs/adr/0001-vertical-slices.md` (ADR-0001). Core is the
@@ -42,7 +51,7 @@ Core files:
 | `src/handoff.rs` | Hand-off | Blocking work that needs the real terminal (editor, attached ops, commands). The loop suspends the screen around it. |
 | `src/list_input.rs`, `src/filtered_list.rs` | List input | List filters, ranges, pane search and Esc in a list, shared by every list. `FilteredList` owns one list's rows, cursor, filter, range and load in flight. |
 | `src/bisect.rs`, `src/diff_pane.rs`, `src/hunk_view.rs`, `src/diff_search.rs`, `src/diff_mark.rs`, `src/range_delete.rs`, `src/remote_run.rs`, `src/model/confirm_guard.rs` | Shared state | State and guards that two or more features use. Each one's reason is in ADR-0001's Outcome. |
-| `src/config.rs`, `src/config_docs.rs`, `src/clipboard.rs`, `src/program.rs`, `src/sequence_editor.rs`, `src/worktree_file.rs` | Plumbing | Config loading and its doc test, the clipboard, program lookup, Kika as git's sequence editor, and worktree file I/O. |
+| `src/config.rs`, `src/config_docs.rs`, `src/clipboard.rs`, `src/sequence_editor.rs`, `src/worktree_file.rs` | Plumbing | Config loading and its doc test, the clipboard, Kika as git's sequence editor, and worktree file I/O. |
 | `src/test_support.rs` | Tests | Shared `#[cfg(test)]` builders that tests in more than one area use. A helper only one feature's tests use stays with that feature. |
 
 Feature-folder files (each only when the feature has something to put there):
@@ -63,8 +72,8 @@ Dependency rules:
 | From | May import | Must not import |
 |---|---|---|
 | core (`src/*.rs`) | anything: it is the composition root | none |
-| a feature | core; `src/git`; `src/forge`; its own subtree; its parent features (for example `commits/reflog` may import `commits`) | a sibling feature, or anything inside one |
-| `src/git`, `src/forge` | the core files they already use | any feature |
+| a feature | core; `kika_git`; `kika_forge`; its own subtree; its parent features (for example `commits/reflog` may import `commits`) | a sibling feature, or anything inside one |
+| `kika_git`, `kika_forge` | each other only as the Crates table says | the `kika` crate (Cargo enforces it) |
 | `src/e2e` | anything | none |
 
 1. Something two features both need goes in their nearest common parent feature, or
@@ -91,6 +100,9 @@ MVI purity:
 
 ## Conventions
 - Unit tests live next to the code in `#[cfg(test)] mod tests`.
+- A test builder that another crate's tests need goes behind
+  `#[cfg(any(test, feature = "test-support"))]`, and only `[dev-dependencies]` enable
+  that crate's `test-support` feature, so release builds never carry it.
 - `update` is tested by applying intents to a state and asserting on fields.
 - Views are tested by drawing into `ratatui::backend::TestBackend` and reading the buffer.
 - Doc comments on public items say *why*, briefly. Match the existing comment density.

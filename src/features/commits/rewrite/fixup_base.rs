@@ -2,11 +2,11 @@
 //! lines it changes, by `git blame` of `HEAD`. Read only; the parsing and
 //! the choice are pure.
 
-use crate::git::blame::parse_blame;
-use crate::git::commit_files::CommitId;
-use crate::git::diff::EmojiZwj;
-use crate::git::path::RepoPath;
-use crate::git::runner::{GitCommand, GitRunner};
+use kika_git::blame::parse_blame;
+use kika_git::commit_files::CommitId;
+use kika_git::diff::EmojiZwj;
+use kika_git::path::RepoPath;
+use kika_git::runner::{GitCommand, GitRunner};
 
 /// The commits the staged lines come from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -446,7 +446,7 @@ Binary files a/bin and b/bin differ\n";
             assert!(!cmd.args().iter().any(|a| a == "--end-of-options"));
             assert_eq!(
                 cmd.env_profile(),
-                Some(crate::git::runner::EnvProfile::Standard)
+                Some(kika_git::runner::EnvProfile::Standard)
             );
             assert_eq!(
                 cmd.process_env(),
@@ -461,7 +461,7 @@ Binary files a/bin and b/bin differ\n";
 
     #[test]
     fn a_failed_read_names_its_subcommand_or_shows_git_s_words_made_safe() {
-        use crate::git::fake::{FakeRunner, fail, ok};
+        use kika_git::fake::{FakeRunner, fail, ok};
         let diff: Vec<String> = staged_diff_command()
             .args()
             .iter()
@@ -506,7 +506,7 @@ Binary files a/bin and b/bin differ\n";
 
     #[test]
     fn the_task_blames_a_staged_edit_of_a_line_the_second_commit_changed_in_real_git() {
-        use crate::git::fake::{TempDir, git};
+        use kika_git::fake::{TempDir, git};
 
         let tmp = TempDir::new("fixup-base");
         let dir = tmp.path();
@@ -528,7 +528,7 @@ Binary files a/bin and b/bin differ\n";
         std::fs::write(dir.join(name), "one\nfixed\nthree\n").unwrap();
         std::fs::write(dir.join("new.txt"), "new\n").unwrap();
         git(dir, &["add", "-A"]);
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
 
         assert_eq!(
             find_fixup_base(&runner),

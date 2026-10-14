@@ -18,16 +18,15 @@ use crate::config::Loaded;
 use crate::effect::{Effect, Runtime};
 use crate::features::command_log::CommandLogIntent;
 use crate::features::sync::SyncIntent;
-use crate::forge;
-use crate::forge::github::CliGh;
-use crate::forge::task::ForgeContext;
-use crate::git::GitRunner;
-use crate::git::recording::CommandSink;
 use crate::handoff::{self, HandOff};
 use crate::intent::AppIntent;
 use crate::model::AppState;
 use crate::view;
 use crate::watch::{WatchConfig, WatchEvent};
+use kika_forge::github::CliGh;
+use kika_forge::task::ForgeContext;
+use kika_git::GitRunner;
+use kika_git::recording::CommandSink;
 
 /// The main loop: render, wait for the next intent, update, run its effects.
 /// The loop only ever awaits the channel; effects report back as intents.
@@ -51,7 +50,7 @@ pub async fn run(
     let forge = (!config.forge_hosts.is_empty()).then(|| ForgeContext {
         gh: Arc::new(CliGh),
         sink: sink.clone(),
-        cache_dir: forge::cache::default_dir(|key| std::env::var_os(key)),
+        cache_dir: kika_forge::cache::default_dir(|key| std::env::var_os(key)),
     });
     let runtime = Runtime::new(Arc::clone(&runner), tx.clone())
         .with_recent_store(recent_store)
@@ -492,7 +491,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_returns_hand_offs_instead_of_spawning_them() {
-        use crate::git::fake::FakeRunner;
+        use kika_git::fake::FakeRunner;
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         // No expectations queued, so any git call would panic.
@@ -514,9 +513,9 @@ mod tests {
 
     /// A state with one changed file selected, so `OpenInEditor` hands off.
     fn state_with_a_selected_file() -> AppState {
-        use crate::git::FileEntry;
-        use crate::git::status::EntryKind;
         use crate::model::Context;
+        use kika_git::FileEntry;
+        use kika_git::status::EntryKind;
 
         let mut state = AppState::new(Context::Workspace);
         state.files.rows = vec![FileEntry {
@@ -532,7 +531,7 @@ mod tests {
 
     fn started(id: u64) -> AppIntent {
         AppIntent::CommandLog(CommandLogIntent::Logged(
-            crate::git::recording::CommandEvent::Started {
+            kika_git::recording::CommandEvent::Started {
                 id,
                 line: format!("git command-{id}"),
                 attached: false,
@@ -569,7 +568,7 @@ mod tests {
         batches: Vec<Vec<AppIntent>>,
         handed_back: AppIntent,
     ) -> LoopRun {
-        use crate::git::fake::FakeRunner;
+        use kika_git::fake::FakeRunner;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 

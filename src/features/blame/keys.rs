@@ -4,11 +4,11 @@
 //! so their position there is behaviour.
 
 use crate::features::blame::BlameIntent;
-use crate::git::status::EntryKind;
 use crate::intent::{AppIntent, Scroll};
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, Reason, list_guard, never};
 use crate::model::AppState;
 use crossterm::event::KeyCode;
+use kika_git::status::EntryKind;
 
 /// Why `b` cannot blame the selected file. An untracked or deleted file
 /// has no lines git can blame.

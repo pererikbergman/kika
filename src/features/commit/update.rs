@@ -282,12 +282,12 @@ impl AppState {
 mod tests {
     use super::*;
     use crate::features::commit::editor::Field;
-    use crate::git::FileEntry;
-    use crate::git::status::{BranchStatus, EntryKind, Head};
     use crate::keymap::KeyScope;
     use crate::popup::Popup;
     use crate::test_support::*;
     use crossterm::event::KeyCode;
+    use kika_git::FileEntry;
+    use kika_git::status::{BranchStatus, EntryKind, Head};
 
     #[test]
     fn typing_a_message_and_ctrl_s_runs_the_commit() {

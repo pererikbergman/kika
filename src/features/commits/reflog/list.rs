@@ -8,7 +8,7 @@ use super::git::{Reflog, ReflogEntry};
 use super::undo::Direction;
 use crate::effect::Tag;
 use crate::filtered_list::{FilteredList, Row};
-use crate::git::commit_files::CommitId;
+use kika_git::commit_files::CommitId;
 
 /// Hex digits of an entry's id, as the tab draws it.
 pub(crate) const SHORT_OID: usize = 7;

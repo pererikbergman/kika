@@ -753,12 +753,31 @@ dependencies = [
  "clap",
  "color-eyre",
  "crossterm",
+ "kika-forge",
+ "kika-git",
  "libc",
  "ratatui",
  "serde",
  "serde_json",
  "tokio",
  "toml",
+]
+
+[[package]]
+name = "kika-forge"
+version = "0.1.0"
+dependencies = [
+ "kika-git",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "kika-git"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "ratatui",
 ]
 
 [[package]]

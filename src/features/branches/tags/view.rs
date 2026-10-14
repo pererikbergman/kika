@@ -5,8 +5,8 @@ use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
 use super::TagsList;
-use crate::git::tags::TagRef;
 use crate::view::{elide_right, no_matches, range_row, scrolled};
+use kika_git::tags::TagRef;
 
 /// What the tab shows when there are no tags.
 const NO_TAGS: &str = "No tags";
@@ -68,16 +68,16 @@ mod tests {
 
     use super::*;
     use crate::features::branches::BranchesTab;
-    use crate::git::commit_files::CommitId;
     use crate::layout::SidePanel;
     use crate::model::{AppState, Context, Focus};
     use crate::test_support::load_list;
     use crate::view::{buffer_rows, render};
+    use kika_git::commit_files::CommitId;
 
     fn tag(name: &[u8], annotated: bool, oid: char, subject: &str) -> TagRef {
         let oid = oid.to_string().repeat(40);
         TagRef {
-            name: crate::git::tags::TagName::from_bytes(name),
+            name: kika_git::tags::TagName::from_bytes(name),
             target: CommitId::parse(&oid).unwrap(),
             target_short: oid[..7].into(),
             ref_oid: oid,
@@ -200,8 +200,8 @@ mod tests {
 
     #[test]
     fn a_tag_push_names_its_remote_in_the_bar() {
-        use crate::git::remote::RemoteOp;
         use crate::remote_run::RemoteRun;
+        use kika_git::remote::RemoteOp;
         let mut state = focused(Ok(vec![tag(b"v1", true, 'e', "s")]));
         let op = RemoteOp::PushTag {
             remote: "origin".into(),

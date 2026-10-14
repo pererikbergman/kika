@@ -10,13 +10,13 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::background;
 use crate::effect::{Tag, log_program};
 use crate::features::pull_requests::PullRequestsIntent;
-use crate::forge::task::{ForgeContext, Load, LoadEvent, run_load};
-use crate::forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
-use crate::git::GitRunner;
-use crate::git::branches::BranchName;
-use crate::git::recording::{CommandOutcome, CommandSink};
-use crate::git::safe_text::terminal_safe;
 use crate::intent::AppIntent;
+use kika_forge::task::{ForgeContext, Load, LoadEvent, run_load};
+use kika_forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
+use kika_git::GitRunner;
+use kika_git::branches::BranchName;
+use kika_git::recording::{CommandOutcome, CommandSink};
+use kika_git::safe_text::terminal_safe;
 
 /// Send the cached badges of the remote's forge repository, then, with
 /// `refresh`, ask the forge for `branches`. With no `forge` client or no
@@ -135,7 +135,7 @@ pub(crate) fn open_url(argv: Vec<OsString>, sink: CommandSink, tx: UnboundedSend
         )));
         return;
     };
-    let spawned = crate::git::program::command(program).and_then(|mut command| {
+    let spawned = kika_git::program::command(program).and_then(|mut command| {
         command
             .args(args)
             .stdin(std::process::Stdio::null())
@@ -174,19 +174,19 @@ mod tests {
 
     use crate::effect::{Effect, Runtime};
     use crate::features::pull_requests::PullRequestsIntent;
-    use crate::forge::task::ForgeContext;
-    use crate::forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
-    use crate::git::fake::FakeRunner;
-    use crate::git::recording::{CommandEvent, CommandOutcome, CommandSink};
     use crate::intent::AppIntent;
     use crate::test_support::forge_tag;
+    use kika_forge::task::ForgeContext;
+    use kika_forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
+    use kika_git::fake::FakeRunner;
+    use kika_git::recording::{CommandEvent, CommandOutcome, CommandSink};
 
     #[tokio::test]
     async fn a_pull_request_load_with_no_hosts_runs_nothing_and_writes_nothing() {
-        use crate::forge::github::FakeGh;
-        use crate::git::recording::CommandSink;
+        use kika_forge::github::FakeGh;
+        use kika_git::recording::CommandSink;
 
-        let tmp = crate::git::fake::TempDir::new("forge-effect-off");
+        let tmp = kika_git::fake::TempDir::new("forge-effect-off");
         let cache_dir = tmp.path().join("forge");
         let git = Arc::new(FakeRunner::new());
         let gh = Arc::new(FakeGh::new());
@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn load_intent_carries_the_tag_and_each_event_as_is() {
         use super::load_intent;
-        use crate::forge::task::LoadEvent;
+        use kika_forge::task::LoadEvent;
         use std::collections::HashMap;
 
         let repo = ForgeRepo {
@@ -239,9 +239,9 @@ mod tests {
         };
         let badges = HashMap::from([(
             "main".into(),
-            crate::forge::PrBadge {
+            kika_forge::PrBadge {
                 number: 7,
-                state: crate::forge::PrState::Open,
+                state: kika_forge::PrState::Open,
                 ci: None,
             },
         )]);
@@ -290,13 +290,13 @@ mod tests {
     #[test]
     fn a_token_never_reaches_the_app_state_or_the_screen() {
         use super::load_intent;
-        use crate::forge::github::fixtures::{SECRET_TOKEN as SENTINEL, leaky_gh};
-        use crate::forge::task::{Load, run_load};
-        use crate::forge::{ForgeStatus, ForgeView};
-        use crate::git::branches::BranchName;
-        use crate::git::fake::{TempDir, ok};
-        use crate::git::forge_remote::UPSTREAMS_ARGV;
         use crate::test_support::{draw_branches, forge_state};
+        use kika_forge::github::fixtures::{SECRET_TOKEN as SENTINEL, leaky_gh};
+        use kika_forge::task::{Load, run_load};
+        use kika_forge::{ForgeStatus, ForgeView};
+        use kika_git::branches::BranchName;
+        use kika_git::fake::{TempDir, ok};
+        use kika_git::forge_remote::UPSTREAMS_ARGV;
 
         let tmp = TempDir::new("forge-secret-app");
         let gh = Arc::new(leaky_gh());
@@ -372,10 +372,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_create_runs_gh_in_the_cache_dir_and_answers_once() {
-        use crate::forge::github::fixtures::CREATE_201;
-        use crate::forge::github::{FakeGh, GhCall, answer};
+        use kika_forge::github::fixtures::CREATE_201;
+        use kika_forge::github::{FakeGh, GhCall, answer};
 
-        let tmp = crate::git::fake::TempDir::new("forge-effect-create");
+        let tmp = kika_git::fake::TempDir::new("forge-effect-create");
         let cache_dir = tmp.path().join("forge");
         let git = Arc::new(FakeRunner::new());
         let gh = Arc::new(FakeGh::new().reply(answer(CREATE_201)));
@@ -424,8 +424,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_create_on_a_repository_the_allow_list_leaves_out_runs_no_gh() {
-        use crate::forge::allow::AllowRule;
-        use crate::forge::github::FakeGh;
+        use kika_forge::allow::AllowRule;
+        use kika_forge::github::FakeGh;
 
         let git = Arc::new(FakeRunner::new());
         let gh = Arc::new(FakeGh::new());

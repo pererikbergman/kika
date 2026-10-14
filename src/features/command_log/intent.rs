@@ -2,7 +2,7 @@
 //! `AppIntent::CommandLog`, and hands them to this feature's `update`
 //! (see `docs/adr/0002-nested-intents.md`).
 
-use crate::git::recording::CommandEvent;
+use kika_git::recording::CommandEvent;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CommandLogIntent {

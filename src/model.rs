@@ -37,21 +37,6 @@ use crate::features::submodules;
 use crate::features::sync;
 use crate::features::worktrees;
 use crate::filtered_list::FilteredList;
-use crate::forge::{ForgeHost, ForgeState};
-use crate::git::FileEntry;
-use crate::git::askpass::Secret;
-use crate::git::bisect::BisectMark;
-use crate::git::branches::{Branch, BranchName};
-use crate::git::commit_files::CommitId;
-use crate::git::diff::{
-    DiffOptions, DiffRequest, DiffSide, EmojiZwj, MAX_CONTEXT, MIN_CONTEXT, sanitize,
-};
-use crate::git::patch::{self, Direction, PatchSelection};
-use crate::git::path::RepoPath;
-use crate::git::refs::RefsSnapshot;
-use crate::git::repo_state::Operation;
-use crate::git::status::{BranchStatus, EntryKind, RepoStatus};
-use crate::git::version::GitVersion;
 use crate::handoff::HandOff;
 use crate::hunk_view::{HunkView, NO_CHANGES};
 use crate::intent::{AppIntent, Scroll};
@@ -67,14 +52,29 @@ use crate::prompts::runs_attached;
 use crate::refresh::Selection;
 use crate::remote_run::RemoteRun;
 use crate::watch::{WatchEvent, WatchState};
+use kika_forge::{ForgeHost, ForgeState};
+use kika_git::FileEntry;
+use kika_git::askpass::Secret;
+use kika_git::bisect::BisectMark;
+use kika_git::branches::{Branch, BranchName};
+use kika_git::commit_files::CommitId;
+use kika_git::diff::{
+    DiffOptions, DiffRequest, DiffSide, EmojiZwj, MAX_CONTEXT, MIN_CONTEXT, sanitize,
+};
+use kika_git::patch::{self, Direction, PatchSelection};
+use kika_git::path::RepoPath;
+use kika_git::refs::RefsSnapshot;
+use kika_git::repo_state::Operation;
+use kika_git::status::{BranchStatus, EntryKind, RepoStatus};
+use kika_git::version::GitVersion;
 // Names the tests below reach through `super::*` since the op slot moved
 // to `op_slot.rs`.
-#[cfg(test)]
-use crate::git::remote::RemoteOp;
 #[cfg(test)]
 use crate::op::MergeStrategy;
 #[cfg(test)]
 use crate::refresh;
+#[cfg(test)]
+use kika_git::remote::RemoteOp;
 
 /// What Kika is looking at.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1747,10 +1747,6 @@ mod tests {
     use crate::features::pull_requests::PullRequestsIntent;
     use crate::features::stash::StashMode;
     use crate::features::sync::SyncIntent;
-    use crate::git::diff::DiffSide;
-    use crate::git::rebase_plan;
-    use crate::git::status::{EntryKind, RepoStatus};
-    use crate::git::submodule::SubmoduleState;
     use crate::intent::Scroll;
     use crate::keymap::KeyPress;
     use crate::menu::MenuId;
@@ -1759,6 +1755,10 @@ mod tests {
     use crate::refresh::{RefreshPlan, Scope};
     use crate::test_support::*;
     use crossterm::event::{KeyCode, KeyModifiers};
+    use kika_git::diff::DiffSide;
+    use kika_git::rebase_plan;
+    use kika_git::status::{EntryKind, RepoStatus};
+    use kika_git::submodule::SubmoduleState;
 
     #[test]
     fn quitting_while_an_op_runs_interrupts_git() {
@@ -2839,7 +2839,7 @@ mod tests {
 
     #[test]
     fn context_stops_at_its_limits_and_the_keys_say_why() {
-        use crate::git::diff::{MAX_CONTEXT, MIN_CONTEXT};
+        use kika_git::diff::{MAX_CONTEXT, MIN_CONTEXT};
         let (mut state, _) = with_files(three_files(), 24);
         state.diff_options.context = MAX_CONTEXT;
         for c in ['+', '='] {
@@ -3460,8 +3460,8 @@ mod tests {
 
     // --- Watching for outside changes ---
 
-    use crate::git::refs::RefsSnapshot;
     use crate::watch::WatchEvent;
+    use kika_git::refs::RefsSnapshot;
 
     fn snapshot_tag(effects: &[Effect]) -> Tag {
         match effects {
@@ -4333,9 +4333,9 @@ mod tests {
     #[test]
     fn a_credential_answer_never_reaches_the_command_log() {
         use crate::features::command_log::CommandLogIntent;
-        use crate::git::command_line::display_line;
-        use crate::git::recording::{CommandEvent, CommandOutcome};
-        use crate::git::remote::{AskpassEnv, remote_command};
+        use kika_git::command_line::display_line;
+        use kika_git::recording::{CommandEvent, CommandOutcome};
+        use kika_git::remote::{AskpassEnv, remote_command};
 
         let (mut state, _) = typing_password("hunter2");
         let askpass = AskpassEnv {
@@ -5421,8 +5421,8 @@ mod tests {
     #[test]
     fn with_git_version_records_what_main_found() {
         let state = AppState::new(Context::Workspace).with_git_version(version(38));
-        assert!(state.git_has(crate::git::version::UPDATE_REFS));
-        assert!(!AppState::new(Context::Workspace).git_has(crate::git::version::BREAK));
+        assert!(state.git_has(kika_git::version::UPDATE_REFS));
+        assert!(!AppState::new(Context::Workspace).git_has(kika_git::version::BREAK));
     }
 
     // --- Closing a popup: each feature forgets its own draft ---
@@ -5438,7 +5438,7 @@ mod tests {
         use crate::features::pull_requests::PrDraft;
         use crate::features::stash::{StashDraft, StashMode, StashRef};
         use crate::features::worktrees::WorktreeList;
-        use crate::forge::ForgeRepo;
+        use kika_forge::ForgeRepo;
         let mut state = AppState::new(Context::Workspace);
         state.pending_command = Some(PendingCommand {
             command: CustomCommand {

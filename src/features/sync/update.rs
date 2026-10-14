@@ -5,13 +5,13 @@ use super::SyncIntent;
 use super::keys::{fetch_disabled, pull_push_disabled};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
-use crate::git::remote::{RemoteFailure, RemoteOp};
 use crate::intent::AppIntent;
 use crate::keymap::{self, KeyScope};
 use crate::model::{AppState, Context};
 use crate::popup::{ErrorPopup, Popup};
 use crate::refresh;
 use crate::remote_run::RemoteRun;
+use kika_git::remote::{RemoteFailure, RemoteOp};
 
 /// The sync feature's half of `update`: core's one `AppIntent::Sync` arm
 /// lands here. A free function, so its name cannot clash with handlers.
@@ -165,9 +165,6 @@ pub(crate) fn force_push_question() -> ConfirmQuestion {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::askpass::Secret;
-    use crate::git::branches::BranchName;
-    use crate::git::status::{BranchStatus, Head};
     use crate::intent::AppIntent;
     use crate::keymap::{KeyPress, KeyScope};
     use crate::layout::{self, SidePanel};
@@ -175,6 +172,9 @@ mod tests {
     use crate::test_support::*;
     use crate::watch::WatchEvent;
     use crossterm::event::{KeyCode, KeyModifiers};
+    use kika_git::askpass::Secret;
+    use kika_git::branches::BranchName;
+    use kika_git::status::{BranchStatus, Head};
 
     /// An idle workspace whose user opted in to auto-fetch.
     fn idle_with_fetch() -> AppState {

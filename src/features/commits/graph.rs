@@ -2,7 +2,7 @@
 //! arrive, so it never needs the whole history. Pure: the view turns the
 //! cells into glyphs, and only for the rows on screen.
 
-use crate::git::log::CommitRow;
+use kika_git::log::CommitRow;
 
 /// Lanes kept open at most. A parent listed before its child (clock skew
 /// in git's default order) leaves a lane waiting for a commit that already

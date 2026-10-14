@@ -9,10 +9,10 @@ use super::git::{add_worktree, read_worktrees, remove_worktree};
 use crate::background;
 use crate::effect::Tag;
 use crate::features::worktrees::WorktreesIntent;
-use crate::git::GitRunner;
-use crate::git::branches::BranchName;
-use crate::git::path::RepoPath;
 use crate::intent::AppIntent;
+use kika_git::GitRunner;
+use kika_git::branches::BranchName;
+use kika_git::path::RepoPath;
 
 /// List the worktrees and report them as `WorktreesIntent::Loaded`.
 pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
@@ -67,8 +67,8 @@ mod tests {
 
     use crate::effect::{Effect, Runtime, Tag};
     use crate::features::worktrees::WorktreesIntent;
-    use crate::git::fake::{FakeRunner, fail, ok};
     use crate::intent::AppIntent;
+    use kika_git::fake::{FakeRunner, fail, ok};
 
     #[tokio::test]
     async fn worktree_effects_report_back_with_the_same_tag() {

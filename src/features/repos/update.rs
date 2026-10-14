@@ -6,11 +6,11 @@ use std::path::PathBuf;
 
 use super::{ParkedRepo, RecentList, RecentRow};
 use crate::effect::{Effect, Tag};
-use crate::git::diff::DiffRequest;
 use crate::hunk_view::HunkView;
 use crate::intent::AppIntent;
 use crate::model::{AppState, Context, Focus};
 use crate::popup::{ErrorPopup, Popup};
+use kika_git::diff::DiffRequest;
 
 /// The repos feature's half of `update`: core's one `AppIntent::Repos` arm
 /// lands here. A free function, so its name cannot clash with handlers.
@@ -229,7 +229,6 @@ impl AppState {
 mod tests {
     use crate::effect::{Effect, Tag};
     use crate::features::repos::{RecentList, ReposIntent};
-    use crate::git::path::RepoPath;
     use crate::intent::AppIntent;
     use crate::keymap::{KeyPress, KeyScope};
     use crate::menu::{self, MenuId};
@@ -239,6 +238,7 @@ mod tests {
         loaded, outside, press, press_char, refresh_tag, select_next, three_files, with_files,
     };
     use crossterm::event::{KeyCode, KeyModifiers};
+    use kika_git::path::RepoPath;
     use std::path::{Path, PathBuf};
 
     // Startup and the recent repositories.

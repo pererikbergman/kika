@@ -5,8 +5,8 @@
 
 use super::renderers::RenderersIntent;
 use crate::effect::Tag;
-use crate::git::diff::DiffChunk;
-use crate::git::patch::FilePatch;
+use kika_git::diff::DiffChunk;
+use kika_git::patch::FilePatch;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DiffIntent {

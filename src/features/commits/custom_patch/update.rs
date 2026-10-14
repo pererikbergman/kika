@@ -10,9 +10,6 @@ use super::state::{CustomPatch, FilePick, PatchAction, PatchChoice};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::Effect;
 use crate::features::commits::CommitsIntent;
-use crate::git::commit_files::CommitId;
-use crate::git::patch::{FileKind, LineId, PatchError};
-use crate::git::safe_text::terminal_safe;
 use crate::hunk_view::HunkView;
 use crate::intent::AppIntent;
 use crate::keymap::{self, KeyScope};
@@ -22,6 +19,9 @@ use crate::model::{AppState, Context, Focus};
 use crate::op::GitOp;
 use crate::popup::{LineInput, Popup, PromptKind};
 use crate::view::elide_right;
+use kika_git::commit_files::CommitId;
+use kika_git::patch::{FileKind, LineId, PatchError};
+use kika_git::safe_text::terminal_safe;
 
 /// The custom patch's half of `update`, which `commits::update` passes
 /// `CommitsIntent::CustomPatch` to. A free function, so its name cannot
@@ -326,15 +326,15 @@ mod tests {
     use super::*;
     use crate::bisect;
     use crate::effect::Tag;
-    use crate::git::commit_files::CommitFile;
-    use crate::git::log::{CommitRow, LogPage};
-    use crate::git::status::EntryKind;
     use crate::handoff::HandOff;
     use crate::intent::AppIntent;
     use crate::keymap::{KeyPress, KeyScope, Keymap};
     use crate::menu::{self, MenuId};
     use crate::test_support::*;
     use crossterm::event::{KeyCode, KeyModifiers};
+    use kika_git::commit_files::CommitFile;
+    use kika_git::log::{CommitRow, LogPage};
+    use kika_git::status::EntryKind;
 
     /// Row `i`'s full id.
     fn oid(i: usize) -> String {
@@ -602,7 +602,7 @@ mod tests {
             let edits: Vec<_> = plan
                 .steps
                 .iter()
-                .filter(|s| s.action == crate::git::rebase_plan::TodoAction::Edit)
+                .filter(|s| s.action == kika_git::rebase_plan::TodoAction::Edit)
                 .map(|s| s.commit.clone())
                 .collect();
             let want = match &action {
@@ -739,7 +739,7 @@ mod tests {
 
     #[test]
     fn a_rewrite_says_why_not_in_order() {
-        use crate::git::repo_state::Operation;
+        use kika_git::repo_state::Operation;
         let why = |state: &AppState, choice| {
             keys::patch_rewrite_disabled(state, choice).map(|r| r.into_owned())
         };

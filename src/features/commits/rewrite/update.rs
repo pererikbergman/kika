@@ -5,10 +5,10 @@
 use super::todo::{self, RebaseTodo, Rewrite, TODO_CHANGED, TodoFile};
 use super::{RewriteIntent, log_plan, rewrite_disabled, todo_edit};
 use crate::effect::{Effect, Tag};
-use crate::git::rebase_plan;
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
 use crate::worktree_file::CHANGED_ON_DISK;
+use kika_git::rebase_plan;
 
 /// The history rewrites' half of `update`, which `commits::update` passes
 /// `CommitsIntent::Rewrite` to. A free function, so its name cannot clash
@@ -132,7 +132,7 @@ impl AppState {
         self.commits.todo_seq = Some(tag.seq);
         // An older git ignores `core.commentString`, so its value does not
         // count; an unknown git counts as older.
-        let string_too = self.git_has(crate::git::version::COMMENT_STRING);
+        let string_too = self.git_has(kika_git::version::COMMENT_STRING);
         vec![Effect::LoadRebaseTodo { tag, string_too }]
     }
 
@@ -160,13 +160,13 @@ mod tests {
     use crate::features::commits::CommitsIntent;
     use crate::features::commits::keys::TIPS_UNKNOWN;
     use crate::features::commits::rewrite;
-    use crate::git::repo_state::Operation;
     use crate::intent::AppIntent;
     use crate::keymap::{self, KeyPress, KeyScope};
     use crate::model::{CommitFlow, Focus};
     use crate::popup::Popup;
     use crate::test_support::*;
     use crossterm::event::{KeyCode, KeyModifiers};
+    use kika_git::repo_state::Operation;
     use rewrite::fixup::autosquash_question;
 
     fn alt(state: &mut AppState, code: KeyCode) -> Vec<Effect> {

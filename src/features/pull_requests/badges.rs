@@ -6,9 +6,9 @@ use std::collections::HashMap;
 
 use super::create::refresh_disabled;
 use crate::effect::{Effect, Tag};
-use crate::forge::{ForgeHost, ForgeState, ForgeStatus, LoadRequest, PrBadge};
-use crate::git::branches::BranchName;
 use crate::model::{AppState, Context};
+use kika_forge::{ForgeHost, ForgeState, ForgeStatus, LoadRequest, PrBadge};
+use kika_git::branches::BranchName;
 
 /// The effect that runs `request` and answers under `tag`.
 fn load_effect(tag: Tag, request: LoadRequest) -> Effect {
@@ -95,17 +95,17 @@ impl AppState {
 mod tests {
     use super::*;
     use crate::features::pull_requests::PullRequestsIntent;
-    use crate::forge::{CiState, ForgeHost, ForgeRepo, ForgeState, ForgeView, PrState};
-    use crate::git::FileEntry;
-    use crate::git::branches::{Branch, Track};
-    use crate::git::remote::RemoteOp;
-    use crate::git::status::{BranchStatus, EntryKind, Head};
     use crate::intent::AppIntent;
     use crate::layout::SidePanel;
     use crate::model::{CommitFlow, Context, Focus};
     use crate::test_support::{
         branches_loaded, forge_state, open_commit, remote_finished, remote_intent, toggle_stage,
     };
+    use kika_forge::{CiState, ForgeHost, ForgeRepo, ForgeState, ForgeView, PrState};
+    use kika_git::FileEntry;
+    use kika_git::branches::{Branch, Track};
+    use kika_git::remote::RemoteOp;
+    use kika_git::status::{BranchStatus, EntryKind, Head};
 
     fn github() -> Vec<ForgeHost> {
         vec![ForgeHost::parse("github.com").unwrap()]
@@ -203,7 +203,7 @@ mod tests {
 
     #[test]
     fn off_by_default_no_load_is_ever_asked_for() {
-        let tmp = crate::git::fake::TempDir::new("forge-default");
+        let tmp = kika_git::fake::TempDir::new("forge-default");
         let global = tmp.path().join("config.toml");
         std::fs::write(&global, "[watch]\nrefs = 3\n").unwrap();
         let loaded = crate::config::load(&crate::config::ConfigPaths::new(Some(global), None));

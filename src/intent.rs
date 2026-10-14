@@ -21,15 +21,15 @@ use crate::features::stash::StashIntent;
 use crate::features::submodules::SubmodulesIntent;
 use crate::features::sync::SyncIntent;
 use crate::features::worktrees::WorktreesIntent;
-use crate::git::askpass::Secret;
-use crate::git::refs::RefsSnapshot;
-use crate::git::status::RepoStatus;
 use crate::keymap::{KeyPress, Keymap};
 use crate::layout::Panel;
 use crate::menu::MenuId;
 use crate::op::GitOp;
 use crate::popup::PromptKind;
 use crate::watch::WatchEvent;
+use kika_git::askpass::Secret;
+use kika_git::refs::RefsSnapshot;
+use kika_git::status::RepoStatus;
 
 /// Everything that can change the model: user input and async task results.
 /// Core variants come first, then the few intents shared by features, then

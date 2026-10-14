@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-/// The vars only [`EnvProfile`](crate::git::runner::EnvProfile) may set.
+/// The vars only [`EnvProfile`](kika_git::runner::EnvProfile) may set.
 const STANDARD_VARS: [&str; 3] = ["LC_ALL", "GIT_OPTIONAL_LOCKS", "GIT_LITERAL_PATHSPECS"];
 
 /// Files the guard does not read: end-to-end tests and shared test
@@ -13,8 +13,8 @@ const STANDARD_VARS: [&str; 3] = ["LC_ALL", "GIT_OPTIONAL_LOCKS", "GIT_LITERAL_P
 const SKIPPED: [&str; 5] = [
     "src/e2e/",
     "src/test_support.rs",
-    "src/git/fake.rs",
-    "src/git/runner.rs",
+    "crates/kika-git/src/fake.rs",
+    "crates/kika-git/src/runner.rs",
     "src/env_guard.rs",
 ];
 
@@ -105,7 +105,9 @@ mod tests {
     fn only_the_documented_commands_set_a_standard_var_by_hand() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut files = Vec::new();
-        rust_files(root, &root.join("src"), &mut files);
+        for dir in ["src", "crates/kika-git/src", "crates/kika-forge/src"] {
+            rust_files(root, &root.join(dir), &mut files);
+        }
         let mut found = Vec::new();
         for file in files {
             let name = file.to_string_lossy().replace('\\', "/");

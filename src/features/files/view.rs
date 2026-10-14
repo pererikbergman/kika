@@ -6,10 +6,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::git::FileEntry;
-use crate::git::status::EntryKind;
 use crate::model::AppState;
 use crate::view::{PanelLook, elide_left, filter_title, no_matches, range_row, width_of};
+use kika_git::FileEntry;
+use kika_git::status::EntryKind;
 
 /// The Files panel: an error, a placeholder until the first load, or one
 /// line per file. Collapsed, a count stands in for the list.
@@ -146,13 +146,13 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::style::{Color, Modifier};
 
-    use crate::git::FileEntry;
-    use crate::git::status::EntryKind;
     use crate::test_support::screen::{
         cell_at, contains, draw, draw_buffer, draw_files, file, files_rows, find, loaded, renamed,
         status_focused, thin,
     };
     use crate::view::{buffer_rows, render, width_of};
+    use kika_git::FileEntry;
+    use kika_git::status::EntryKind;
 
     #[test]
     fn a_collapsed_files_panel_counts_the_files() {

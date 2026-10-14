@@ -1,8 +1,8 @@
 //! Git attributes Kika reads for one file.
 
 use super::state::DEFAULT_MARKER_SIZE;
-use crate::git::path::RepoPath;
-use crate::git::runner::{GitCommand, GitRunner};
+use kika_git::path::RepoPath;
+use kika_git::runner::{GitCommand, GitRunner};
 
 /// `git check-attr -z conflict-marker-size -- <path>`, a read. The path is
 /// read literally, never as a pattern.
@@ -38,9 +38,9 @@ fn parse_marker_size(stdout: &[u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::fake::{FakeRunner, TempDir, fail, git, ok};
-    use crate::git::runner::EnvProfile;
     use crate::test_support::{STANDARD_ENV, env_list};
+    use kika_git::fake::{FakeRunner, TempDir, fail, git, ok};
+    use kika_git::runner::EnvProfile;
 
     #[test]
     fn the_command_is_literal_and_names_the_path_after_the_separator() {
@@ -98,7 +98,7 @@ mod tests {
         let dir = tmp.path();
         git(dir, &["init", "-q"]);
         std::fs::write(dir.join(".gitattributes"), "*.md conflict-marker-size=12\n").unwrap();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         assert_eq!(conflict_marker_size(&runner, &"a.md".into()), Ok(12));
         assert_eq!(conflict_marker_size(&runner, &"a.txt".into()), Ok(7));
     }

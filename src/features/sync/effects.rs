@@ -9,10 +9,10 @@ use super::git::run_fetch;
 use crate::background;
 use crate::effect::{AnswerSlot, Bridge, Tag};
 use crate::features::sync::SyncIntent;
-use crate::git::GitRunner;
-use crate::git::remote::{RemoteFailure, RemoteOp, run_remote};
-use crate::git::safe_text::terminal_safe;
 use crate::intent::AppIntent;
+use kika_git::GitRunner;
+use kika_git::remote::{RemoteFailure, RemoteOp, run_remote};
+use kika_git::safe_text::terminal_safe;
 
 /// Fetch every remote quietly and send the result back as `SyncIntent::FetchFinished`.
 pub(crate) fn fetch(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {

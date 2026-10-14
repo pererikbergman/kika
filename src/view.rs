@@ -13,16 +13,16 @@ use crate::features::diff::view::{hunk_title, hunk_title_parts, options_note, re
 use crate::features::files;
 use crate::features::operation;
 use crate::features::stash;
-use crate::git::bisect::BisectState;
-use crate::git::emoji;
-use crate::git::remote::RemoteOp;
-use crate::git::safe_text::sanitize;
-use crate::git::status::Head;
 use crate::keymap::{Binding, KeyPattern, KeyScope, available, available_commands, registry};
 use crate::layout::{Panel, SidePanel, help_rows, workspace_layout};
 use crate::model::{AppState, Context, Focus};
 use crate::popup_view;
 use crate::remote_run::RemoteRun;
+use kika_git::bisect::BisectState;
+use kika_git::emoji;
+use kika_git::remote::RemoteOp;
+use kika_git::safe_text::sanitize;
+use kika_git::status::Head;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -1274,11 +1274,6 @@ mod tests {
     use crate::diff_pane_view::{CURRENT_MATCH, MATCH};
     use crate::features::blame::CommitView;
     use crate::features::custom_commands::CustomCommandsIntent;
-    use crate::git::FileEntry;
-    use crate::git::diff::EmojiZwj;
-    use crate::git::diff::{DiffLine, DiffSide, LineKind};
-    use crate::git::repo_state::Operation;
-    use crate::git::status::EntryKind;
     use crate::hunk_view::HunkView;
     use crate::test_support::OID;
     use crate::test_support::screen::{
@@ -1286,6 +1281,11 @@ mod tests {
         diff_line, draw, draw_buffer, draw_with_cursor, file, files_rows, find, hunks, loaded, on,
         renamed, status_focused, thin, with_diff,
     };
+    use kika_git::FileEntry;
+    use kika_git::diff::EmojiZwj;
+    use kika_git::diff::{DiffLine, DiffSide, LineKind};
+    use kika_git::repo_state::Operation;
+    use kika_git::status::EntryKind;
 
     #[test]
     fn a_short_terminal_collapses_the_other_panels_to_title_rows() {
@@ -2156,15 +2156,15 @@ mod tests {
     #[test]
     fn in_a_commits_change_the_lines_the_patch_holds_carry_a_mark() {
         use crate::features::commits::custom_patch::CustomPatch;
-        use crate::git::commit_files::{CommitId, CommitRange};
-        use crate::git::patch::LineId;
+        use kika_git::commit_files::{CommitId, CommitRange};
+        use kika_git::patch::LineId;
         let range = CommitRange {
             oid: CommitId::parse("b0b").unwrap(),
             parent: CommitId::parse("a0a"),
         };
         let mut state = loaded(vec![file("a.rs")]);
         let mut view = HunkView::for_commit("a.rs".into(), range.clone());
-        view.loaded(crate::git::patch::parse(TWO_HUNKS).unwrap(), 20);
+        view.loaded(kika_git::patch::parse(TWO_HUNKS).unwrap(), 20);
         state.focus_hunk_view(view);
         let mut patch = CustomPatch::new(range, "b0b".into());
         patch.toggle_lines(&"a.rs".into(), &[LineId::added(9)].into());
@@ -2189,8 +2189,8 @@ mod tests {
     #[test]
     fn the_patch_mark_keeps_wide_lines_aligned_at_any_width() {
         use crate::features::commits::custom_patch::CustomPatch;
-        use crate::git::commit_files::{CommitId, CommitRange};
-        use crate::git::patch::LineId;
+        use kika_git::commit_files::{CommitId, CommitRange};
+        use kika_git::patch::LineId;
         let range = CommitRange {
             oid: CommitId::parse("b0b").unwrap(),
             parent: CommitId::parse("a0a"),
@@ -2200,7 +2200,7 @@ mod tests {
             format!("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n+{wide}\n");
         let mut state = loaded(vec![file("a.rs")]);
         let mut view = HunkView::for_commit("a.rs".into(), range.clone());
-        view.loaded(crate::git::patch::parse(diff.as_bytes()).unwrap(), 20);
+        view.loaded(kika_git::patch::parse(diff.as_bytes()).unwrap(), 20);
         state.focus_hunk_view(view);
         let mut patch = CustomPatch::new(range, "b0b".into());
         patch.toggle_lines(&"a.rs".into(), &[LineId::added(1)].into());
@@ -3347,8 +3347,8 @@ mod tests {
         (x, y)
     }
 
-    fn bisect_state() -> crate::git::bisect::BisectState {
-        crate::git::bisect::BisectState {
+    fn bisect_state() -> kika_git::bisect::BisectState {
+        kika_git::bisect::BisectState {
             start: "main".into(),
             good: 2,
             bad: 1,
@@ -3359,12 +3359,12 @@ mod tests {
 
     /// Bisecting with `bisect`, `HEAD` at `head`, the tested commit loaded
     /// and the Status panel focused.
-    fn bisecting(head: Head, bisect: crate::git::bisect::BisectState) -> AppState {
+    fn bisecting(head: Head, bisect: kika_git::bisect::BisectState) -> AppState {
         let mut status = branch(head);
         status.in_progress = vec![Operation::Bisect];
         status.bisect = Some(bisect);
         let mut state = on(status);
-        state.commits.list.rows = vec![crate::git::log::CommitRow {
+        state.commits.list.rows = vec![kika_git::log::CommitRow {
             oid: "abc1234def".into(),
             short_oid: "abc1234".into(),
             parents: vec![],
@@ -3379,13 +3379,13 @@ mod tests {
     }
 
     /// `bisecting`, drawn on a screen wide enough for its lines.
-    fn bisect_rows(head: Head, bisect: crate::git::bisect::BisectState) -> Vec<String> {
+    fn bisect_rows(head: Head, bisect: kika_git::bisect::BisectState) -> Vec<String> {
         thin(draw(&bisecting(head, bisect), 200, 30))
     }
 
-    fn found(subject: &str) -> Option<crate::git::bisect::Found> {
-        Some(crate::git::bisect::Found {
-            commit: crate::git::commit_files::CommitId::parse("abc1234def").unwrap(),
+    fn found(subject: &str) -> Option<kika_git::bisect::Found> {
+        Some(kika_git::bisect::Found {
+            commit: kika_git::commit_files::CommitId::parse("abc1234def").unwrap(),
             subject: subject.into(),
         })
     }
@@ -3422,7 +3422,7 @@ mod tests {
     fn a_bisect_draws_at_tiny_sizes_without_panicking() {
         let mut bisect = bisect_state();
         bisect.first_bad = found("broke it");
-        bisect.terms = crate::git::bisect::Terms {
+        bisect.terms = kika_git::bisect::Terms {
             bad: "new".into(),
             good: "old".into(),
         };
@@ -3461,11 +3461,11 @@ mod tests {
     #[test]
     fn the_found_commit_and_custom_terms_are_shown() {
         let mut bisect = bisect_state();
-        bisect.first_bad = Some(crate::git::bisect::Found {
-            commit: crate::git::commit_files::CommitId::parse("abc1234def").unwrap(),
+        bisect.first_bad = Some(kika_git::bisect::Found {
+            commit: kika_git::commit_files::CommitId::parse("abc1234def").unwrap(),
             subject: "broke it".into(),
         });
-        bisect.terms = crate::git::bisect::Terms {
+        bisect.terms = kika_git::bisect::Terms {
             bad: "new".into(),
             good: "old".into(),
         };
@@ -3482,10 +3482,10 @@ mod tests {
     #[test]
     fn a_hostile_start_and_subject_draw_without_control_characters() {
         let mut bisect = bisect_state();
-        bisect.start = crate::git::safe_text::terminal_safe(b"evil\x1b[2J\x07\xe2\x80\xae");
-        bisect.first_bad = Some(crate::git::bisect::Found {
-            commit: crate::git::commit_files::CommitId::parse("abc1234def").unwrap(),
-            subject: crate::git::safe_text::terminal_safe(b"bad\x1b]0;x\x07 \xe2\x80\xaeok"),
+        bisect.start = kika_git::safe_text::terminal_safe(b"evil\x1b[2J\x07\xe2\x80\xae");
+        bisect.first_bad = Some(kika_git::bisect::Found {
+            commit: kika_git::commit_files::CommitId::parse("abc1234def").unwrap(),
+            subject: kika_git::safe_text::terminal_safe(b"bad\x1b]0;x\x07 \xe2\x80\xaeok"),
         });
         let rows = bisect_rows(Head::Detached("abc1234def".into()), bisect);
         assert!(
@@ -3765,8 +3765,8 @@ mod tests {
             state.generation,
             Ok(vec![crate::features::stash::StashEntry {
                 index: 0,
-                oid: crate::git::commit_files::CommitId::parse("a0").unwrap(),
-                base: crate::git::commit_files::CommitId::parse("b0").unwrap(),
+                oid: kika_git::commit_files::CommitId::parse("a0").unwrap(),
+                base: kika_git::commit_files::CommitId::parse("b0").unwrap(),
                 untracked: None,
                 subject: "On main: first".into(),
             }]),
@@ -3812,7 +3812,7 @@ mod tests {
     #[test]
     fn esc_clear_leads_a_commits_files_bar_while_it_has_a_filter_then_clear_search() {
         use crate::features::commits::CommitFilesList;
-        use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
+        use kika_git::commit_files::{CommitFile, CommitId, CommitRange};
         let mut state = AppState::new(Context::Workspace);
         state.files.loaded = true;
         state.focus = Focus::Commits;

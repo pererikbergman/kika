@@ -2,8 +2,8 @@
 //! stages or unstages one file, a range, or everything. Their argv stays in
 //! core `op_command`, with `--` before the paths and literal pathspecs.
 
-use crate::git::status::{EntryKind, FileEntry};
 use crate::op::GitOp;
+use kika_git::status::{EntryKind, FileEntry};
 
 /// Why staging everything is refused while conflicts exist.
 pub(crate) const CONFLICTS_REFUSAL: &str = "Resolve conflicts before staging everything";
@@ -190,8 +190,8 @@ mod tests {
     #[test]
     #[cfg_attr(windows, ignore = "Windows forbids * in file names")]
     fn a_file_named_like_a_glob_stages_and_unstages_only_itself_in_real_git() {
-        use crate::git::fake::{TempDir, git};
-        use crate::git::status::read_status;
+        use kika_git::fake::{TempDir, git};
+        use kika_git::status::read_status;
 
         let tmp = TempDir::new("ops");
         let dir = tmp.path();
@@ -204,7 +204,7 @@ mod tests {
         for name in ["a.rs", "*.rs"] {
             std::fs::write(dir.join(name), "new\n").unwrap();
         }
-        let runner = crate::git::CliRunner::new(dir);
+        let runner = kika_git::CliRunner::new(dir);
         let letters = || {
             let mut files: Vec<_> = read_status(&runner)
                 .unwrap()
@@ -238,12 +238,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_name_that_is_not_utf8_stages_and_unstages_itself_not_its_look_alike() {
-        use crate::git::fake::{LOOK_ALIKE, RAW_NAME, entry_named, git, look_alike_repo};
+        use kika_git::fake::{LOOK_ALIKE, RAW_NAME, entry_named, git, look_alike_repo};
 
         let tmp = look_alike_repo();
         let dir = tmp.path();
         std::fs::write(dir.join(LOOK_ALIKE), "look-alike new\n").unwrap();
-        let runner = crate::git::CliRunner::new(dir);
+        let runner = kika_git::CliRunner::new(dir);
         let letters = |raw: &[u8]| entry_named(&runner, raw).map(|e| e.status_letters());
         assert_eq!(letters(RAW_NAME).as_deref(), Some(" D"));
 

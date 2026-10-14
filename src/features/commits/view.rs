@@ -15,16 +15,16 @@ use super::panel::Marker;
 use super::reflog::view::reflog_lines;
 use super::{CommitsPanel, CommitsTab};
 use crate::diff_mark::DiffMark;
-use crate::git::commit_files::CommitFile;
-use crate::git::commit_files::CommitId;
-use crate::git::rebase_plan::{TodoAction, TodoEntry, branch_name};
-use crate::git::safe_text::{sanitize, terminal_safe};
 use crate::model::AppState;
 use crate::rows::{DIFF_MARK, commit_file_line, diff_mark_style};
 use crate::view::{
     PanelLook, elide_left, elide_right, filter_title, no_matches, range_row, reversed, scrolled,
     width_of,
 };
+use kika_git::commit_files::CommitFile;
+use kika_git::commit_files::CommitId;
+use kika_git::rebase_plan::{TodoAction, TodoEntry, branch_name};
+use kika_git::safe_text::{sanitize, terminal_safe};
 
 /// Authors longer than this lose their end, so the subject keeps room.
 const AUTHOR_WIDTH: usize = 16;
@@ -725,10 +725,10 @@ mod tests {
     use super::*;
     use crate::diff_pane::DiffStart;
     use crate::effect::Tag;
-    use crate::git::log::{CommitRow, LogPage, Markers};
     use crate::layout::{ScreenMode, SidePanel};
     use crate::model::{Context, Focus};
     use crate::view::{buffer_rows, render};
+    use kika_git::log::{CommitRow, LogPage, Markers};
 
     const NOW: i64 = 1_700_000_000;
 
@@ -1447,9 +1447,9 @@ mod tests {
     // --- A commit's files ---
 
     use crate::features::commits::CommitFilesList;
-    use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
-    use crate::git::diff::{DiffLine, LineKind};
     use crate::test_support::load_list;
+    use kika_git::commit_files::{CommitFile, CommitId, CommitRange};
+    use kika_git::diff::{DiffLine, LineKind};
 
     fn commit_file(status: char, path: &str, orig: Option<&str>) -> CommitFile {
         CommitFile {
@@ -1489,7 +1489,7 @@ mod tests {
     /// `modified.rs`.
     fn with_patch(state: &mut AppState) {
         use crate::features::commits::custom_patch::CustomPatch;
-        use crate::git::patch::LineId;
+        use kika_git::patch::LineId;
         let range = state.commits.open.as_ref().unwrap().range.clone();
         let mut patch = CustomPatch::new(range, "a000000".into());
         patch.toggle_file(&"added.rs".into());
@@ -1710,7 +1710,7 @@ mod tests {
             .open(seq, &"added.rs".into(), 20, DiffStart::Keep);
         state.diff.apply(
             seq,
-            Ok(crate::git::diff::DiffChunk {
+            Ok(kika_git::diff::DiffChunk {
                 lines: vec![
                     DiffLine {
                         kind: LineKind::Hunk,
@@ -1766,7 +1766,7 @@ mod tests {
 
     fn queried(path: Option<&str>, author: Option<&str>) -> AppState {
         let mut state = showing(merge_rows());
-        state.commits.query = crate::git::log::LogQuery {
+        state.commits.query = kika_git::log::LogQuery {
             path: path.map(Into::into),
             author: author.map(Into::into),
         };

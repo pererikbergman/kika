@@ -8,11 +8,11 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::background;
 use crate::effect::Tag;
 use crate::features::blame::BlameIntent;
-use crate::git::GitRunner;
-use crate::git::blame::{read_blame, read_commit};
-use crate::git::diff::EmojiZwj;
-use crate::git::path::RepoPath;
 use crate::intent::AppIntent;
+use kika_git::GitRunner;
+use kika_git::blame::{read_blame, read_commit};
+use kika_git::diff::EmojiZwj;
+use kika_git::path::RepoPath;
 
 /// Blame `path` and report it as `BlameIntent::Loaded`.
 pub(crate) fn load(

@@ -4,9 +4,9 @@
 
 use std::path::Path;
 
-use crate::git::error::GitError;
-use crate::git::runner::{GitCommand, GitRunner};
 use crate::op::{GitOp, MergeStrategy};
+use kika_git::error::GitError;
+use kika_git::runner::{GitCommand, GitRunner};
 
 /// The hooks a commit can run. `pre-auto-gc` is left out: it runs only when
 /// a commit triggers a gc, which is rare and not worth a screen switch.
@@ -153,12 +153,12 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::repo_state::Operation;
+    use kika_git::repo_state::Operation;
 
     #[test]
     fn only_ops_that_can_commit_run_attached() {
-        use crate::git::commit_files::CommitId;
         use crate::op::ResetMode;
+        use kika_git::commit_files::CommitId;
         let oid = || CommitId::parse("abc").unwrap();
         let stash = || crate::features::stash::StashRef {
             index: 0,
@@ -178,7 +178,7 @@ mod tests {
             GitOp::Revert(oid()),
             GitOp::CherryPick(vec![oid()]),
             GitOp::Continue(Operation::Revert),
-            GitOp::InteractiveRebase(crate::git::rebase_plan::sample()),
+            GitOp::InteractiveRebase(kika_git::rebase_plan::sample()),
         ];
         for op in attached {
             assert!(runs_attached(&op), "{op:?}");
@@ -217,7 +217,7 @@ mod tests {
             assert!(!runs_attached(&op), "{op:?}");
         }
     }
-    use crate::git::path::RepoPath;
+    use kika_git::path::RepoPath;
 
     fn commit(amend: bool, no_verify: bool) -> GitOp {
         GitOp::Commit {
@@ -378,8 +378,8 @@ mod tests {
         ));
     }
 
-    use crate::git::CliRunner;
-    use crate::git::fake::{FakeRunner, TempDir, fail, git, ok};
+    use kika_git::CliRunner;
+    use kika_git::fake::{FakeRunner, TempDir, fail, git, ok};
 
     fn repo(label: &str) -> TempDir {
         let tmp = TempDir::new(label);

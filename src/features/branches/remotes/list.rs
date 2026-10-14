@@ -3,8 +3,8 @@
 //! the model loads the list and moves the selection.
 
 use crate::filtered_list::{FilteredList, Row};
-use crate::git::remotes::{Remote, RemoteBranch, RemoteName};
 use crate::list_filter;
+use kika_git::remotes::{Remote, RemoteBranch, RemoteName};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RemotesList {

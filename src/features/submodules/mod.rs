@@ -38,10 +38,10 @@ pub(crate) use intent::SubmodulesIntent;
 pub(crate) use list::SubmoduleList;
 pub(crate) use update::update;
 
-use crate::git::path::RepoPath;
-use crate::git::submodule::Submodule;
 use crate::model::AppState;
 use crate::popup::Popup;
+use kika_git::path::RepoPath;
+use kika_git::submodule::Submodule;
 
 /// The Submodules feature's queries, for core and other features.
 impl AppState {

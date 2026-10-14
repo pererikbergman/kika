@@ -1,8 +1,8 @@
 //! A fetch, pull or push in progress, as the screen shows it: a spinner on
 //! the branch it runs for and what it is doing in the status bar.
 
-use crate::git::branches::BranchName;
-use crate::git::remote::RemoteOp;
+use kika_git::branches::BranchName;
+use kika_git::remote::RemoteOp;
 
 /// The spinner's frames, one per tick.
 pub const SPINNER: [&str; 4] = ["|", "/", "-", "\\"];

@@ -1,10 +1,10 @@
 use crate::diff_search::{DiffSearch, reveal};
 use crate::effect::{Effect, Tag};
-use crate::git::diff::{DiffChunk, DiffLine, DiffRequest};
-use crate::git::path::RepoPath;
 use crate::hunk_view::HunkView;
 use crate::intent::Scroll;
 use crate::model::{AppState, Focus};
+use kika_git::diff::{DiffChunk, DiffLine, DiffRequest};
+use kika_git::path::RepoPath;
 
 /// Lines read beyond the bottom of the pane, so scrolling rarely waits on git.
 pub const DIFF_PREFETCH: usize = 200;
@@ -300,9 +300,9 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::diff::{DiffOptions, DiffSide, LineKind};
     use crate::model::Context;
     use crate::test_support::changed;
+    use kika_git::diff::{DiffOptions, DiffSide, LineKind};
 
     fn chunk(texts: &[&str], done: bool) -> Result<DiffChunk, String> {
         let lines = texts

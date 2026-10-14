@@ -22,25 +22,25 @@ use crate::features::{
     blame, commit, conflicts, custom_commands, files, operation, pull_requests, repos, review,
     stash, submodules, sync, worktrees,
 };
-use crate::forge::merge::MergeMethod;
-use crate::forge::task::ForgeContext;
-use crate::forge::{ForgeHost, ForgeRepo, LoadSeq};
-use crate::git::GitRunner;
-use crate::git::askpass::Secret;
-use crate::git::branches::BranchName;
-use crate::git::commit_files::{CommitId, CommitRange};
-use crate::git::diff::{DiffRequest, EmojiZwj};
-use crate::git::log::LogQuery;
-use crate::git::path::RepoPath;
-use crate::git::recording::{CommandEvent, CommandOutcome, CommandSink};
-use crate::git::refs::read_refs;
-use crate::git::remote::{AskpassEnv, RemoteOp};
-use crate::git::remotes::RemoteName;
-use crate::git::repo_state::Operation;
-use crate::git::safe_text::terminal_safe;
 use crate::handoff::HandOff;
 use crate::intent::AppIntent;
 use crate::op::{GitOp, run_op};
+use kika_forge::merge::MergeMethod;
+use kika_forge::task::ForgeContext;
+use kika_forge::{ForgeHost, ForgeRepo, LoadSeq};
+use kika_git::GitRunner;
+use kika_git::askpass::Secret;
+use kika_git::branches::BranchName;
+use kika_git::commit_files::{CommitId, CommitRange};
+use kika_git::diff::{DiffRequest, EmojiZwj};
+use kika_git::log::LogQuery;
+use kika_git::path::RepoPath;
+use kika_git::recording::{CommandEvent, CommandOutcome, CommandSink};
+use kika_git::refs::read_refs;
+use kika_git::remote::{AskpassEnv, RemoteOp};
+use kika_git::remotes::RemoteName;
+use kika_git::repo_state::Operation;
+use kika_git::safe_text::terminal_safe;
 
 /// Identifies an effect's result so the reducer can drop stale ones.
 /// `generation` changes when the repository changes; `seq` orders loads of the
@@ -555,7 +555,7 @@ fn run_clipboard_command(
     let fail = move |why: String| {
         let _ = tx.send(AppIntent::CopyFailed(copy_failure(&why)));
     };
-    let mut command = match crate::git::program::command(program) {
+    let mut command = match kika_git::program::command(program) {
         Ok(command) => command,
         Err(e) => {
             finished(CommandOutcome::NotStarted);
@@ -1231,7 +1231,7 @@ pub(crate) type AnswerSlot = Arc<Mutex<Option<std::sync::mpsc::Sender<Option<Sec
 /// is `None` and git runs closed to questions.
 pub(crate) struct Bridge {
     #[cfg(unix)]
-    server: Option<crate::git::askpass::AskpassServer>,
+    server: Option<kika_git::askpass::AskpassServer>,
     slot: AnswerSlot,
     pub(crate) env: Option<AskpassEnv>,
 }
@@ -1239,7 +1239,7 @@ pub(crate) struct Bridge {
 impl Bridge {
     #[cfg(unix)]
     pub(crate) fn open(tag: Tag, tx: UnboundedSender<AppIntent>, slot: AnswerSlot) -> Self {
-        use crate::git::askpass::{AskpassServer, Question};
+        use kika_git::askpass::{AskpassServer, Question};
 
         let (answer_tx, answer_rx) = std::sync::mpsc::channel();
         *lock(&slot) = Some(answer_tx);
@@ -1317,16 +1317,16 @@ mod tests {
     use crate::features::pull_requests::PullRequestsIntent;
     use crate::features::repos::ReposIntent;
     use crate::features::submodules::SubmodulesIntent;
-    use crate::git::remote::RemoteFailure;
     use crate::test_support::{HostilePanic, background, commit_op, forge_tag};
+    use kika_git::remote::RemoteFailure;
 
     #[tokio::test]
     async fn each_gh_call_is_logged_with_its_own_id_beside_git_commands() {
-        use crate::forge::github::fixtures::{PROBE_200, STATES};
-        use crate::forge::github::{FakeGh, answer};
-        use crate::git::recording::{CommandEvent, CommandSink, RecordingRunner};
+        use kika_forge::github::fixtures::{PROBE_200, STATES};
+        use kika_forge::github::{FakeGh, answer};
+        use kika_git::recording::{CommandEvent, CommandSink, RecordingRunner};
 
-        let tmp = crate::git::fake::TempDir::new("forge-effect-log");
+        let tmp = kika_git::fake::TempDir::new("forge-effect-log");
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = CommandSink::new();
         let keep = Arc::clone(&events);
@@ -1338,7 +1338,7 @@ mod tests {
                     &["config", "-z", "--get", "remote.origin.url"],
                     ok(b"git@github.com:acme/widgets.git\0"),
                 )
-                .expect(&crate::git::forge_remote::UPSTREAMS_ARGV, ok(b"")),
+                .expect(&kika_git::forge_remote::UPSTREAMS_ARGV, ok(b"")),
         );
         let git = Arc::new(RecordingRunner::new(fake.clone(), sink.clone()));
         let gh = Arc::new(
@@ -1416,10 +1416,10 @@ mod tests {
             assert_eq!(finished, 1, "{id}");
         }
     }
-    use crate::git::diff::DiffSide;
-    use crate::git::fake::{FakeChild, FakeRunner, fail, ok};
+    use kika_git::diff::DiffSide;
+    use kika_git::fake::{FakeChild, FakeRunner, fail, ok};
     #[cfg(unix)]
-    use crate::git::runner::{GitChild, GitCommand, GitOutput};
+    use kika_git::runner::{GitChild, GitCommand, GitOutput};
 
     #[tokio::test]
     async fn load_config_reads_the_files_again_each_time() {
@@ -1471,7 +1471,7 @@ mod tests {
     #[tokio::test]
     async fn the_message_read_is_logged_and_a_clipboard_copy_is_not() {
         use crate::clipboard::RecordingSink;
-        use crate::git::recording::{CommandEvent, CommandOutcome, CommandSink, RecordingRunner};
+        use kika_git::recording::{CommandEvent, CommandOutcome, CommandSink, RecordingRunner};
 
         let oid = CommitId::parse("0123abcd").unwrap();
         let fake = Arc::new(FakeRunner::new().expect(
@@ -1782,7 +1782,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_submodules_reports_back_with_the_same_tag() {
-        use crate::git::submodule::{Submodule, SubmoduleState};
+        use kika_git::submodule::{Submodule, SubmoduleState};
 
         let runner = Arc::new(
             FakeRunner::new().expect(&["submodule", "status"], ok(b" 1234567 sub (heads/main)\n")),
@@ -1843,7 +1843,7 @@ mod tests {
     async fn set_repo_moves_the_runner_into_nested_submodules_and_back_to_the_root() {
         use std::path::Path;
 
-        use crate::git::CliRunner;
+        use kika_git::CliRunner;
 
         let runner = Arc::new(CliRunner::new("/r/top"));
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -1880,8 +1880,8 @@ mod tests {
     async fn set_repo_joins_the_raw_bytes_of_a_path() {
         use std::os::unix::ffi::OsStrExt;
 
-        use crate::git::CliRunner;
-        use crate::git::path::RepoPath;
+        use kika_git::CliRunner;
+        use kika_git::path::RepoPath;
 
         let runner = Arc::new(CliRunner::new("/r"));
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -1948,7 +1948,7 @@ mod tests {
 
     #[tokio::test]
     async fn with_a_store_recording_reports_the_new_list_and_loading_reads_it() {
-        use crate::git::fake::TempDir;
+        use kika_git::fake::TempDir;
 
         let tmp = TempDir::new("store");
         let store = tmp.path().join("kika").join("recent-repos");
@@ -2242,9 +2242,9 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn run_command_reports_a_failure_with_its_status_and_output() {
-        let tmp = crate::git::fake::TempDir::new("effect-command");
+        let tmp = kika_git::fake::TempDir::new("effect-command");
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let runner = Arc::new(crate::git::CliRunner::new(tmp.path()));
+        let runner = Arc::new(kika_git::CliRunner::new(tmp.path()));
         let runtime = Runtime::new(runner, tx);
         let run = |argv: &[&str], output| Effect::RunCommand {
             title: "Try".into(),
@@ -2304,9 +2304,9 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn cancelling_stops_a_hung_command_which_answers_once() {
-        let tmp = crate::git::fake::TempDir::new("effect-cancel");
+        let tmp = kika_git::fake::TempDir::new("effect-cancel");
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let runner = Arc::new(crate::git::CliRunner::new(tmp.path()));
+        let runner = Arc::new(kika_git::CliRunner::new(tmp.path()));
         let runtime = Runtime::new(runner, tx);
         let started = std::time::Instant::now();
 
@@ -2469,11 +2469,11 @@ mod tests {
             let socket = cmd
                 .envs()
                 .iter()
-                .find(|(k, _)| k == crate::git::askpass::SOCKET_ENV)
+                .find(|(k, _)| k == kika_git::askpass::SOCKET_ENV)
                 .map(|(_, v)| PathBuf::from(v))
                 .expect("the bridge is in the env");
             let mut out = Vec::new();
-            crate::git::askpass::client(
+            kika_git::askpass::client(
                 &socket,
                 std::ffi::OsStr::new("Password for 'https://h': "),
                 None,
@@ -2622,7 +2622,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_clipboard_command_gets_the_cleaned_text_on_stdin_and_not_in_argv() {
-        let tmp = crate::git::fake::TempDir::new("clipboard-command");
+        let tmp = kika_git::fake::TempDir::new("clipboard-command");
         let out = tmp.path().join("copied");
         // The test's own fake clipboard program; Kika itself never builds a shell line.
         let script = format!("cat > '{}'", out.display());
@@ -2668,7 +2668,7 @@ mod tests {
             CLIPBOARD_TIMEOUT,
         );
         let clear = |notice: &str| {
-            assert!(notice.contains(crate::git::program::NOT_FOUND), "{notice}");
+            assert!(notice.contains(kika_git::program::NOT_FOUND), "{notice}");
             assert!(!notice.chars().any(char::is_control), "{notice:?}");
         };
         match rx.recv().await {
@@ -2831,7 +2831,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_clipboard_command_that_times_out_is_reaped_with_all_it_started() {
-        let tmp = crate::git::fake::TempDir::new("clipboard-group");
+        let tmp = kika_git::fake::TempDir::new("clipboard-group");
         let helper = tmp.path().join("helper");
         let leader = tmp.path().join("leader");
         // The test's own fake clipboard program; Kika itself never builds a shell line.
@@ -2888,7 +2888,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_helper_holding_stdin_open_leaves_no_thread_behind() {
-        let tmp = crate::git::fake::TempDir::new("clipboard-stdin");
+        let tmp = kika_git::fake::TempDir::new("clipboard-stdin");
         let helper = tmp.path().join("helper");
         // The program exits at once; its helper keeps stdin open, unread.
         let script = format!("sleep 30 0<&0 & echo $! > '{}'; exit 0", helper.display());

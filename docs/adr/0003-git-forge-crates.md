@@ -1,6 +1,6 @@
 # ADR-0003: The git and forge plumbing as workspace crates
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-14
 - Scope: where `src/git` and `src/forge` live and what they may import. Behaviour, key bindings, binding ids and order, intents and the config format do not change.
 
@@ -27,7 +27,7 @@ To move, `src/git` and `src/forge` must first stop importing the rest of the mai
 
 A trap, measured: if `src/git` imports `crate::forge` even once, noupling adds `cycle:src/forge -> src/git -> src/forge`. So the decoy test, which uses the forge runner, cannot stay in `src/git/program.rs`.
 
-## Decision (proposed)
+## Decision
 
 ### Two steps
 
@@ -36,7 +36,7 @@ A trap, measured: if `src/git` imports `crate::forge` even once, noupling adds `
 
 ### Crates and direction
 
-Proposed names and layout (see "Open questions"):
+Names and layout:
 
 ```
 Cargo.toml                 [workspace] members = ["crates/kika-git", "crates/kika-forge"]; the kika binary
@@ -86,16 +86,16 @@ Expected fingerprint diff for step 2:
 
 Never allowed, as in ADR-0001: any `cycle:*` or `rule_violation:*`.
 
-## Open questions
+## Decisions (owner, 2026-10-14)
 
-The owner has not answered these yet. The decision above assumes the first option in each.
+The owner answered the six open questions with "defaults":
 
-1. Crate names and place: `kika-git` and `kika-forge` under `crates/`. Other names are possible.
-2. Explicit `kika_git::` paths (about 1,200 rewrites in 192 files), rather than a `use kika_git as git;` alias at the crate root. Both score 99.1. Explicit keeps the boundary visible at each use.
-3. `kika-git` keeps its `ratatui` dependency for one width call in `diff.rs`. The alternative, a direct `unicode-width` dependency, would be a new third-party dependency.
-4. The noupling deny rules are deleted rather than re-pointed, because a rule across crates would never fire.
-5. Two PRs, one per step. If the owner wants one PR, the steps merge in this order.
-6. ADR-0001's "possible follow-up" sentence stays as it is. This ADR supersedes it once accepted.
+1. The crates are `kika-git` and `kika-forge`, under `crates/`.
+2. Imports are written out as `kika_git::` and `kika_forge::` paths, with no root alias.
+3. `kika-git` keeps its `ratatui` dependency for the one `Span::width` call in `diff.rs`.
+4. The two noupling deny rules are deleted.
+5. Step 2 is its own PR.
+6. ADR-0001 stays as it is; this ADR supersedes its follow-up sentence.
 
 ## Consequences
 
@@ -108,3 +108,15 @@ Bad:
 - Step 2 is a wide diff: every `crate::git::` and `crate::forge::` path in the main crate changes.
 - Test-only builders need a cargo feature to cross the crate line.
 - The workspace commands (`--workspace`, `fmt --all`) replace the plain ones in CI and in `factory/project.md`.
+
+## Outcome
+
+- Step 1, the moves down: #426. Step 2, the workspace crates: the PR that closes #324.
+- The trees moved with `git mv` to `crates/kika-git/src` and `crates/kika-forge/src`, each `mod.rs` renamed to `lib.rs`. The import paths were rewritten from the compiler's errors only, never by a regex over the tree, then the lines the macOS build cannot see (four doc links and one Windows-only test import) by hand.
+- 17 items went from `pub(crate)` to `pub`, all because the compiler asked. In `kika-git`: `mod emoji`; `emoji::{is_pictographic, is_modifier, is_regional_indicator}`; `safe_text::is_invisible_or_bidi`; `bisect::elide`; `branches::run`; `remote::{with_prompts, askpass_for}`; `path::os_string` (both the unix and the not-unix definition); `program::NOT_FOUND`. In `kika-forge`: `REFRESH_LIMITED`, `same_repo`, `ForgeState::record_rate_limit`; `review::fixtures::{with_title, hostile_detail}`. The five `Gh` fields went from `pub(in crate::forge)` to `pub(crate)`.
+- 18 test builders went from `#[cfg(test)]` to `#[cfg(any(test, feature = "test-support"))]`. In `kika-git`: `mod fake`; `GitCommand::envs`; `CliRunner::{isolated, with_env, test_process}`; `isolation_env`; `rebase_plan::sample`; `impl RefsSnapshot`; `repo_root::resolve_workdir`; `forge_remote::UPSTREAMS_ARGV`. In `kika-forge`: `Gh::fixture`; `struct FakeGh`, `impl FakeGh`, `impl GhRunner for FakeGh`; `answer`; `failure`; `github::fixtures`; `review::fixtures`.
+- One lint was new because an item is now exported: `clippy::new_without_default` on `FakeGh::new`. `FakeGh` derives `Default` and `new()` returns `Self::default()`, as `FakeRunner` does.
+- The root `Cargo.toml` sets `default-members` to all three crates, so a plain `cargo test` runs every test, not only the binary's 2498.
+- The test count is 3048, as before: 2485 `kika` unit tests, 13 in `tests/interactive_rebase.rs`, 445 in `kika-git` and 105 in `kika-forge`. 550 tests were renamed: they lost their `git::` or `forge::` prefix. No assertion changed.
+- noupling 0.9.2: the health score went from 11.2 to 99.1, and the Issues from 19 to 12. Gone: `coupling_violation:src/e2e -> src/forge`, `coupling_violation:src/e2e -> src/git`, `coupling_violation:src/features -> src/forge`, `coupling_violation:src/features -> src/git`, `coupling_violation:src/forge -> src/git`, `red_flag:fused_sibling:src/features -> src/git`, `zone_flag:src/forge`, `zone_flag:src/git`. New: `zone_flag:src/features/custom_commands` (does not score).
+- `cargo check --workspace --all-targets --target x86_64-pc-windows-gnu` has no errors and the same four unused-import warnings as before the move. It found the one not-unix `path::os_string` that the macOS build cannot see.

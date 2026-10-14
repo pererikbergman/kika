@@ -8,12 +8,12 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use super::{BranchesPanel, BranchesTab};
 use crate::features::branches::{remotes, tags};
-use crate::forge::{CiState, ForgeState, ForgeStatus, ForgeView, PrBadge, PrState};
-use crate::git::branches::{Branch, BranchName, LogRow, Track};
 use crate::rows::{DIFF_MARK, clock, diff_mark_style};
 use crate::view::{
     PanelLook, clip, elide_right, fit, list_title, no_matches, pad, range_row, scrolled, width_of,
 };
+use kika_forge::{CiState, ForgeState, ForgeStatus, ForgeView, PrBadge, PrState};
+use kika_git::branches::{Branch, BranchName, LogRow, Track};
 
 /// Columns given to a log row's author, so subjects line up.
 const LOG_AUTHOR: usize = 16;
@@ -468,7 +468,7 @@ mod tests {
                 .map(|(name, _)| branch(name, false, None, Track::None))
                 .collect(),
         );
-        state.forge.repo = Some(crate::forge::ForgeRepo {
+        state.forge.repo = Some(kika_forge::ForgeRepo {
             host: "github.com".into(),
             owner: "acme".into(),
             name: "widgets".into(),
@@ -921,8 +921,8 @@ mod tests {
 
     #[test]
     fn a_running_push_spins_on_its_branch_row_and_names_itself_in_the_bar() {
-        use crate::git::remote::RemoteOp;
         use crate::remote_run::RemoteRun;
+        use kika_git::remote::RemoteOp;
 
         let mut state = focused(vec![
             branch("main", true, None, Track::None),

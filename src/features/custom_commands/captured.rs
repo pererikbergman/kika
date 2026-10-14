@@ -11,8 +11,8 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::time::Instant;
 
 use super::command::CommandFailure;
-use crate::git::safe_text::terminal_safe;
 use crate::handoff::start_error;
+use kika_git::safe_text::terminal_safe;
 
 /// The most output kept. A program that prints more is stopped, so a
 /// runaway one cannot fill memory.
@@ -34,7 +34,7 @@ pub async fn run_captured(argv: Vec<OsString>, workdir: PathBuf) -> Result<Strin
     let Some((program, args)) = argv.split_first() else {
         return Err(CommandFailure::Launch("The command is empty".into()));
     };
-    let mut child = crate::git::program::command(program)
+    let mut child = kika_git::program::command(program)
         .and_then(|command| {
             tokio::process::Command::from(command)
                 .args(args)
@@ -131,7 +131,7 @@ async fn sleep_until(deadline: Option<Instant>) {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::git::fake::TempDir;
+    use kika_git::fake::TempDir;
 
     fn argv(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()

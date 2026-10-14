@@ -6,11 +6,11 @@ use super::CustomCommandsIntent;
 use super::command::{CommandFailure, OutputMode, Target};
 use super::pending::PendingCommand;
 use crate::effect::Effect;
-use crate::git::safe_text::sanitize;
 use crate::handoff::HandOff;
 use crate::model::{AppState, Focus};
 use crate::popup::{ErrorPopup, LineInput, Popup, PromptKind};
 use crate::refresh::Selection;
+use kika_git::safe_text::sanitize;
 
 /// The Custom commands feature's half of `update`: core's one
 /// `AppIntent::CustomCommands` arm lands here. A free function, so its name
@@ -213,15 +213,15 @@ impl AppState {
 mod tests {
     use super::super::command::{CommandTable, Panel, test_table};
     use super::*;
-    #[cfg(unix)]
-    use crate::git::FileEntry;
-    #[cfg(unix)]
-    use crate::git::path::RepoPath;
     use crate::intent::AppIntent;
     use crate::keymap::{KeyPress, Keymap};
     use crate::model::Context;
     use crate::test_support::*;
     use crossterm::event::{KeyCode, KeyModifiers};
+    #[cfg(unix)]
+    use kika_git::FileEntry;
+    #[cfg(unix)]
+    use kika_git::path::RepoPath;
 
     /// `state` with these commands from the global file.
     fn with_commands(state: &mut AppState, tables: &[CommandTable]) {

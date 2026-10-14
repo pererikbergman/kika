@@ -8,11 +8,11 @@ use super::{RemotePending, RemotesIntent};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
 use crate::features::branches::BranchesTab;
-use crate::git::remotes::{Remote, validate_remote_name, validate_remote_url};
 use crate::keymap::{self, KeyScope, Reason};
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
 use crate::popup::{LineInput, Popup, PromptKind, RangeKind};
+use kika_git::remotes::{Remote, validate_remote_name, validate_remote_url};
 
 /// The Remotes tab's half of `update`, which `branches::update` passes
 /// `BranchesIntent::Remotes` to. A free function, so its name cannot clash

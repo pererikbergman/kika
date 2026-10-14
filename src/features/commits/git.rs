@@ -2,10 +2,10 @@
 //! branches sit on the commits it would replace, and the argv that checks
 //! out a commit with no branch.
 
-use crate::git::commit_files::CommitId;
-use crate::git::log::CommitRow;
-use crate::git::rebase_plan::branch_name;
-use crate::git::runner::{GitCommand, GitRunner};
+use kika_git::commit_files::CommitId;
+use kika_git::log::CommitRow;
+use kika_git::rebase_plan::branch_name;
+use kika_git::runner::{GitCommand, GitRunner};
 
 /// One branch tip: the commit and the full ref name, raw bytes, as
 /// `refs/heads/<name>`.
@@ -86,9 +86,9 @@ pub(crate) fn detached_checkout(oid: &CommitId) -> GitCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::runner::EnvProfile;
     use crate::op::{GitOp, ResetMode, op_command, run_op};
     use crate::test_support::{argv, rev_parse, two_commit_repo};
+    use kika_git::runner::EnvProfile;
 
     fn row(digit: char) -> CommitRow {
         CommitRow {
@@ -133,7 +133,7 @@ mod tests {
 
     #[test]
     fn reading_tips_runs_the_read_and_names_a_silent_failure() {
-        use crate::git::fake::{FakeRunner, fail, ok};
+        use kika_git::fake::{FakeRunner, fail, ok};
         let argv = [
             "for-each-ref",
             "--format=%(objectname)%00%(refname)",
@@ -265,11 +265,11 @@ mod tests {
 
     #[test]
     fn checkout_commit_leaves_head_detached_at_it_in_real_git() {
-        use crate::git::fake::{git, try_git};
+        use kika_git::fake::{git, try_git};
 
         let (tmp, first) = two_commit_repo();
         let dir = tmp.path();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         run_op(&runner, &GitOp::CheckoutCommit(first.clone())).unwrap();
         assert_eq!(rev_parse(dir, "HEAD"), first);
         assert!(
@@ -282,12 +282,12 @@ mod tests {
 
     #[test]
     fn revert_makes_a_commit_on_head_that_undoes_the_change_in_real_git() {
-        use crate::git::fake::git;
+        use kika_git::fake::git;
 
         let (tmp, _) = two_commit_repo();
         let dir = tmp.path();
         let second = rev_parse(dir, "HEAD");
-        let runner = crate::git::CliRunner::isolated(dir).with_env("GIT_EDITOR", "true");
+        let runner = kika_git::CliRunner::isolated(dir).with_env("GIT_EDITOR", "true");
         run_op(&runner, &GitOp::Revert(second.clone())).unwrap();
         assert_eq!(rev_parse(dir, "HEAD^"), second);
         assert_eq!(git(dir, &["show", "HEAD:a.txt"]), b"one\n");
@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn each_reset_mode_keeps_what_it_says_in_real_git() {
-        use crate::git::fake::git;
+        use kika_git::fake::git;
 
         let cases = [
             (ResetMode::Soft, "M  a.txt\n"),
@@ -307,7 +307,7 @@ mod tests {
         for (mode, status) in cases {
             let (tmp, first) = two_commit_repo();
             let dir = tmp.path();
-            let runner = crate::git::CliRunner::isolated(dir);
+            let runner = kika_git::CliRunner::isolated(dir);
             run_op(
                 &runner,
                 &GitOp::Reset {
@@ -319,7 +319,7 @@ mod tests {
             assert_eq!(rev_parse(dir, "HEAD"), first, "{mode:?}");
             // The branch moved with it; HEAD is still on it.
             assert!(
-                crate::git::fake::try_git(dir, &["symbolic-ref", "-q", "HEAD"]),
+                kika_git::fake::try_git(dir, &["symbolic-ref", "-q", "HEAD"]),
                 "{mode:?}"
             );
             assert_eq!(

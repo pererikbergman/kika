@@ -5,9 +5,9 @@
 
 use super::git::{StashEntry, StashFile, StashMode, StashRef};
 use crate::filtered_list::{FilteredList, Row};
-use crate::git::commit_files::CommitId;
-use crate::git::path::RepoPath;
 use crate::rows::drawn_path;
+use kika_git::commit_files::CommitId;
+use kika_git::path::RepoPath;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StashList {
@@ -90,7 +90,7 @@ pub struct StashDraft {
 mod tests {
     use super::*;
     use crate::effect::Tag;
-    use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
+    use kika_git::commit_files::{CommitFile, CommitId, CommitRange};
 
     fn entry(index: usize, oid: &str) -> StashEntry {
         StashEntry {

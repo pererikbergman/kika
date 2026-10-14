@@ -12,7 +12,6 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use crate::features::command_log;
 use crate::features::repos::{RecentList, RecentRow};
 use crate::features::submodules::SubmoduleList;
-use crate::git::safe_text::sanitize;
 use crate::menu::{self, MenuId};
 use crate::model::AppState;
 use crate::pick_list::PickList;
@@ -20,6 +19,7 @@ use crate::popup::{CredentialPrompt, ErrorPopup, LineInput, Popup};
 use crate::view::{
     COMMIT_WIDTH, centered, clip, elide_left, render_question, tail, width_of, wrap,
 };
+use kika_git::safe_text::sanitize;
 
 /// Wide enough for a path, narrow enough to look like a question.
 const PROMPT_WIDTH: u16 = 50;
@@ -447,15 +447,15 @@ mod tests {
     use crate::features::commits::copy::CopyIntent;
     use crate::features::pull_requests::create_question;
     use crate::filtered_list::FilteredList;
-    use crate::git::FileEntry;
-    use crate::git::status::EntryKind;
-    use crate::git::submodule::{Submodule, SubmoduleState};
     use crate::model::Context;
     use crate::op::GitOp;
     use crate::popup::DiscardWhat;
     use crate::popup::PromptKind;
     use crate::test_support::load_list;
     use crate::view::{buffer_rows, render};
+    use kika_git::FileEntry;
+    use kika_git::status::EntryKind;
+    use kika_git::submodule::{Submodule, SubmoduleState};
 
     fn draw(state: &AppState, width: u16, height: u16) -> (Buffer, Vec<String>) {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -738,7 +738,7 @@ mod tests {
 
     #[test]
     fn the_abort_question_wraps_whole_inside_a_narrow_terminal() {
-        use crate::git::repo_state::Operation;
+        use kika_git::repo_state::Operation;
 
         let mut state = workspace(&["a.rs"]);
         let ask = crate::features::operation::abort_question(Operation::Rebase).unwrap();
@@ -777,7 +777,7 @@ mod tests {
     #[test]
     fn the_skip_question_wraps_whole_inside_a_narrow_terminal() {
         use crate::features::operation::{skip_question, skip_question_unchecked};
-        use crate::git::repo_state::Operation;
+        use kika_git::repo_state::Operation;
 
         let mut state = workspace(&["a.rs"]);
         let ask = skip_question(Operation::Rebase, None).unwrap();
@@ -849,7 +849,7 @@ mod tests {
 
     #[test]
     fn the_drop_range_question_counts_the_commits_and_only_y_drops() {
-        use crate::git::commit_files::CommitId;
+        use kika_git::commit_files::CommitId;
         let mut state = workspace(&["a.rs"]);
         let ids = ['a', 'b', 'c'].map(|d| CommitId::parse(&d.to_string().repeat(40)).unwrap());
         let ask = crate::features::commits::rewrite::drop_range_question(ids.to_vec());
@@ -868,7 +868,7 @@ mod tests {
     /// `workspace` with a custom patch of one file from `bbbbbbb`.
     fn with_patch() -> AppState {
         use crate::features::commits::custom_patch::CustomPatch;
-        use crate::git::commit_files::{CommitId, CommitRange};
+        use kika_git::commit_files::{CommitId, CommitRange};
         let mut state = workspace(&["a.rs"]);
         state.files.rows.clear();
         let range = CommitRange {
@@ -884,7 +884,7 @@ mod tests {
     #[test]
     fn the_custom_patch_question_keeps_y_n_in_sight_at_every_size() {
         use crate::features::commits::custom_patch::PatchAction;
-        use crate::git::commit_files::CommitId;
+        use kika_git::commit_files::CommitId;
         let long = "A rather long message with wide 漢字漢字 and 👩\u{200D}💻 in it, past any box";
         let actions = [
             PatchAction::Remove,
@@ -1026,7 +1026,7 @@ mod tests {
     #[test]
     fn the_detached_checkout_question_names_the_commit() {
         let mut state = workspace(&["a.rs"]);
-        let id = crate::git::commit_files::CommitId::parse("abcdef0123").unwrap();
+        let id = kika_git::commit_files::CommitId::parse("abcdef0123").unwrap();
         let short_oid = state.commits.short_oid(&id);
         state.popups = vec![Popup::Question(
             crate::features::commits::checkout_question(short_oid, id),
@@ -1042,8 +1042,8 @@ mod tests {
     #[test]
     fn the_hard_reset_question_names_the_target_and_offers_no_enter() {
         use crate::features::commits::reset_hard_question;
-        use crate::git::commit_files::CommitId;
         use crate::op::ResetMode;
+        use kika_git::commit_files::CommitId;
         let mut state = workspace(&["a.rs"]);
         state.popups = vec![Popup::Question(reset_hard_question(
             "abc1234".into(),
@@ -1096,7 +1096,7 @@ mod tests {
     #[test]
     fn the_create_question_names_where_what_and_the_title_and_offers_no_enter() {
         use crate::features::pull_requests::PrDraft;
-        use crate::forge::ForgeRepo;
+        use kika_forge::ForgeRepo;
         let repo = |owner: &str| ForgeRepo {
             host: "github.com".into(),
             owner: owner.into(),
@@ -1138,7 +1138,7 @@ mod tests {
 
     /// A create draft whose names and title are far longer than a screen.
     fn long_draft() -> crate::features::pull_requests::PrDraft {
-        use crate::forge::ForgeRepo;
+        use kika_forge::ForgeRepo;
         let repo = |owner: &str| ForgeRepo {
             host: "github.com".into(),
             owner: owner.into(),
@@ -1165,13 +1165,13 @@ mod tests {
         let mut state = workspace(&["a.rs"]);
         load_list(
             &mut state.branches.list,
-            Ok(vec![crate::git::branches::Branch {
+            Ok(vec![kika_git::branches::Branch {
                 name: format!("feature/{}-日本語", "x".repeat(120))
                     .as_str()
                     .into(),
                 head: false,
                 upstream: Some("origin/x".into()),
-                track: crate::git::branches::Track::None,
+                track: kika_git::branches::Track::None,
                 merged: false,
             }]),
         );
@@ -1208,15 +1208,14 @@ mod tests {
                         title: "Make the widget cache 組織 🦀 ".repeat(6),
                         base: "main".into(),
                         head: "topic".into(),
-                        method: crate::forge::merge::MergeMethod::Squash,
-                        head_oid: crate::git::commit_files::CommitId::parse(&"a".repeat(40))
-                            .unwrap(),
-                        repo: crate::forge::ForgeRepo {
+                        method: kika_forge::merge::MergeMethod::Squash,
+                        head_oid: kika_git::commit_files::CommitId::parse(&"a".repeat(40)).unwrap(),
+                        repo: kika_forge::ForgeRepo {
                             host: "github.com".into(),
                             owner: "acme".into(),
                             name: "widgets".into(),
                         },
-                        host: crate::forge::ForgeHost::parse("github.com").unwrap(),
+                        host: kika_forge::ForgeHost::parse("github.com").unwrap(),
                         unstable: true,
                     }
                     .into_question(),
@@ -1336,8 +1335,8 @@ mod tests {
 
     #[test]
     fn the_leave_commits_question_names_the_count_and_ids_and_offers_no_enter() {
-        use crate::git::commit_files::CommitId;
         use crate::popup::LeaveCommitsConfirm;
+        use kika_git::commit_files::CommitId;
         let mut state = workspace(&["a.rs"]);
         state.popups = vec![Popup::Question(
             LeaveCommitsConfirm {
@@ -1363,9 +1362,9 @@ mod tests {
 
     /// The hard-reset form of the leave-commits question, with eight ids.
     fn hard_reset_leaving_eight() -> AppState {
-        use crate::git::commit_files::CommitId;
         use crate::op::ResetMode;
         use crate::popup::LeaveCommitsConfirm;
+        use kika_git::commit_files::CommitId;
         let mut state = workspace(&["a.rs"]);
         state.popups = vec![Popup::Question(
             LeaveCommitsConfirm {
@@ -1403,7 +1402,7 @@ mod tests {
     #[test]
     fn the_drop_stash_question_names_the_entry_and_offers_no_enter() {
         use crate::features::stash::StashRef;
-        use crate::git::commit_files::CommitId;
+        use kika_git::commit_files::CommitId;
         let mut state = workspace(&["a.rs"]);
         state.popups = vec![Popup::Question(
             crate::features::stash::drop_stash_question(
@@ -1432,7 +1431,7 @@ mod tests {
     #[test]
     fn the_travel_question_shows_every_preview_line_and_offers_no_enter() {
         use crate::features::commits::reflog::{Direction, Expected, Step};
-        use crate::git::commit_files::CommitId;
+        use kika_git::commit_files::CommitId;
         let mut state = workspace(&["a.rs"]);
         state.popups = vec![Popup::Question(
             crate::features::commits::reflog::travel_question(
@@ -2027,9 +2026,9 @@ mod tests {
 
     #[test]
     fn the_bisect_reset_question_names_where_it_started() {
-        use crate::git::bisect::BisectState;
-        use crate::git::repo_state::Operation;
-        use crate::git::status::{BranchStatus, Head};
+        use kika_git::bisect::BisectState;
+        use kika_git::repo_state::Operation;
+        use kika_git::status::{BranchStatus, Head};
         let mut state = workspace(&[]);
         state.branch = Some(BranchStatus {
             head: Head::Detached("abc".into()),
@@ -2050,7 +2049,7 @@ mod tests {
     #[test]
     fn the_copy_menu_draws_its_four_items_and_the_bar_says_what_was_copied() {
         let mut state = workspace(&[]);
-        state.commits.list.rows = vec![crate::git::log::CommitRow {
+        state.commits.list.rows = vec![kika_git::log::CommitRow {
             oid: "abc1234def".into(),
             short_oid: "abc1234".into(),
             parents: vec![],

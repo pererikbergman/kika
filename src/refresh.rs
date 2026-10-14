@@ -6,8 +6,8 @@
 
 use std::collections::BTreeSet;
 
-use crate::git::remote::RemoteOp;
 use crate::op::GitOp;
+use kika_git::remote::RemoteOp;
 
 /// A piece of loaded data that can go stale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn stash_ops_reload_the_list_and_what_they_change_in_the_worktree() {
         use crate::features::stash::{StashMode, StashRef};
-        use crate::git::commit_files::CommitId;
+        use kika_git::commit_files::CommitId;
         let at = || StashRef {
             index: 1,
             oid: CommitId::parse("abc").unwrap(),
@@ -355,8 +355,8 @@ mod tests {
 
     #[test]
     fn checkout_revert_and_reset_of_a_commit_reload_everything_head_touches() {
-        use crate::git::commit_files::CommitId;
         use crate::op::ResetMode;
+        use kika_git::commit_files::CommitId;
         let oid = || CommitId::parse("abc").unwrap();
         let ops = [
             GitOp::CheckoutCommit(oid()),
@@ -403,15 +403,15 @@ mod tests {
 
     #[test]
     fn merge_rebases_and_their_controls_reload_everything_head_touches_and_the_stashes() {
-        use crate::git::repo_state::Operation;
         use crate::op::MergeStrategy;
+        use kika_git::repo_state::Operation;
         let ops = [
             GitOp::Merge {
                 branch: "b".into(),
                 strategy: MergeStrategy::Squash,
             },
             GitOp::Rebase { onto: "b".into() },
-            GitOp::InteractiveRebase(crate::git::rebase_plan::sample()),
+            GitOp::InteractiveRebase(kika_git::rebase_plan::sample()),
             GitOp::Continue(Operation::Merge),
             GitOp::Skip(Operation::Rebase),
             GitOp::Abort(Operation::CherryPick),
@@ -438,8 +438,8 @@ mod tests {
 
     #[test]
     fn bisect_marks_and_the_reset_reload_everything_head_touches() {
-        use crate::git::bisect::BisectMark;
-        use crate::git::commit_files::CommitId;
+        use kika_git::bisect::BisectMark;
+        use kika_git::commit_files::CommitId;
         let ops = [
             GitOp::BisectMark {
                 mark: BisectMark::Good,
@@ -535,7 +535,7 @@ mod tests {
         let oid = "1".repeat(40);
         let create = GitOp::CreateTag {
             name: "v1".into(),
-            target: crate::git::commit_files::CommitId::parse(&oid).unwrap(),
+            target: kika_git::commit_files::CommitId::parse(&oid).unwrap(),
             message: None,
         };
         let delete = GitOp::DeleteTag {
@@ -555,8 +555,8 @@ mod tests {
         assert_eq!(remote_plan(&tag), remote_plan(&push));
     }
 
-    fn remote_branch() -> crate::git::remotes::RemoteBranch {
-        crate::git::remotes::RemoteBranch {
+    fn remote_branch() -> kika_git::remotes::RemoteBranch {
+        kika_git::remotes::RemoteBranch {
             remote: "origin".into(),
             short: b"t".to_vec(),
             refname: b"refs/remotes/origin/t".to_vec(),

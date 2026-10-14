@@ -7,8 +7,6 @@ use super::DiffIntent;
 use super::renderers;
 use crate::diff_pane::focused_hunks_mut;
 use crate::effect::{Effect, Tag};
-use crate::git::diff::{DiffChunk, DiffOptions, DiffSide};
-use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
 use crate::handoff::HandOff;
 use crate::hunk_view::{HunkView, NO_CHANGES};
 use crate::keymap::{self, KeyPattern};
@@ -16,6 +14,8 @@ use crate::model::{AppState, Context, Focus, failure_title};
 use crate::op::GitOp;
 use crate::popup::ErrorPopup;
 use crate::refresh::Selection;
+use kika_git::diff::{DiffChunk, DiffOptions, DiffSide};
+use kika_git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
 
 /// The Diff pane's half of `update`: core's one `AppIntent::Diff` arm
 /// lands here, and the renderers' intents go on to their own `update`.
@@ -362,9 +362,6 @@ mod tests {
     use super::EDITED_HUNK_INVALID;
     use crate::effect::{Effect, Tag};
     use crate::features::diff::DiffIntent;
-    use crate::git::diff::{DiffRequest, DiffSide};
-    use crate::git::patch::{self, Direction, PatchSelection};
-    use crate::git::status::EntryKind;
     use crate::handoff::HandOff;
     use crate::intent::{AppIntent, Scroll};
     use crate::keymap::{self, KeyPress, KeyScope, Keymap};
@@ -377,6 +374,9 @@ mod tests {
         view, with_files,
     };
     use crossterm::event::{KeyCode, KeyModifiers};
+    use kika_git::diff::{DiffRequest, DiffSide};
+    use kika_git::patch::{self, Direction, PatchSelection};
+    use kika_git::status::EntryKind;
 
     #[test]
     fn later_chunks_append() {

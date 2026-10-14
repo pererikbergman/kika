@@ -12,11 +12,11 @@ use crate::confirm_question::Answer;
 use crate::diff_mark::{DiffEnd, DiffMark};
 use crate::diff_pane::DiffStart;
 use crate::effect::{Effect, Tag};
-use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
-use crate::git::diff::DiffRequest;
-use crate::git::log::{LogPage, Markers};
 use crate::keymap::KeyScope;
 use crate::model::{AppState, Context, Focus};
+use kika_git::commit_files::{CommitFile, CommitId, CommitRange};
+use kika_git::diff::DiffRequest;
+use kika_git::log::{LogPage, Markers};
 
 /// The commits subtree's half of `update`: core's one `AppIntent::Commits`
 /// arm lands here, and each sub-feature's intent goes on to its own
@@ -227,7 +227,6 @@ mod tests {
     use super::*;
     use crate::diff_pane::DiffPane;
     use crate::features::commits::panel::{PAGE, PREFETCH};
-    use crate::git::log::Markers;
     use crate::intent::AppIntent;
     use crate::keymap::KeyScope;
     use crate::model::Focus;
@@ -235,6 +234,7 @@ mod tests {
         TOP, commits_load, commits_loaded, diff_request, files_load, markers_tag, on_commit_five,
         opened, page, press, range_of, two_commit_files, with_commits,
     };
+    use kika_git::log::Markers;
 
     #[test]
     fn startup_loads_the_first_page_and_the_markers_without_waiting_for_focus() {

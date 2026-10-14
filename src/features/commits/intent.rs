@@ -11,10 +11,10 @@ use super::git::Tip;
 use super::reflog::ReflogIntent;
 use super::rewrite::RewriteIntent;
 use crate::effect::Tag;
-use crate::git::commit_files::CommitFile;
-use crate::git::log::{LogPage, Markers};
 use crate::list_filter::LogFilterField;
 use crate::op::ResetMode;
+use kika_git::commit_files::CommitFile;
+use kika_git::log::{LogPage, Markers};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CommitsIntent {

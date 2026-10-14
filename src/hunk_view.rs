@@ -1,12 +1,12 @@
 use std::collections::BTreeSet;
 
 use crate::diff_search::{DiffSearch, reveal};
-use crate::git::commit_files::CommitRange;
-use crate::git::diff::{DiffSide, EmojiZwj, sanitize_body};
-use crate::git::patch::{self, FilePatch, LineId, PatchLineKind};
-use crate::git::path::RepoPath;
-use crate::git::safe_text::sanitize;
 use crate::intent::Scroll;
+use kika_git::commit_files::CommitRange;
+use kika_git::diff::{DiffSide, EmojiZwj, sanitize_body};
+use kika_git::patch::{self, FilePatch, LineId, PatchLineKind};
+use kika_git::path::RepoPath;
+use kika_git::safe_text::sanitize;
 
 /// The Diff pane while it has focus: one side of the selected file's
 /// whole diff, parsed into hunks, with a cursor on one of them. Pure state;
@@ -451,7 +451,7 @@ pub fn drawn_text(row: &Row, emoji: EmojiZwj) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::patch::parse;
+    use kika_git::patch::parse;
 
     /// Two hunks of 3 lines each after a 3-line header: rows 3 and 7 are `@@`.
     const TWO: &[u8] = b"diff --git a/x b/x\n--- a/x\n+++ b/x\n\

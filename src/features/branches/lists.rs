@@ -138,10 +138,6 @@ mod tests {
     use crate::features::branches::BranchesIntent;
     use crate::features::branches::BranchesTab;
     use crate::features::branches::tags::TagsIntent;
-    use crate::git::branches::{Branch, Track};
-    use crate::git::commit_files::CommitId;
-    use crate::git::remotes::{Remote, RemoteBranch, RemoteName};
-    use crate::git::tags::TagRef;
     use crate::intent::AppIntent;
     use crate::keymap::{FILTER_HIDES_ROW, KeyPress, KeyScope};
     use crate::layout::{Panel, SidePanel};
@@ -150,6 +146,10 @@ mod tests {
     use crate::op::{op_command, op_steps};
     use crate::popup::Popup;
     use crate::test_support::{load_list, load_remotes};
+    use kika_git::branches::{Branch, Track};
+    use kika_git::commit_files::CommitId;
+    use kika_git::remotes::{Remote, RemoteBranch, RemoteName};
+    use kika_git::tags::TagRef;
 
     fn press(state: &mut AppState, code: KeyCode) -> Vec<Effect> {
         let mods = match code {

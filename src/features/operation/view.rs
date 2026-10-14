@@ -7,10 +7,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::git::repo_state::Operation;
-use crate::git::status::Head;
 use crate::model::AppState;
 use crate::view::{PanelLook, bisect_lines, elide_right, fit, short_hash, width_of};
+use kika_git::repo_state::Operation;
+use kika_git::status::Head;
 
 /// Where the user is: the branch, its upstream, and any operation in
 /// progress. Names too wide for the panel lose their start to `…`, so the

@@ -5,8 +5,8 @@
 use super::{ExternalRenderer, RenderedDiff, RenderersIntent, StyledRow, external_diff};
 use crate::diff_pane::focused_hunks;
 use crate::effect::{Effect, Tag};
-use crate::git::diff::DiffRequest;
 use crate::model::{AppState, Focus};
+use kika_git::diff::DiffRequest;
 
 /// The renderers' half of `update`: core's one `AppIntent::Diff` arm
 /// reaches it through the diff feature's `update`. A free function, so
@@ -183,12 +183,12 @@ mod tests {
     use super::*;
     use crate::features::diff::DiffIntent;
     use crate::features::diff::renderers::RenderersIntent;
-    use crate::git::FileEntry;
-    use crate::git::diff::DiffSide;
     use crate::intent::{AppIntent, Scroll};
     use crate::keymap::{self, KeyPress};
     use crate::test_support::*;
     use crossterm::event::{KeyCode, KeyModifiers};
+    use kika_git::FileEntry;
+    use kika_git::diff::DiffSide;
 
     fn renderer(label: &str) -> ExternalRenderer {
         ExternalRenderer {

@@ -3,7 +3,7 @@
 //! the commits feature (see `docs/adr/0002-nested-intents.md`).
 
 use crate::features::commits::CommitsIntent;
-use crate::git::bisect::BisectMark;
+use kika_git::bisect::BisectMark;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BisectIntent {

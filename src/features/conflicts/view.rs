@@ -9,9 +9,9 @@ use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
 use super::state::{ConflictView, Row, RowKind};
-use crate::git::diff::{EmojiZwj, sanitize_body};
 use crate::keymap::{KeyPattern, Keymap, registry};
 use crate::view::{PanelLook, clip, reversed};
+use kika_git::diff::{EmojiZwj, sanitize_body};
 
 /// What to do when a file cannot be resolved here, with the keys that do
 /// it from where the hint is shown: the merge tool from this view, the

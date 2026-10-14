@@ -4,8 +4,8 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use crate::git::recording::{CommandEvent, CommandOutcome};
 use crate::list_filter;
+use kika_git::recording::{CommandEvent, CommandOutcome};
 
 /// One command in the log.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn the_filter_sees_the_redacted_line_never_the_secret() {
-        use crate::git::runner::GitCommand;
+        use kika_git::runner::GitCommand;
 
         let add = GitCommand::new("remote")
             .arg("add")
@@ -360,7 +360,7 @@ mod tests {
             .arg("o")
             .arg("https://u:tok@h/r");
         let mut log = CommandLog::default();
-        log.started(0, crate::git::command_line::display_line(&add), false);
+        log.started(0, kika_git::command_line::display_line(&add), false);
         assert_eq!(view(0, true, "tok").visible(&log), Vec::<usize>::new());
         assert_eq!(view(0, true, "u:tok@").visible(&log), Vec::<usize>::new());
         assert_eq!(view(0, true, "h/r").visible(&log), [0]);

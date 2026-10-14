@@ -67,11 +67,11 @@ use serde::Deserialize;
 
 use crate::features::custom_commands::CommandTable;
 use crate::features::diff::renderers::external_diff::{check_argv, parse_command};
-use crate::forge::ForgeHost;
-use crate::forge::allow::AllowRule;
-use crate::git::diff::EmojiZwj;
 use crate::keymap::{Keymap, KeysTable, Trust};
 use crate::watch::{DEFAULT_WATCH, WatchConfig};
+use kika_forge::ForgeHost;
+use kika_forge::allow::AllowRule;
+use kika_git::diff::EmojiZwj;
 
 /// Where the config files are. Either may be unknown.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -535,9 +535,9 @@ mod tests {
     use std::ffi::OsString;
 
     use super::*;
-    use crate::forge::ForgeRepo;
-    use crate::forge::allow::AllowRule;
     use crate::keymap::{KeyPattern, parse_key, registry};
+    use kika_forge::ForgeRepo;
+    use kika_forge::allow::AllowRule;
 
     fn keys_of<'a>(keymap: &'a Keymap, id: &str) -> &'a [KeyPattern] {
         keymap.keys(registry().iter().find(|b| b.id == id).unwrap())

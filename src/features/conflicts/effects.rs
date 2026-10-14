@@ -13,10 +13,10 @@ use super::state::MAX_CONFLICT_FILE;
 use crate::background;
 use crate::effect::Tag;
 use crate::features::conflicts::ConflictsIntent;
-use crate::git::GitRunner;
-use crate::git::path::RepoPath;
 use crate::intent::AppIntent;
 use crate::worktree_file;
+use kika_git::GitRunner;
+use kika_git::path::RepoPath;
 
 /// Read the conflicted file at `path` under `workdir`, which `Runtime`
 /// reads before the spawn, and report it as `ConflictsIntent::Loaded`.

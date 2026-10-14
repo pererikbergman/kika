@@ -3,11 +3,11 @@
 //! find the last action to reverse.
 
 use crate::features::commits::git::detached_checkout;
-use crate::git::branches::run;
-use crate::git::commit_files::CommitId;
-use crate::git::runner::{GitCommand, GitRunner};
-use crate::git::safe_text::terminal_safe;
 use crate::op::checkout_command;
+use kika_git::branches::run;
+use kika_git::commit_files::CommitId;
+use kika_git::runner::{GitCommand, GitRunner};
+use kika_git::safe_text::terminal_safe;
 
 use super::undo::{Direction, Step};
 
@@ -270,7 +270,7 @@ pub fn read_reflog(runner: &dyn GitRunner) -> Result<Reflog, String> {
                     .arg("-n")
                     .arg(DEPTH)
                     .arg("--format=%H %T %gs")
-                    .arg(crate::git::path::os_string(r))
+                    .arg(kika_git::path::os_string(r))
                     .arg("--"),
             )
             .ok()
@@ -358,10 +358,10 @@ pub(crate) fn travel_command(direction: Direction, step: &Step) -> GitCommand {
 mod tests {
     use super::*;
     use crate::features::commits::reflog::undo::Expected;
-    use crate::git::fake::{FakeRunner, fail, ok};
-    use crate::git::runner::EnvProfile;
     use crate::op::{GitOp, HEAD_MOVED, op_command, run_op};
     use crate::test_support::{argv, cid as oid, rev_parse, two_commit_repo};
+    use kika_git::fake::{FakeRunner, fail, ok};
+    use kika_git::runner::EnvProfile;
 
     const SHOW: &[&str] = &[
         "reflog",
@@ -594,8 +594,8 @@ mod tests {
 
     #[test]
     fn a_fresh_repositorys_reflog_is_read_in_real_git() {
-        use crate::git::CliRunner;
-        use crate::git::fake::{TempDir, git};
+        use kika_git::CliRunner;
+        use kika_git::fake::{TempDir, git};
 
         let tmp = TempDir::new("reflog");
         let dir = tmp.path();
@@ -725,7 +725,7 @@ mod tests {
         let (tmp, first) = two_commit_repo();
         let dir = tmp.path();
         let second = rev_parse(dir, "HEAD");
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         let ctx = Context {
             branch: Some("main"),
             branches: &[],
@@ -746,11 +746,11 @@ mod tests {
 
     #[test]
     fn reset_keep_refuses_to_clobber_a_local_change_or_an_untracked_file_in_real_git() {
-        use crate::git::fake::git;
+        use kika_git::fake::git;
 
         let (tmp, first) = two_commit_repo();
         let dir = tmp.path();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         std::fs::write(dir.join("a.txt"), "mine\n").unwrap();
         let undo = travel_here(&runner, Direction::Undo, Step::MoveTo(first.clone()));
         let refused = run_op(&runner, &undo).unwrap_err();
@@ -781,11 +781,11 @@ mod tests {
 
     #[test]
     fn a_travel_whose_head_moved_since_the_question_changes_nothing_in_real_git() {
-        use crate::git::fake::git;
+        use kika_git::fake::git;
 
         let (tmp, first) = two_commit_repo();
         let dir = tmp.path();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         let undo = travel_here(&runner, Direction::Undo, Step::MoveTo(first.clone()));
 
         // Another commit lands while the question is open.
@@ -806,7 +806,7 @@ mod tests {
     fn undoing_a_rebase_started_from_another_branch_restores_the_rebased_branch_in_real_git() {
         use crate::features::commits::reflog::git::read_reflog;
         use crate::features::commits::reflog::undo::{Context, plan};
-        use crate::git::fake::git;
+        use kika_git::fake::git;
 
         let (tmp, base) = two_commit_repo();
         let dir = tmp.path();
@@ -825,9 +825,9 @@ mod tests {
         git(dir, &["rebase", "-q", main.as_str(), "topic"]);
         let new_topic = rev_parse(dir, "HEAD");
 
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         let reflog = read_reflog(&runner).unwrap();
-        let branches = crate::git::branches::list_branches(&runner).unwrap();
+        let branches = kika_git::branches::list_branches(&runner).unwrap();
         let ctx = Context {
             branch: Some("topic"),
             branches: &branches,
@@ -858,7 +858,7 @@ mod tests {
     fn a_head_pointing_outside_refs_heads_plans_no_undo_in_real_git() {
         use crate::features::commits::reflog::git::read_reflog;
         use crate::features::commits::reflog::undo::{Context, plan};
-        use crate::git::fake::git;
+        use kika_git::fake::git;
 
         let (tmp, _) = two_commit_repo();
         let dir = tmp.path();
@@ -872,7 +872,7 @@ mod tests {
         git(dir, &["commit", "-q", "-am", "on a remote ref"]);
         let moved = rev_parse(dir, "refs/remotes/origin/main");
 
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         let reflog = read_reflog(&runner).unwrap();
         let ctx = Context {
             branch: None,

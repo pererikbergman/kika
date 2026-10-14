@@ -3,8 +3,8 @@
 //! loads the list and moves the selection.
 
 use crate::filtered_list::{FilteredList, Row};
-use crate::git::commit_files::CommitId;
-use crate::git::tags::{TagName, TagRef};
+use kika_git::commit_files::CommitId;
+use kika_git::tags::{TagName, TagRef};
 
 /// The tags as last loaded, with the cursor, the filter and the range.
 /// The cursor follows a tag by name across reloads.

@@ -5,9 +5,9 @@
 
 use std::ffi::OsString;
 
-use crate::git::branches::BranchName;
-use crate::git::remotes::RemoteBranch;
-use crate::git::runner::GitCommand;
+use kika_git::branches::BranchName;
+use kika_git::remotes::RemoteBranch;
+use kika_git::runner::GitCommand;
 
 /// `git checkout -b` for `name` at the branch `from`.
 ///
@@ -60,10 +60,10 @@ pub(crate) fn unset_upstream_command(branch: &BranchName) -> GitCommand {
 
 #[cfg(test)]
 mod tests {
-    use crate::git::fake::{FakeRunner, config, ok};
-    use crate::git::remotes::RemoteBranch;
     use crate::op::{GitOp, op_command, run_op};
     use crate::test_support::{argv, cloned_repo, dirty_repo};
+    use kika_git::fake::{FakeRunner, config, ok};
+    use kika_git::remotes::RemoteBranch;
 
     #[test]
     fn branch_ops_issue_exact_argv_with_the_separator_and_full_refs() {
@@ -122,7 +122,7 @@ mod tests {
     #[test]
     fn branch_ops_put_the_raw_bytes_of_a_name_in_argv() {
         use std::os::unix::ffi::OsStrExt;
-        let raw = crate::git::branches::BranchName::from_bytes(b"x\xff");
+        let raw = kika_git::branches::BranchName::from_bytes(b"x\xff");
         let create = op_command(&GitOp::CreateBranch {
             name: "new".into(),
             from: raw.clone(),
@@ -139,14 +139,14 @@ mod tests {
     fn a_new_branch_named_like_an_option_is_refused_by_git_in_real_git() {
         let tmp = dirty_repo();
         let dir = tmp.path();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         for name in ["-f", "--orphan"] {
             let create = GitOp::CreateBranch {
                 name: name.into(),
                 from: "main".into(),
             };
             assert!(run_op(&runner, &create).is_err(), "{name}");
-            let head = crate::git::fake::git(dir, &["symbolic-ref", "HEAD"]);
+            let head = kika_git::fake::git(dir, &["symbolic-ref", "HEAD"]);
             assert_eq!(head, b"refs/heads/main\n", "{name}");
             assert_eq!(
                 std::fs::read_to_string(dir.join("a.txt")).unwrap(),
@@ -157,23 +157,23 @@ mod tests {
 
     #[test]
     fn checkout_create_rename_and_delete_change_branches_in_real_git() {
-        let tmp = crate::git::fake::TempDir::new("branch-ops");
+        let tmp = kika_git::fake::TempDir::new("branch-ops");
         let dir = tmp.path();
-        crate::git::fake::git(dir, &["init", "-q", "-b", "main"]);
+        kika_git::fake::git(dir, &["init", "-q", "-b", "main"]);
         std::fs::write(dir.join("a.txt"), "a\n").unwrap();
-        crate::git::fake::git(dir, &["add", "-A"]);
-        crate::git::fake::git(dir, &["commit", "-q", "-m", "init"]);
-        crate::git::fake::git(dir, &["branch", "side"]);
-        let runner = crate::git::CliRunner::isolated(dir);
+        kika_git::fake::git(dir, &["add", "-A"]);
+        kika_git::fake::git(dir, &["commit", "-q", "-m", "init"]);
+        kika_git::fake::git(dir, &["branch", "side"]);
+        let runner = kika_git::CliRunner::isolated(dir);
         let head = || {
-            String::from_utf8(crate::git::fake::git(
+            String::from_utf8(kika_git::fake::git(
                 dir,
                 &["symbolic-ref", "--short", "HEAD"],
             ))
             .unwrap()
         };
         let branches = || {
-            String::from_utf8(crate::git::fake::git(
+            String::from_utf8(kika_git::fake::git(
                 dir,
                 &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
             ))
@@ -285,7 +285,7 @@ mod tests {
     fn a_tracking_checkout_then_set_and_unset_upstream_in_real_git() {
         let (tmp, _bare) = cloned_repo();
         let dir = tmp.path();
-        let runner = crate::git::CliRunner::isolated(dir);
+        let runner = kika_git::CliRunner::isolated(dir);
         let feature = RemoteBranch {
             remote: "origin".into(),
             short: b"feature".to_vec(),
@@ -297,7 +297,7 @@ mod tests {
             from: feature.clone(),
         };
         run_op(&runner, &checkout).unwrap();
-        let head = crate::git::fake::git(dir, &["symbolic-ref", "--short", "HEAD"]);
+        let head = kika_git::fake::git(dir, &["symbolic-ref", "--short", "HEAD"]);
         assert_eq!(head, b"feature\n");
         assert_eq!(
             config(dir, "branch.feature.merge").as_deref(),

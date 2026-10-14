@@ -5,11 +5,11 @@
 
 use super::state::Choice;
 use crate::features::conflicts::ConflictsIntent;
-use crate::git::status::EntryKind;
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, OP_RUNNING, Reason, list_guard, never};
 use crate::model::{AppState, Focus};
 use crossterm::event::KeyCode;
+use kika_git::status::EntryKind;
 
 /// Why the conflict view cannot pick a side now: one write at a time, and
 /// only in a file whose blocks were read.

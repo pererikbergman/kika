@@ -4,7 +4,7 @@
 
 use crate::effect::Tag;
 use crate::features::branches::BranchesIntent;
-use crate::git::tags::TagRef;
+use kika_git::tags::TagRef;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TagsIntent {

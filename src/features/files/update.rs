@@ -6,11 +6,11 @@ use super::FilesIntent;
 use super::git::{toggle_all, toggle_for, toggle_many};
 use super::gitignore::{self, IgnoreAdded, IgnoreDraft};
 use crate::effect::{Effect, Tag};
-use crate::git::FileEntry;
-use crate::git::safe_text::sanitize;
 use crate::model::{AppState, Context, Focus};
 use crate::op::GitOp;
 use crate::popup::{DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind};
+use kika_git::FileEntry;
+use kika_git::safe_text::sanitize;
 
 /// The Files panel's half of `update`: core's one `AppIntent::Files` arm
 /// lands here. A free function, so its name cannot clash with handlers.
@@ -226,10 +226,6 @@ mod tests {
     use crate::effect::Effect;
     use crate::features::files::IgnoreAdded;
     use crate::features::files::git::toggle_for;
-    use crate::git::FileEntry;
-    use crate::git::diff::{DiffOptions, DiffRequest};
-    use crate::git::path::RepoPath;
-    use crate::git::status::EntryKind;
     use crate::intent::AppIntent;
     use crate::keymap::{KeyPress, KeyScope};
     use crate::layout::SidePanel;
@@ -237,6 +233,10 @@ mod tests {
     use crate::op::GitOp;
     use crate::popup::{LineInput, Popup, PromptKind};
     use crate::test_support::*;
+    use kika_git::FileEntry;
+    use kika_git::diff::{DiffOptions, DiffRequest};
+    use kika_git::path::RepoPath;
+    use kika_git::status::EntryKind;
 
     #[test]
     fn select_next_loads_the_next_file_and_its_chunk_replaces_the_lines() {

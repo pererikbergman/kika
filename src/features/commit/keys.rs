@@ -6,10 +6,10 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::features::commit::CommitIntent;
-use crate::git::status::{EntryKind, Head};
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, OP_RUNNING, Reason, never};
 use crate::model::{AppState, CommitFlow};
+use kika_git::status::{EntryKind, Head};
 
 pub(crate) fn commit_disabled(state: &AppState) -> Option<Reason> {
     if state.op_is_running() {
