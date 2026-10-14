@@ -43,6 +43,13 @@ pub(crate) fn update(state: &mut AppState, intent: ReviewIntent) -> Vec<Effect> 
         ReviewIntent::ToggleViewed => return state.toggle_viewed(),
         ReviewIntent::NextThread => return state.step_review_thread(false),
         ReviewIntent::PrevThread => return state.step_review_thread(true),
+        ReviewIntent::OpenConversation => state.open_review_conversation(),
+        ReviewIntent::PageDown => state.review_page(1),
+        ReviewIntent::PageUp => state.review_page(-1),
+        ReviewIntent::OpenThreadReader => state.open_thread_reader(),
+        ReviewIntent::ThreadReaderScroll(by) => state.scroll_thread_reader(by),
+        ReviewIntent::ThreadReaderStep(delta) => state.step_thread_reader(delta),
+        ReviewIntent::CloseThreadReader => state.close_thread_reader(),
         ReviewIntent::DiscussionLoaded {
             tag,
             number,

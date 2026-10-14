@@ -12,6 +12,7 @@ use crate::features::diff::renderers::view::{render_rendered, tool_title};
 use crate::features::diff::view::{hunk_title, hunk_title_parts, options_note, render_diff_pane};
 use crate::features::files;
 use crate::features::operation;
+use crate::features::review;
 use crate::features::stash;
 use crate::keymap::{Binding, KeyPattern, KeyScope, available, available_commands, registry};
 use crate::layout::{Panel, SidePanel, help_rows, workspace_layout};
@@ -742,8 +743,10 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
         let (more_leading, trailing) = list_hints(state, focus);
         leading.extend(more_leading);
         let mut available = available(registry(), &state.keymap, focus, state);
-        available.retain(|(binding, _)| {
-            binding.bar || leading.contains(&binding.id) || trailing.contains(&binding.id)
+        available.retain(|(binding, disabled)| {
+            let hidden = disabled.is_some() && review::keys::HIDDEN_WHEN_OFF.contains(&binding.id);
+            !hidden
+                && (binding.bar || leading.contains(&binding.id) || trailing.contains(&binding.id))
         });
         // Help and quit stay at the end, as `fit_hints` keeps them.
         // The leading ones keep the order they are listed in.

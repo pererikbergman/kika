@@ -3,7 +3,10 @@
 //! (`files.rs`), the whole pull request or one of its commits
 //! (`commit_view.rs`), marking a file viewed on GitHub (`viewed.rs`),
 //! its review threads placed on the diff and `]`/`[` between them
-//! (`threads.rs`, drawn by `threads_view.rs`), merging it from the detail
+//! (`threads.rs`, drawn by `threads_view.rs`), one thread read in full
+//! over the files screen (`reader.rs`, drawn by `reader_view.rs`), its
+//! conversation of comments and review bodies (`conversation.rs`, drawn
+//! by `conversation_view.rs`), merging it from the detail
 //! (`merge.rs`), the markdown renderer for its body (`markdown.rs`), and
 //! the local git reads behind the files screen (`git.rs`). The feature
 //! also owns its key bindings (`keys.rs`), its screen (`view.rs`) and the
@@ -17,8 +20,8 @@
 //! Its intents are nested (ADR-0002): core wraps [`ReviewIntent`] in
 //! `AppIntent::Review`, and its one `update` arm calls [`update`] here.
 //! `update.rs` holds only that function; it dispatches to the handlers in
-//! `state.rs`, `files.rs`, `commit_view.rs`, `viewed.rs`, `threads.rs`
-//! and `merge.rs`.
+//! `state.rs`, `files.rs`, `commit_view.rs`, `viewed.rs`, `threads.rs`,
+//! `reader.rs`, `conversation.rs` and `merge.rs`.
 //! The review guards on core arms (`ScrollDiff`, `OpenSearch`,
 //! `DiffEscape`) stay in core.
 //!
@@ -27,15 +30,16 @@
 //! - the types [`ReviewState`], [`ReviewScreen`] and [`PrMerging`], which
 //!   `AppState` holds, and [`CommitsHere`], [`PrCommit`] and [`PrFileRow`],
 //!   which intents carry;
-//! - the guards `queue_keys_disabled` and `review_diff_focused`, which core
-//!   focus uses, and those in `keys.rs`;
+//! - the guards `queue_keys_disabled`, `review_diff_focused` and
+//!   `thread_reader_open`, which core focus uses, and those in `keys.rs`;
 //! - the handlers in `state.rs`, `files.rs`, `commit_view.rs`, `viewed.rs`,
 //!   `threads.rs` and `merge.rs` that `update` calls, including the
 //!   `review_files_shown` guard;
 //! - `review_jump_landed` (`threads.rs`), which core's `AppIntent::Diff`
 //!   arm calls after each diff chunk, so a thread `]`/`[` waits for is
 //!   scrolled to once its row streams in;
-//! - the chunks `keys::{REVIEW_KEYS, REVIEW_MERGE_CONFIRM}`;
+//! - the chunks `keys::{REVIEW_KEYS, REVIEW_MERGE_CONFIRM}`, and
+//!   `keys::HIDDEN_WHEN_OFF`, the bar hints left out while refused;
 //! - `view::render`;
 //! - `effects::{load_queues, load_detail, load_discussion, check_commits,
 //!   fetch_commits, load_files, load_commits, load_range_files,
@@ -50,6 +54,8 @@
 //! - `state.rs` reads `files` (files).
 
 mod commit_view;
+mod conversation;
+mod conversation_view;
 pub(crate) mod effects;
 mod files;
 mod git;
@@ -57,6 +63,8 @@ mod intent;
 pub(crate) mod keys;
 mod markdown;
 mod merge;
+mod reader;
+mod reader_view;
 mod state;
 mod threads;
 mod threads_view;
@@ -68,5 +76,6 @@ pub(crate) use files::review_diff_focused;
 pub(crate) use git::{CommitsHere, PrCommit, PrFileRow};
 pub(crate) use intent::ReviewIntent;
 pub(crate) use merge::PrMerging;
+pub(crate) use reader::thread_reader_open;
 pub(crate) use state::{ReviewScreen, ReviewState, queue_keys_disabled};
 pub(crate) use update::update;

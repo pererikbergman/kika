@@ -36,6 +36,8 @@ pub enum ReviewScreen {
     Detail(u64),
     /// Pull request `number`'s changed files and their diff.
     Files(u64),
+    /// Pull request `number`'s comments and review bodies.
+    Conversation(u64),
 }
 
 /// Why a screen has nothing to show.
@@ -105,6 +107,10 @@ pub struct ReviewState {
     /// right after its detail.
     pub discussion: Option<PrDiscussion>,
     pub discussion_fetch: ReviewFetch,
+    /// The conversation as drawn, while its screen is shown.
+    pub conversation: Option<RenderedBody>,
+    /// The first line of the conversation shown.
+    pub conversation_scroll: usize,
 }
 
 /// A description as drawn at `width`.
@@ -134,6 +140,8 @@ impl Default for ReviewState {
             fetched_heads: Vec::new(),
             discussion: None,
             discussion_fetch: ReviewFetch::default(),
+            conversation: None,
+            conversation_scroll: 0,
         }
     }
 }
@@ -178,6 +186,7 @@ impl ReviewState {
     pub fn loading(&self) -> bool {
         self.queues_fetch.loading
             || self.detail_fetch.loading
+            || self.discussion_fetch.loading
             || self.files.as_ref().is_some_and(PrFiles::loading)
     }
 
@@ -217,11 +226,11 @@ fn row_text(pr: &PrSummary) -> String {
     format!("#{} {} {}", pr.number, pr.title, pr.author)
 }
 
-/// A pull request is open, on its detail or its files.
+/// A pull request is open, on its detail, its files or its conversation.
 fn detail_shown(state: &AppState) -> bool {
     matches!(
         state.review.screen,
-        ReviewScreen::Detail(_) | ReviewScreen::Files(_)
+        ReviewScreen::Detail(_) | ReviewScreen::Files(_) | ReviewScreen::Conversation(_)
     )
 }
 
@@ -249,6 +258,7 @@ pub(crate) fn refresh_review_disabled(state: &AppState) -> Option<Reason> {
     }
     let fetch = match state.review.screen {
         ReviewScreen::Queue => &state.review.queues_fetch,
+        ReviewScreen::Conversation(_) => return Some(super::conversation::BACK_TO_REFRESH.into()),
         ReviewScreen::Detail(_) | ReviewScreen::Files(_) => {
             // The threads come right after the detail: one refresh at a time.
             if state.review.discussion_fetch.loading {
@@ -263,6 +273,9 @@ pub(crate) fn refresh_review_disabled(state: &AppState) -> Option<Reason> {
 /// Why `o` cannot open a check's page: no pull request open, no browser
 /// configured, or no failing check with a page.
 pub(crate) fn open_check_disabled(state: &AppState) -> Option<Reason> {
+    if let Some(reason) = super::conversation::on_conversation(state) {
+        return Some(reason);
+    }
     if !detail_shown(state) || state.review.detail.is_none() {
         return Some(NO_PR_OPEN.into());
     }
@@ -529,29 +542,36 @@ impl AppState {
                     self.review.cursor = at;
                 }
             }
-            ReviewScreen::Detail(_) => {
-                let max = self.review_max_scroll();
-                self.review.detail_scroll = self
-                    .review
-                    .detail_scroll
-                    .saturating_add_signed(delta)
-                    .min(max);
-            }
+            ReviewScreen::Detail(_) => self.scroll_review_detail(delta),
             ReviewScreen::Files(_) => return self.move_review_file(delta),
+            ReviewScreen::Conversation(_) => self.scroll_review_conversation(delta),
         }
         vec![]
     }
 
+    /// Scroll the detail by `delta` lines, kept within its lines.
+    pub(super) fn scroll_review_detail(&mut self, delta: isize) {
+        let max = self.review_max_scroll();
+        self.review.detail_scroll = self
+            .review
+            .detail_scroll
+            .saturating_add_signed(delta)
+            .min(max);
+    }
+
     /// Where the detail is drawn, at the current screen size.
-    fn review_area(&self) -> ratatui::layout::Rect {
+    pub(super) fn review_area(&self) -> ratatui::layout::Rect {
         let screen = ratatui::layout::Rect::new(0, 0, self.size.0, self.size.1);
         let [main, _] = crate::layout::screen_layout(screen);
         super::view::detail_area(main)
     }
 
     /// Render the open description for the panel's width, once: on load
-    /// and when the screen is resized.
+    /// and when the screen is resized. The conversation and an open
+    /// thread are rendered again with it.
     pub(crate) fn render_review_body(&mut self) {
+        self.render_review_conversation();
+        self.render_thread_reader();
         let width = usize::from(self.review_area().width);
         if self.review.body.as_ref().is_some_and(|b| b.width == width) {
             return;
@@ -563,7 +583,7 @@ impl AppState {
     }
 
     /// The furthest the detail scrolls, with its last line at the bottom.
-    fn review_max_scroll(&self) -> usize {
+    pub(super) fn review_max_scroll(&self) -> usize {
         match (&self.review.detail, &self.review.body) {
             (Some(detail), Some(body)) => {
                 let threads = super::threads_view::thread_summary(&self.review);
@@ -603,10 +623,16 @@ impl AppState {
     pub(crate) fn close_review(&mut self) -> Vec<Effect> {
         match self.review.screen {
             ReviewScreen::Files(_) => self.close_review_files(),
+            ReviewScreen::Conversation(number) => {
+                self.close_review_conversation(number);
+                vec![]
+            }
             ReviewScreen::Detail(_) => {
                 self.review.screen = ReviewScreen::Queue;
                 self.review.detail = None;
                 self.review.body = None;
+                self.review.conversation = None;
+                self.review.conversation_scroll = 0;
                 self.review.detail_fetch = ReviewFetch::default();
                 self.review.discussion = None;
                 self.review.discussion_fetch = ReviewFetch::default();
@@ -648,6 +674,8 @@ impl AppState {
             ReviewScreen::Detail(number) | ReviewScreen::Files(number) => {
                 self.load_review_detail(number)
             }
+            // Refused above: the conversation shows what the detail read.
+            ReviewScreen::Conversation(_) => vec![],
         }
     }
 

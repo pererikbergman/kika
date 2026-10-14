@@ -161,7 +161,7 @@ fn nav_order(files: &PrFiles, scope: &ThreadScope) -> Vec<(usize, usize)> {
 }
 
 /// The files screen, ready, with the discussion read.
-fn ready_threads(state: &AppState) -> Result<(&PrFiles, &PrDiscussion), Reason> {
+pub(super) fn ready_threads(state: &AppState) -> Result<(&PrFiles, &PrDiscussion), Reason> {
     let files = files_screen(state)
         .filter(|f| f.stage == FilesStage::Ready && state.review_files_shown())
         .ok_or(NOT_READY)?;
@@ -276,6 +276,7 @@ impl AppState {
         if let Some(files) = &mut self.review.files {
             files.thread = None;
             files.jump = None;
+            files.reader = None;
         }
     }
 
@@ -467,7 +468,7 @@ pub(crate) mod tests {
 
     /// The queue open on pull request 12, its detail loaded, and the
     /// discussion load it asked for.
-    fn detail_then_load() -> (AppState, Tag) {
+    pub(crate) fn detail_then_load() -> (AppState, Tag) {
         let mut state = in_queues();
         let (tag, number) = detail_load(&press(&mut state, KeyCode::Enter));
         let effects = state.update(AppIntent::Review(ReviewIntent::PrDetailLoaded {
@@ -481,7 +482,11 @@ pub(crate) mod tests {
         (state, tag)
     }
 
-    fn answer(state: &mut AppState, tag: Tag, result: Result<Option<PrDiscussion>, ReviewError>) {
+    pub(crate) fn answer(
+        state: &mut AppState,
+        tag: Tag,
+        result: Result<Option<PrDiscussion>, ReviewError>,
+    ) {
         state.update(AppIntent::Review(ReviewIntent::DiscussionLoaded {
             tag,
             number: 12,
@@ -665,7 +670,7 @@ pub(crate) mod tests {
             .collect()
     }
 
-    fn chunk(state: &mut AppState, lines: Vec<DiffLine>, done: bool) -> Vec<Effect> {
+    pub(crate) fn chunk(state: &mut AppState, lines: Vec<DiffLine>, done: bool) -> Vec<Effect> {
         let tag = Tag {
             generation: state.generation,
             seq: state.diff.seq.unwrap(),
