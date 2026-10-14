@@ -149,6 +149,12 @@ pub enum GitOp {
         name: String,
         from: BranchName,
     },
+    /// Make branch `name` at the commit `at` and switch to it: how a
+    /// detached `HEAD` gets a branch.
+    CreateBranchAt {
+        name: String,
+        at: CommitId,
+    },
     RenameBranch {
         from: BranchName,
         to: String,
@@ -397,6 +403,7 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         .env("GIT_TERMINAL_PROMPT", "0"),
         GitOp::Checkout(name) => checkout_command(name),
         GitOp::CreateBranch { name, from } => branches::git::create_command(name, from),
+        GitOp::CreateBranchAt { name, at } => branches::git::create_at_command(name, at),
         GitOp::Travel {
             direction, step, ..
         } => reflog::git::travel_command(*direction, step),
@@ -874,6 +881,7 @@ mod tests {
             GitOp::DeleteTags(_) => 46,
             GitOp::BisectMark { .. } => 47,
             GitOp::BisectReset => 48,
+            GitOp::CreateBranchAt { .. } => 49,
         }
     }
 
@@ -1119,10 +1127,18 @@ mod tests {
                 none,
             ),
             (GitOp::BisectReset, UserEnv, none),
+            (
+                GitOp::CreateBranchAt {
+                    name: "n".into(),
+                    at: id("a"),
+                },
+                Write,
+                w,
+            ),
         ];
 
         let listed: BTreeSet<usize> = cases.iter().map(|(op, ..)| variant(op)).collect();
-        assert_eq!(listed, (0..=48).collect(), "a variant is missing");
+        assert_eq!(listed, (0..=49).collect(), "a variant is missing");
         for (op, profile, expected) in &cases {
             let cmd = op_command(op);
             assert_eq!(cmd.env_profile(), Some(*profile), "{op:?}");

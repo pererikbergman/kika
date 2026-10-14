@@ -1,6 +1,7 @@
 //! The Branches feature's key bindings: moving through the Local tab,
 //! checking out the selected branch, creating, renaming and deleting one,
-//! setting or unsetting its upstream, answering the delete question, and
+//! creating one at a detached `HEAD` from the Commits panel, setting or
+//! unsetting its upstream, answering the delete question, and
 //! switching tabs. `CHUNKS` in `keymap.rs` places every chunk, so their
 //! position there is behaviour.
 
@@ -9,7 +10,7 @@ use crate::confirm_question::{Answer, ConfirmQuestion};
 use crate::intent::AppIntent;
 use crate::keymap::{
     Binding, KeyPattern, KeyScope, NONE, Reason, branch_action_disabled, branch_selected_disabled,
-    list_guard, never, op_running,
+    in_progress_disabled, list_guard, never, op_running,
 };
 use crate::model::AppState;
 use crate::popup::Popup;
@@ -19,6 +20,20 @@ use crossterm::event::{KeyCode, KeyModifiers};
 /// checks it out, which moves `HEAD`.
 pub(crate) fn new_branch_disabled(state: &AppState) -> Option<Reason> {
     branch_action_disabled(state).or_else(|| crate::bisect::head_move_disabled(state))
+}
+
+/// Why no branch can be made at `HEAD` now: git one operation at a
+/// time, none mixed into one in progress, and only a detached `HEAD`
+/// lacks a branch; on a branch, `n` in Branches makes one.
+pub(crate) fn branch_at_head_disabled(state: &AppState) -> Option<Reason> {
+    op_running(state)
+        .or_else(|| in_progress_disabled(state))
+        .or_else(|| {
+            state
+                .detached_head()
+                .is_none()
+                .then_some("HEAD is on a branch; use n in Branches".into())
+        })
 }
 
 pub(crate) fn checkout_branch_disabled(state: &AppState) -> Option<Reason> {
@@ -154,6 +169,19 @@ pub(crate) static BRANCHES_CHANGE: &[Binding] = &[
         disabled: delete_branch_disabled,
     },
 ];
+
+// Chunk 50 (branch at HEAD): branches, in the Commits panel, where the
+// leave-commits question sends the user.
+pub(crate) static BRANCHES_AT_HEAD: &[Binding] = &[Binding {
+    id: "commits.branch_at_head",
+    keys: &[KeyPattern::any(KeyCode::Char('N'))],
+    scope: KeyScope::Commits,
+    intent: AppIntent::Branches(BranchesIntent::NewAtHead),
+    description: "Create a branch at the detached HEAD and check it out",
+    label: "branch HEAD",
+    bar: false,
+    disabled: branch_at_head_disabled,
+}];
 
 // Chunk 48 (upstream): branches
 pub(crate) static BRANCHES_UPSTREAM: &[Binding] = &[
@@ -299,5 +327,77 @@ mod tests {
         ));
         assert_eq!(KeyScope::DeleteBranch.parent(), None);
         assert_eq!(KeyScope::Branches.parent(), Some(KeyScope::Workspace));
+    }
+
+    #[test]
+    fn shift_n_in_commits_runs_only_on_a_free_detached_head() {
+        use crate::git::repo_state::Operation;
+        use crate::git::status::Head;
+        let shift_n = key(KeyCode::Char('N'), KeyModifiers::SHIFT);
+        let resolve_n = |state: &AppState| {
+            resolve(
+                registry(),
+                &Keymap::default(),
+                KeyScope::Commits,
+                state,
+                shift_n,
+            )
+        };
+        let mut state = crate::test_support::detached_on_commit();
+        assert_eq!(branch_at_head_disabled(&state), None);
+        match resolve_n(&state) {
+            Resolution::Run(binding) => {
+                assert_eq!(binding.id, "commits.branch_at_head");
+                assert_eq!(
+                    binding.intent,
+                    AppIntent::Branches(BranchesIntent::NewAtHead)
+                );
+            }
+            other => panic!("expected a run, got {other:?}"),
+        }
+
+        state.hold_op(1);
+        assert_eq!(
+            branch_at_head_disabled(&state),
+            Some(crate::keymap::OP_RUNNING.into())
+        );
+        assert!(matches!(resolve_n(&state), Resolution::Disabled(_)));
+        state.free_op();
+
+        for op in [
+            Operation::Rebase,
+            Operation::Merge,
+            Operation::CherryPick,
+            Operation::Revert,
+        ] {
+            state.branch.as_mut().unwrap().in_progress = vec![op];
+            assert_eq!(
+                branch_at_head_disabled(&state).as_deref(),
+                Some("Finish or abort the operation in progress"),
+                "{op:?}"
+            );
+            assert!(matches!(resolve_n(&state), Resolution::Disabled(_)));
+        }
+        state.branch.as_mut().unwrap().in_progress = vec![Operation::Bisect];
+        assert_eq!(
+            branch_at_head_disabled(&state),
+            crate::bisect::head_move_disabled(&state)
+        );
+        assert!(branch_at_head_disabled(&state).is_some());
+        assert!(matches!(resolve_n(&state), Resolution::Disabled(_)));
+
+        state.branch = Some(crate::test_support::on_branch("main"));
+        assert_eq!(
+            branch_at_head_disabled(&state).as_deref(),
+            Some("HEAD is on a branch; use n in Branches")
+        );
+        assert!(matches!(resolve_n(&state), Resolution::Disabled(_)));
+        state.branch.as_mut().unwrap().head = Head::Unborn("main".into());
+        assert!(branch_at_head_disabled(&state).is_some());
+    }
+
+    #[test]
+    fn a_branch_at_head_moves_nothing_so_the_lock_leaves_it_free() {
+        assert!(!crate::keymap::REPO_LOCKED.contains(&"commits.branch_at_head"));
     }
 }

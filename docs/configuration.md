@@ -1112,6 +1112,7 @@ can be reset, but not marked from Kika.
 | `commits.switch_tab` | `[`, `]` | Show HEAD's reflog: everywhere HEAD has been | |
 | `commits.tag` | `t` | Tag the selected commit with a lightweight tag | |
 | `commits.tag_annotated` | `T` | Tag the selected commit with an annotated tag and a message | |
+| `commits.branch_at_head` | `N` | Create a branch at the detached HEAD and check it out | |
 | `commits.copy` | `c` | Add the selected commit to the copied set, or take it out | |
 | `commits.paste` | `v` | Cherry-pick the copied commits onto the current branch, oldest first | locked |
 | `commits.clear_copied` | `C` | Clear the copied set | |

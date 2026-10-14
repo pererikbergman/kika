@@ -1039,6 +1039,9 @@ impl AppState {
         {
             return format!("New worktree for {}", branch.display());
         }
+        if let (PromptKind::NewBranchAtHead, Some(id)) = (kind, &self.branches.pending_head) {
+            return format!("New branch at {}", self.commits.short_oid(id));
+        }
         if let Some(name) = &self.branches.pending {
             match kind {
                 PromptKind::NewBranch => return format!("New branch from {}", name.display()),
@@ -5474,6 +5477,7 @@ mod tests {
             index: 0,
             oid: cid("c1"),
         });
+        state.branches.pending_head = crate::git::commit_files::CommitId::parse("c0");
         let mut worktrees = WorktreeList::loading(0);
         worktrees.pending_branch = Some("topic".into());
         state.popups = vec![Popup::Worktrees(worktrees)];
@@ -5510,6 +5514,7 @@ mod tests {
         [
             ("command", state.pending_command.is_some()),
             ("branch", state.branches.pending.is_some()),
+            ("branch at head", state.branches.pending_head.is_some()),
             ("remote", state.branches.remotes.pending.is_some()),
             ("tag", state.branches.pending_tag.is_some()),
             ("stash message", state.stash_draft.is_some()),
@@ -5543,10 +5548,11 @@ mod tests {
     fn closing_a_popup_forgets_only_the_draft_its_feature_kept_for_it() {
         use crate::pick_list::PickPurpose;
         let every = drafts_kept(&with_every_draft());
-        assert_eq!(every.len(), 10, "{every:?}");
+        assert_eq!(every.len(), 11, "{every:?}");
         let cases = [
             (prompt(PromptKind::Command), Some("command")),
             (prompt(PromptKind::NewBranch), Some("branch")),
+            (prompt(PromptKind::NewBranchAtHead), Some("branch at head")),
             (prompt(PromptKind::RenameBranch), Some("branch")),
             (prompt(PromptKind::SetUpstream), Some("branch")),
             (prompt(PromptKind::TrackBranch), Some("remote")),

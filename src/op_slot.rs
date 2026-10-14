@@ -381,7 +381,7 @@ pub(crate) fn failure_title(op: &GitOp) -> &'static str {
         GitOp::SubmoduleInit(_) => "Could not initialize the submodule",
         GitOp::SubmoduleUpdate(_) => "Could not update the submodule",
         GitOp::Checkout(_) => "Could not check out the branch",
-        GitOp::CreateBranch { .. } => "Could not create the branch",
+        GitOp::CreateBranch { .. } | GitOp::CreateBranchAt { .. } => "Could not create the branch",
         GitOp::RenameBranch { .. } => "Could not rename the branch",
         GitOp::DeleteBranch { .. } => "Could not delete the branch",
         GitOp::DeleteBranches(_) => "Could not delete every branch",
