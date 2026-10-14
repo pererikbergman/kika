@@ -6,20 +6,28 @@
 use std::path::Path;
 
 use super::git::{StashMode, checked};
+use crate::keymap::Reason;
+use crate::notice::Notice;
 use crate::op::{GitOp, op_command};
 use kika_git::commit_files::CommitId;
 use kika_git::path::RepoPath;
 use kika_git::runner::{GitCommand, GitRunner};
 use kika_git::status::{EntryKind, FileEntry};
 
+/// The words before the path in [`stash_rename_taken`].
+pub(crate) const STASH_RENAME_TAKEN_LEAD: &str = "A file now sits at the renamed file's old path: ";
+
 /// Why a stash of a staged rename is refused: something sits at its old
 /// path, `path` here, which the push would leave alone and the restore
 /// overwrite. The name is its terminal-safe display form.
 pub(crate) fn stash_rename_taken(path: &RepoPath) -> String {
-    format!(
-        "A file now sits at the renamed file's old path: {}",
-        path.display()
-    )
+    format!("{STASH_RENAME_TAKEN_LEAD}{}", path.display())
+}
+
+/// [`stash_rename_taken`] as a menu reason, its path marked so a narrow
+/// row keeps the file name.
+pub(crate) fn stash_rename_taken_reason(path: &RepoPath) -> Reason {
+    Notice::with_path(STASH_RENAME_TAKEN_LEAD, path.display())
 }
 
 /// Why a stash of a rename that only changes case is refused: on a
