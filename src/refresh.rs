@@ -94,7 +94,10 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         ),
         // A checkout changes the worktree, which branch is current and so
         // the log of HEAD.
-        GitOp::Checkout(_) | GitOp::CreateBranch { .. } | GitOp::CheckoutTracking { .. } => (
+        GitOp::Checkout(_)
+        | GitOp::CreateBranch { .. }
+        | GitOp::CreateBranchAt { .. }
+        | GitOp::CheckoutTracking { .. } => (
             &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits][..],
             Selection::KeepPath,
         ),
@@ -294,6 +297,10 @@ mod tests {
             GitOp::CreateBranch {
                 name: "n".into(),
                 from: "b".into(),
+            },
+            GitOp::CreateBranchAt {
+                name: "n".into(),
+                at: crate::git::commit_files::CommitId::parse(&"c".repeat(40)).unwrap(),
             },
         ];
         for op in ops {
