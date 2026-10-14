@@ -328,7 +328,7 @@ fn listed(paths: &[RepoPath]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::stash::git::tests::{WRITE, env_of, literal_env, set_push};
+    use crate::features::stash::git::tests::{WRITE, env_of, ignores_case, literal_env, set_push};
     use crate::op::run_op;
     use crate::test_support::{argv, cid as oid, file_entry as entry, two_commit_repo};
     use kika_git::fake::{FakeRunner, ok};
@@ -794,12 +794,6 @@ mod tests {
         assert!(blocked("s/old.txt"), "a symlinked directory is not real");
         std::os::unix::fs::symlink("missing", top.join("dangling")).unwrap();
         assert!(blocked("dangling"), "a dangling symlink at the old path");
-    }
-
-    /// Whether git took the repo at `dir` to be on a case-insensitive
-    /// filesystem; the tests that need one skip otherwise.
-    fn ignores_case(dir: &Path) -> bool {
-        kika_git::fake::git(dir, &["config", "--get", "core.ignorecase"]) == b"true\n"
     }
 
     /// A repo whose last commit adds `old`, then stages `old` renamed to

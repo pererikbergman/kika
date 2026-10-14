@@ -240,6 +240,17 @@ pub(crate) fn stash_command(verb: &str, stash: &StashRef) -> GitCommand {
         .write_env()
 }
 
+/// `git stash <verb> --index stash@{N}`: the entry's index comes back as
+/// it was stashed, not only its worktree. No paths, as in
+/// [`stash_command`].
+pub(crate) fn stash_index_command(verb: &str, stash: &StashRef) -> GitCommand {
+    GitCommand::new("stash")
+        .arg(verb)
+        .arg("--index")
+        .arg(stash.arg())
+        .write_env()
+}
+
 /// Whether `stash@{N}` still names the commit `stash` was chosen as.
 fn stash_is(runner: &dyn GitRunner, stash: &StashRef) -> Result<bool, String> {
     let cmd = GitCommand::new("rev-parse")
@@ -570,6 +581,13 @@ pub(crate) mod tests {
             .collect()
     }
 
+    /// Whether git took the repo at `dir` to be on a case-insensitive
+    /// filesystem; the tests that need one skip otherwise. Git leaves the
+    /// key unset on a case-sensitive one.
+    pub(crate) fn ignores_case(dir: &Path) -> bool {
+        kika_git::fake::config(dir, "core.ignorecase").as_deref() == Some("true")
+    }
+
     /// The env of an op that takes the index lock and names no path.
     pub(crate) const WRITE: [(&str, &str); 2] = [("LC_ALL", "C"), ("GIT_LITERAL_PATHSPECS", "1")];
 
@@ -649,6 +667,18 @@ pub(crate) mod tests {
         (argv, output)
     }
 
+    /// The read `apply.rs` makes before an apply or pop, of `STASH_OID`.
+    const CASE_DIFF: [&str; 8] = [
+        "diff-tree",
+        "-r",
+        "-z",
+        "--no-renames",
+        "--name-status",
+        "5a5a5a^1",
+        "5a5a5a^2",
+        "--",
+    ];
+
     fn expect_verify(runner: FakeRunner, index: usize, found: &str) -> FakeRunner {
         let (argv, output) = verify(index, found);
         let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
@@ -662,7 +692,13 @@ pub(crate) mod tests {
             (GitOp::StashPop(at(2)), ["stash", "pop", "stash@{2}"]),
             (GitOp::StashDrop(at(2)), ["stash", "drop", "stash@{2}"]),
         ] {
-            let runner = expect_verify(FakeRunner::new(), 2, STASH_OID).expect(&expected, ok(b""));
+            let mut runner = expect_verify(FakeRunner::new(), 2, STASH_OID);
+            if !matches!(op, GitOp::StashDrop(_)) {
+                // Apply and pop first read whether the stash's index
+                // renames a file by case only (`apply.rs`).
+                runner = runner.expect(&CASE_DIFF, ok(b"M\0a.txt\0"));
+            }
+            let runner = runner.expect(&expected, ok(b""));
             assert_eq!(run_op(&runner, &op), Ok(()), "{op:?}");
             runner.assert_done();
         }
@@ -945,6 +981,7 @@ pub(crate) mod tests {
                 "apply"
             };
             let runner = expect_verify(FakeRunner::new(), 0, STASH_OID)
+                .expect(&CASE_DIFF, ok(b""))
                 .expect(&["stash", verb, "stash@{0}"], output.clone());
             assert_eq!(
                 run_op(&runner, &op),

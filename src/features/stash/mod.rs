@@ -48,8 +48,11 @@
 //! Its git code:
 //! - `git.rs`: the list and an entry's files, `StashMode` and the argv
 //!   builders and checks `op.rs` delegates to: `push_command`,
-//!   `stash_command`, `store_command`, `verify_stash`,
+//!   `stash_command`, `stash_index_command`, `store_command`, `verify_stash`,
 //!   `staged_stash_supported` and `rename_stash`;
+//! - `apply.rs`: applying or popping a stash, `apply_stash`, which
+//!   `run_op` delegates to. A stash with a case-only rename comes back
+//!   with `--index`, behind `STASH_CASE_BASE` and `STASH_CASE_DIRTY`;
 //! - `push.rs`: stashing selected files, `stash_file_for` and
 //!   `stash_files_for` (which keys and handlers call), and
 //!   `push_with_fixups`, which `run_op` delegates to.
@@ -57,6 +60,7 @@
 //! `StashEntry`, `StashFile`, `StashMode` and `StashRef` are re-exported
 //! for core, which names them in `GitOp` and `Effect`.
 
+pub(crate) mod apply;
 pub(crate) mod effects;
 pub(crate) mod git;
 mod intent;
