@@ -12,10 +12,13 @@ use super::files::{FilesFocus, FilesStage, PrFile, PrFiles, ReviewView};
 use super::git::FileCounts;
 use super::markdown;
 use super::state::{NO_FORGE, ReviewProblem, ReviewScreen, ReviewState};
+use super::threads::ThreadScope;
+use super::threads_view::thread_diff_body;
 use crate::diff_pane_view::{diff_pane_body, diff_position, found_note};
 use crate::model::AppState;
 use crate::rows::{clock, drawn_path, status_colour};
 use crate::view::{self, elide_right};
+use kika_forge::anchor::row_numbers;
 use kika_forge::merge::{MergeBlock, merge_options};
 use kika_forge::review::{
     CheckStatus, Mergeability, PrDetail, PrSummary, QueueKind, ReviewVerdict, ViewedState,
@@ -224,7 +227,8 @@ fn detail_screen(review: &ReviewState, number: u64, inner: Rect) -> Vec<Line<'st
                     &fresh
                 }
             };
-            let lines = detail_lines(detail, body, width);
+            let threads = super::threads_view::thread_summary(review);
+            let lines = detail_lines(detail, body, threads.as_deref(), width);
             let max = lines.len().saturating_sub(usize::from(inner.height));
             lines
                 .into_iter()
@@ -274,7 +278,24 @@ fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rec
     let block = view::panel_block(title, files.focus == FilesFocus::Diff);
     let diff_inner = block.inner(diff);
     let body = match &files.stage {
-        FilesStage::Ready => diff_pane_body(&state.diff, diff_inner),
+        FilesStage::Ready => match (&state.review.discussion, files.selected()) {
+            (Some(discussion), Some(row)) => {
+                let scope = ThreadScope::of(files, discussion);
+                let mut threads = scope.file_threads(&row.file.path, None);
+                // Numbered once a frame, for the shown file only, and only
+                // when it has a thread on a line.
+                let numbers = if threads.lines.is_empty() {
+                    Vec::new()
+                } else {
+                    row_numbers(&stream.lines)
+                };
+                if stream.done && !threads.lines.is_empty() {
+                    threads = scope.file_threads(&row.file.path, Some(&numbers));
+                }
+                thread_diff_body(stream, &numbers, &threads, &scope, files.thread, diff_inner)
+            }
+            _ => diff_pane_body(&state.diff, diff_inner),
+        },
         FilesStage::Failed(_) => Paragraph::new(Line::styled("No diff to show", dim())),
         _ => Paragraph::new(Line::styled(
             "The diff shows once the files are listed",
@@ -430,8 +451,13 @@ pub fn detail_area(main: Rect) -> Rect {
 
 /// How far the detail scrolls in `inner`, with `body` its rendered
 /// description.
-pub fn detail_max_scroll(detail: &PrDetail, body: &[Line<'static>], inner: Rect) -> usize {
-    detail_lines(detail, body, usize::from(inner.width))
+pub fn detail_max_scroll(
+    detail: &PrDetail,
+    body: &[Line<'static>],
+    threads: Option<&str>,
+    inner: Rect,
+) -> usize {
+    detail_lines(detail, body, threads, usize::from(inner.width))
         .len()
         .saturating_sub(usize::from(inner.height))
 }
@@ -445,9 +471,14 @@ fn dim() -> Style {
 }
 
 /// Every line of the detail at `width`: the header and checks first, so
-/// a small screen still shows them, then labels, reviewers and `body`,
-/// the description already rendered.
-pub fn detail_lines(detail: &PrDetail, body: &[Line<'static>], width: usize) -> Vec<Line<'static>> {
+/// a small screen still shows them, then labels, reviewers, the review
+/// `threads` line and `body`, the description already rendered.
+pub fn detail_lines(
+    detail: &PrDetail,
+    body: &[Line<'static>],
+    threads: Option<&str>,
+    width: usize,
+) -> Vec<Line<'static>> {
     let mut lines = markdown::wrap_text(&detail.title, bold(), width);
     let by = format!("#{} by ", detail.number);
     lines.push(Line::from(vec![
@@ -504,6 +535,9 @@ pub fn detail_lines(detail: &PrDetail, body: &[Line<'static>], width: usize) -> 
         )
         .collect();
     lines.extend(packed("Reviewers: ", &reviewers, width));
+    if let Some(threads) = threads {
+        lines.extend(markdown::wrap_text(threads, Style::new(), width));
+    }
     if !body.is_empty() {
         lines.push(Line::default());
         lines.extend(body.iter().cloned());
@@ -645,6 +679,38 @@ mod tests {
             assert!(contains(&rows, text), "{text:?} missing in {rows:#?}");
         }
         assert!(!contains(&rows, "## Summary"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_detail_counts_its_review_threads_or_says_why_not() {
+        use crate::features::review::threads::tests::fixture_discussion;
+        let mut state = reviewing(ReviewScreen::Detail(42));
+        state.review.detail = Some(fixture_detail());
+        state.review.discussion = Some(fixture_discussion());
+        let rows = draw(&state, 80, 30);
+        let threads = rows
+            .iter()
+            .position(|r| r.contains("Threads: 2 unresolved of 5 · 3 comments"))
+            .unwrap_or_else(|| panic!("{rows:#?}"));
+        // Right after the reviewers, which wrap to two lines here.
+        assert!(rows[threads - 2].contains("Reviewers: "), "{rows:#?}");
+        assert!(rows[threads - 1].contains("core requested"), "{rows:#?}");
+
+        state.review.discussion = None;
+        state.review.discussion_fetch.loading = true;
+        let rows = draw(&state, 80, 30);
+        assert!(contains(&rows, "Threads: loading…"), "{rows:#?}");
+
+        state.review.discussion_fetch.loading = false;
+        state.review.discussion_fetch.error = Some(ReviewProblem::Status(ForgeStatus::NoAccess));
+        let rows = draw(&state, 80, 30);
+        assert!(
+            contains(
+                &rows,
+                "Threads: could not be read (No access to the repository with gh's login)"
+            ),
+            "{rows:#?}"
+        );
     }
 
     #[test]
@@ -852,7 +918,7 @@ mod tests {
         let mut detail = fixture_detail();
         detail.title = "A title that is far too long for a narrow screen".into();
         detail.head = "feature/a-branch-name-that-goes-on".into();
-        let lines = detail_lines(&detail, &[], 28);
+        let lines = detail_lines(&detail, &[], None, 28);
         let text: Vec<String> = lines
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
@@ -971,6 +1037,8 @@ mod tests {
             fetched: false,
             seq: None,
             marking: None,
+            thread: None,
+            jump: None,
         });
         state
     }

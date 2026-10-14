@@ -23,9 +23,9 @@ use crate::features::commits::rewrite::LeftBehindCheck;
 use crate::features::commits::{self, CommitsIntent, CommitsPanel, CommitsTab};
 use crate::features::conflicts::{self, ConflictView};
 use crate::features::custom_commands::{self, PendingCommand};
-use crate::features::diff;
 use crate::features::diff::renderers::external_diff::map_rows;
 use crate::features::diff::renderers::{ExternalRenderer, RenderedDiff, RendererKind};
+use crate::features::diff::{self, DiffIntent};
 use crate::features::files::{self, IgnoreDraft};
 use crate::features::operation;
 use crate::features::operation::StopWorkCheck;
@@ -563,7 +563,15 @@ impl AppState {
             AppIntent::Operation(i) => return operation::update(self, i),
             AppIntent::Repos(i) => return repos::update(self, i),
             AppIntent::Files(i) => return files::update(self, i),
-            AppIntent::Diff(i) => return diff::update(self, i),
+            AppIntent::Diff(i) => {
+                let landed = matches!(i, DiffIntent::Loaded { .. });
+                let mut effects = diff::update(self, i);
+                // A review thread `]`/`[` waits for may have streamed in.
+                if landed {
+                    effects.extend(self.review_jump_landed());
+                }
+                return effects;
+            }
             AppIntent::ConfigLoaded {
                 repo,
                 keymap,

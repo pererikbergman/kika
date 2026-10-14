@@ -8,6 +8,7 @@ use super::merge::merge_disabled;
 use super::state::{
     open_check_disabled, open_pr_disabled, queue_keys_disabled, refresh_review_disabled,
 };
+use super::threads::thread_nav_disabled;
 use super::viewed::review_viewed_disabled;
 use crate::confirm_question::Answer;
 use crate::features::review::ReviewIntent;
@@ -176,6 +177,27 @@ pub(crate) static REVIEW_KEYS: &[Binding] = &[
         bar: true,
         disabled: review_commit_disabled,
     },
+    // Moves through threads already read, so a repository file may move it.
+    Binding {
+        id: "review_files.next_thread",
+        keys: &[KeyPattern::exact(KeyCode::Char(']'), NONE)],
+        scope: KeyScope::ReviewFiles,
+        intent: AppIntent::Review(ReviewIntent::NextThread),
+        description: "Go to the next unresolved review thread",
+        label: "next thread",
+        bar: true,
+        disabled: thread_nav_disabled,
+    },
+    Binding {
+        id: "review_files.prev_thread",
+        keys: &[KeyPattern::exact(KeyCode::Char('['), NONE)],
+        scope: KeyScope::ReviewFiles,
+        intent: AppIntent::Review(ReviewIntent::PrevThread),
+        description: "Go to the previous unresolved review thread",
+        label: "",
+        bar: false,
+        disabled: thread_nav_disabled,
+    },
     Binding {
         id: "review_diff.down",
         keys: &[
@@ -302,3 +324,47 @@ pub(crate) static REVIEW_MERGE_CONFIRM: &[Binding] = &[
         disabled: never,
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keymap::REPO_LOCKED;
+
+    #[test]
+    fn the_thread_keys_sit_after_the_commit_key_in_the_files_scope_and_are_not_locked() {
+        let ids: Vec<&str> = REVIEW_KEYS.iter().map(|b| b.id).collect();
+        let at = ids
+            .iter()
+            .position(|id| *id == "review_files.commit")
+            .unwrap();
+        assert_eq!(
+            ids[at + 1..at + 3],
+            ["review_files.next_thread", "review_files.prev_thread"]
+        );
+        for (id, key, intent, bar) in [
+            (
+                "review_files.next_thread",
+                ']',
+                ReviewIntent::NextThread,
+                true,
+            ),
+            (
+                "review_files.prev_thread",
+                '[',
+                ReviewIntent::PrevThread,
+                false,
+            ),
+        ] {
+            let binding = REVIEW_KEYS.iter().find(|b| b.id == id).unwrap();
+            assert_eq!(binding.scope, KeyScope::ReviewFiles, "{id}");
+            assert_eq!(
+                binding.keys,
+                [KeyPattern::exact(KeyCode::Char(key), NONE)],
+                "{id}"
+            );
+            assert_eq!(binding.intent, AppIntent::Review(intent), "{id}");
+            assert_eq!(binding.bar, bar, "{id}");
+            assert!(!REPO_LOCKED.contains(&id), "{id}");
+        }
+    }
+}

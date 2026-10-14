@@ -7,8 +7,10 @@
 //! settings apply and Kika never holds a token.
 
 pub mod allow;
+pub mod anchor;
 pub mod cache;
 pub mod client;
+pub mod discussion;
 pub mod github;
 pub mod gitlab;
 pub mod head;

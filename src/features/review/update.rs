@@ -41,6 +41,14 @@ pub(crate) fn update(state: &mut AppState, intent: ReviewIntent) -> Vec<Effect> 
             return state.review_commits_loaded(tag, result);
         }
         ReviewIntent::ToggleViewed => return state.toggle_viewed(),
+        ReviewIntent::NextThread => return state.step_review_thread(false),
+        ReviewIntent::PrevThread => return state.step_review_thread(true),
+        ReviewIntent::DiscussionLoaded {
+            tag,
+            number,
+            repo,
+            result,
+        } => state.discussion_loaded(tag, number, repo, result),
         ReviewIntent::ViewedSet {
             tag,
             host,
@@ -57,7 +65,7 @@ pub(crate) fn update(state: &mut AppState, intent: ReviewIntent) -> Vec<Effect> 
             number,
             repo,
             result,
-        } => state.pr_detail_loaded(tag, number, repo, result),
+        } => return state.pr_detail_loaded(tag, number, repo, result),
     }
     Vec::new()
 }

@@ -11,6 +11,7 @@ use crate::list_filter;
 use crate::model::{AppState, Context};
 use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::{MergePrConfirm, Popup};
+use kika_forge::discussion::PrDiscussion;
 use kika_forge::merge::MergeMethod;
 use kika_forge::remote::{allowed, matches};
 use kika_forge::review::{CheckStatus, PrDetail, PrSummary, QueueKind, Queues, ReviewError};
@@ -100,6 +101,10 @@ pub struct ReviewState {
     /// Each pull request head fetched this session, so none is fetched
     /// twice. Kept when review mode is left and entered again.
     pub fetched_heads: Vec<(u64, CommitId)>,
+    /// The open pull request's review threads and conversation, read
+    /// right after its detail.
+    pub discussion: Option<PrDiscussion>,
+    pub discussion_fetch: ReviewFetch,
 }
 
 /// A description as drawn at `width`.
@@ -127,6 +132,8 @@ impl Default for ReviewState {
             files: None,
             merge_pick: None,
             fetched_heads: Vec::new(),
+            discussion: None,
+            discussion_fetch: ReviewFetch::default(),
         }
     }
 }
@@ -242,7 +249,13 @@ pub(crate) fn refresh_review_disabled(state: &AppState) -> Option<Reason> {
     }
     let fetch = match state.review.screen {
         ReviewScreen::Queue => &state.review.queues_fetch,
-        ReviewScreen::Detail(_) | ReviewScreen::Files(_) => &state.review.detail_fetch,
+        ReviewScreen::Detail(_) | ReviewScreen::Files(_) => {
+            // The threads come right after the detail: one refresh at a time.
+            if state.review.discussion_fetch.loading {
+                return Some(LOADING.into());
+            }
+            &state.review.detail_fetch
+        }
     };
     fetch.loading.then_some(LOADING.into())
 }
@@ -290,7 +303,9 @@ impl AppState {
     /// repository. Refused when the remote is known to be on none of the
     /// hosts or left out by its allow-list, or its host is rate limited
     /// past now.
-    fn review_target(&self) -> Result<(Vec<ForgeHost>, Option<ForgeRepo>), ReviewProblem> {
+    pub(super) fn review_target(
+        &self,
+    ) -> Result<(Vec<ForgeHost>, Option<ForgeRepo>), ReviewProblem> {
         let hosts = &self.forge.hosts;
         if hosts.is_empty() || self.forge.unmatched {
             return Err(ReviewProblem::NoForgeHost);
@@ -308,7 +323,7 @@ impl AppState {
     }
 
     /// The limits the task checks again by its own clock.
-    fn review_limits(&self) -> Vec<(ForgeHost, i64)> {
+    pub(super) fn review_limits(&self) -> Vec<(ForgeHost, i64)> {
         self.forge
             .hosts
             .iter()
@@ -316,7 +331,7 @@ impl AppState {
             .collect()
     }
 
-    fn review_tag(&mut self) -> Tag {
+    pub(super) fn review_tag(&mut self) -> Tag {
         Tag {
             generation: self.generation,
             seq: self.take_seq(),
@@ -381,6 +396,8 @@ impl AppState {
     fn open_review_detail(&mut self, number: u64) -> Vec<Effect> {
         self.review.screen = ReviewScreen::Detail(number);
         self.review.detail = None;
+        self.review.discussion = None;
+        self.review.discussion_fetch = ReviewFetch::default();
         self.review.body = None;
         self.review.detail_scroll = 0;
         self.load_review_detail(number)
@@ -411,13 +428,13 @@ impl AppState {
     }
 
     /// Whether an answer under `tag` is the one `fetch` waits for.
-    fn review_current(&self, tag: Tag, fetch: &ReviewFetch) -> bool {
+    pub(super) fn review_current(&self, tag: Tag, fetch: &ReviewFetch) -> bool {
         tag.generation == self.generation && fetch.seq == Some(tag.seq)
     }
 
     /// Remember what an answer says about the repository and its host's
     /// rate limit, which badge loads share.
-    fn review_answered(&mut self, repo: Option<ForgeRepo>, limited: Option<i64>) {
+    pub(super) fn review_answered(&mut self, repo: Option<ForgeRepo>, limited: Option<i64>) {
         if let Some(repo) = repo {
             if let Some(host) = matches(&repo, &self.forge.hosts) {
                 let host = host.as_str().to_string();
@@ -436,7 +453,11 @@ impl AppState {
 
     /// Keep what a failed answer tells: the repository it found and, on a
     /// rate limit, until when its host is limited.
-    fn review_failed(&mut self, repo: Option<ForgeRepo>, error: ReviewError) -> ReviewProblem {
+    pub(super) fn review_failed(
+        &mut self,
+        repo: Option<ForgeRepo>,
+        error: ReviewError,
+    ) -> ReviewProblem {
         match error {
             ReviewError::Limited { until } => self.review_answered(repo, Some(until)),
             _ => self.review.repo = repo.or(self.review.repo.take()),
@@ -471,11 +492,11 @@ impl AppState {
         number: u64,
         repo: Option<ForgeRepo>,
         result: Result<Option<PrDetail>, ReviewError>,
-    ) {
+    ) -> Vec<Effect> {
         if !self.review_current(tag, &self.review.detail_fetch)
             || self.review.screen != ReviewScreen::Detail(number)
         {
-            return;
+            return vec![];
         }
         self.review.detail_fetch.loading = false;
         match result {
@@ -483,11 +504,19 @@ impl AppState {
                 self.review_answered(repo, None);
                 self.review.detail_fetch.error =
                     found.is_none().then_some(ReviewProblem::Missing(number));
+                let found_one = found.is_some();
                 self.review.detail = found;
                 self.review.body = None;
                 self.render_review_body();
+                if found_one {
+                    return self.load_review_discussion(number);
+                }
+                vec![]
             }
-            Err(error) => self.review.detail_fetch.error = Some(self.review_failed(repo, error)),
+            Err(error) => {
+                self.review.detail_fetch.error = Some(self.review_failed(repo, error));
+                vec![]
+            }
         }
     }
 
@@ -537,7 +566,13 @@ impl AppState {
     fn review_max_scroll(&self) -> usize {
         match (&self.review.detail, &self.review.body) {
             (Some(detail), Some(body)) => {
-                super::view::detail_max_scroll(detail, &body.lines, self.review_area())
+                let threads = super::threads_view::thread_summary(&self.review);
+                super::view::detail_max_scroll(
+                    detail,
+                    &body.lines,
+                    threads.as_deref(),
+                    self.review_area(),
+                )
             }
             _ => 0,
         }
@@ -573,6 +608,8 @@ impl AppState {
                 self.review.detail = None;
                 self.review.body = None;
                 self.review.detail_fetch = ReviewFetch::default();
+                self.review.discussion = None;
+                self.review.discussion_fetch = ReviewFetch::default();
                 // A session started on one pull request loads its queues
                 // only now.
                 if self.review.queues.is_none() && !self.review.queues_fetch.loading {
