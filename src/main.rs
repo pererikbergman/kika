@@ -14,6 +14,8 @@ mod diff_search;
 #[cfg(test)]
 mod e2e;
 mod effect;
+#[cfg(test)]
+mod env_guard;
 mod features;
 mod filtered_list;
 mod forge;
@@ -32,7 +34,6 @@ mod op_slot;
 mod pick_list;
 mod popup;
 mod popup_view;
-mod program;
 mod prompts;
 mod range_delete;
 mod refresh;
@@ -40,6 +41,8 @@ mod reload;
 mod remote_run;
 mod rows;
 mod sequence_editor;
+#[cfg(test)]
+mod spawn_guard;
 #[cfg(test)]
 mod test_support;
 mod view;

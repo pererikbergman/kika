@@ -125,7 +125,7 @@ mod tests {
 
     fn three() -> Reflog {
         Reflog {
-            entries: parse_records(include_bytes!("../../../git/fixtures/reflog/commit.bin")),
+            entries: parse_records(include_bytes!("fixtures/commit.bin")),
             ..Reflog::default()
         }
     }

@@ -254,8 +254,8 @@ fn changed(
 mod tests {
     use super::*;
     use crate::git::fake::{FakeRunner, TempDir, fail, ok};
+    use crate::git::fake::{STANDARD_ENV, env_list};
     use crate::git::runner::EnvProfile;
-    use crate::test_support::{STANDARD_ENV, env_list};
 
     const STATUS_ARGV: &[&str] = &[
         "status",

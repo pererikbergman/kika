@@ -58,7 +58,7 @@ pub const GH_ENV_REMOVE: [&str; 4] = [
     "GH_HOST",
     "GH_REPO",
     crate::git::askpass::SOCKET_ENV,
-    crate::sequence_editor::PLAN_ENV,
+    crate::git::rebase_plan::PLAN_ENV,
 ];
 
 /// What one `gh api` call asks.
@@ -202,7 +202,7 @@ pub struct CliGh;
 
 impl GhRunner for CliGh {
     fn run(&self, cmd: &GhCommand) -> io::Result<GhOutput> {
-        let mut command = crate::program::command(OsStr::new("gh"))?;
+        let mut command = crate::git::program::command(OsStr::new("gh"))?;
         command
             .args(cmd.args())
             .current_dir(&cmd.cwd)

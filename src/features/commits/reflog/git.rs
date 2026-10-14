@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn the_read_runs_exactly_these_commands_without_locks_and_in_the_c_locale() {
-        let hostile = include_bytes!("../../../git/fixtures/reflog/hostile.bin");
+        let hostile = include_bytes!("fixtures/hostile.bin");
         let branch = format!("{A} {T} commit: x\0");
         let runner = FakeRunner::new()
             .expect(SHOW, ok(hostile))
@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn hostile_messages_draw_with_no_control_characters() {
-        let entries = parse_records(include_bytes!("../../../git/fixtures/reflog/hostile.bin"));
+        let entries = parse_records(include_bytes!("fixtures/hostile.bin"));
         for entry in &entries {
             for text in [entry.display(), entry.label()] {
                 assert!(
@@ -431,7 +431,7 @@ mod tests {
 
     #[test]
     fn a_checkout_naming_to_twice_is_other_and_a_plain_one_parses() {
-        let entries = parse_records(include_bytes!("../../../git/fixtures/reflog/hostile.bin"));
+        let entries = parse_records(include_bytes!("fixtures/hostile.bin"));
         assert_eq!(entries[3].action, Action::Other, "{:?}", entries[3]);
         assert_eq!(
             entries[4].action,

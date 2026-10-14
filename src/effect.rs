@@ -555,7 +555,7 @@ fn run_clipboard_command(
     let fail = move |why: String| {
         let _ = tx.send(AppIntent::CopyFailed(copy_failure(&why)));
     };
-    let mut command = match crate::program::command(program) {
+    let mut command = match crate::git::program::command(program) {
         Ok(command) => command,
         Err(e) => {
             finished(CommandOutcome::NotStarted);
@@ -2653,7 +2653,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn decoy_child_open_url_and_clipboard() {
-        if !crate::program::in_decoy_child() {
+        if !crate::spawn_guard::in_decoy_child() {
             return;
         }
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -2668,7 +2668,7 @@ mod tests {
             CLIPBOARD_TIMEOUT,
         );
         let clear = |notice: &str| {
-            assert!(notice.contains(crate::program::NOT_FOUND), "{notice}");
+            assert!(notice.contains(crate::git::program::NOT_FOUND), "{notice}");
             assert!(!notice.chars().any(char::is_control), "{notice:?}");
         };
         match rx.recv().await {

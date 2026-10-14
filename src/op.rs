@@ -883,9 +883,9 @@ mod tests {
     #[test]
     fn every_op_declares_its_env() {
         use crate::git::commit_files::CommitRange;
+        use crate::git::rebase_plan::PLAN_ENV;
         use crate::git::rebase_plan::{encode, sample};
         use crate::git::remotes::RemoteBranch;
-        use crate::sequence_editor::PLAN_ENV;
         use std::collections::BTreeSet;
 
         let id = |digit: &str| CommitId::parse(&digit.repeat(40)).unwrap();
@@ -1629,5 +1629,116 @@ mod tests {
         };
         assert_eq!(run_op(&runner, &op), Err("nope".into()));
         runner.assert_done();
+    }
+
+    /// Every message and URL Kika passes in argv today, with a secret in
+    /// the parts that must never show.
+    #[test]
+    fn no_command_kika_builds_shows_a_secret() {
+        use crate::git::command_line::display_line;
+        use crate::git::commit_files::CommitId;
+        use crate::op::{GitOp, op_command};
+
+        let oid = "0123456789abcdef0123456789abcdef01234567";
+        let ops = [
+            GitOp::Commit {
+                message: Some("subj\n\nSECRET body".into()),
+                stage_all: true,
+                amend: false,
+                no_verify: false,
+                fixup: None,
+            },
+            GitOp::CreateTag {
+                name: "v1".into(),
+                target: CommitId::parse(oid).unwrap(),
+                message: Some("subj\r\nSECRET body".into()),
+            },
+            GitOp::AddRemote {
+                name: "o".into(),
+                url: "https://u:SECRET pw@h/r".into(),
+            },
+            GitOp::ApplyCached {
+                patch: b"SECRET patch".to_vec(),
+                reverse: false,
+            },
+        ];
+        for op in &ops {
+            let line = display_line(&op_command(op));
+            assert!(!line.contains("SECRET"), "{op:?}: {line}");
+        }
+    }
+
+    /// `run` and `spawn` both build their process in `CliRunner::command`,
+    /// so every command kind runs in the runner's workdir with its argv
+    /// untouched.
+    #[test]
+    fn every_command_kind_runs_in_the_workdir() {
+        use crate::git::diff::{DiffRequest, DiffSide, diff_command, patch_diff_command};
+        use crate::git::path::RepoPath;
+        use crate::git::repo_state::git_dir_command;
+        use crate::git::runner::CliRunner;
+        use crate::git::status::status_command;
+        use crate::op::{GitOp, op_command};
+        use std::path::Path;
+
+        let top = Path::new("/r/top");
+        let runner = CliRunner::new(top);
+        let request = |side| DiffRequest {
+            path: RepoPath::from("a.txt"),
+            orig_path: None,
+            side,
+            options: Default::default(),
+            commit: None,
+        };
+        let tracked = request(DiffSide::Worktree);
+        let staged = request(DiffSide::Index);
+        let untracked = request(DiffSide::Untracked);
+        let paths = vec![RepoPath::from("a.txt")];
+        let ops = [
+            GitOp::Stage(paths.clone()),
+            GitOp::Unstage(paths),
+            GitOp::StageAll,
+            GitOp::UnstageAll,
+            GitOp::ApplyCached {
+                patch: b"patch".to_vec(),
+                reverse: false,
+            },
+            GitOp::ApplyCached {
+                patch: b"patch".to_vec(),
+                reverse: true,
+            },
+            GitOp::Commit {
+                message: Some("msg".into()),
+                stage_all: false,
+                amend: false,
+                no_verify: false,
+                fixup: None,
+            },
+            GitOp::ApplyEdited {
+                patch: b"patch".to_vec(),
+            },
+            GitOp::SubmoduleInit(RepoPath::from("sub")),
+            GitOp::SubmoduleUpdate(RepoPath::from("sub")),
+        ];
+        let commands = [
+            status_command(),
+            diff_command(&tracked),
+            diff_command(&staged),
+            diff_command(&untracked),
+            patch_diff_command(&tracked),
+            patch_diff_command(&staged),
+            patch_diff_command(&untracked),
+            git_dir_command(),
+            crate::git::submodule::status_command(),
+        ]
+        .into_iter()
+        .chain(ops.iter().map(op_command));
+
+        for cmd in commands {
+            let process = runner.test_process(&cmd).unwrap();
+            assert_eq!(process.get_current_dir(), Some(top), "{cmd:?}");
+            let argv: Vec<_> = process.get_args().collect();
+            assert_eq!(argv, cmd.args(), "{cmd:?}");
+        }
     }
 }

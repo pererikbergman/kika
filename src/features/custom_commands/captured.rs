@@ -34,7 +34,7 @@ pub async fn run_captured(argv: Vec<OsString>, workdir: PathBuf) -> Result<Strin
     let Some((program, args)) = argv.split_first() else {
         return Err(CommandFailure::Launch("The command is empty".into()));
     };
-    let mut child = crate::program::command(program)
+    let mut child = crate::git::program::command(program)
         .and_then(|command| {
             tokio::process::Command::from(command)
                 .args(args)

@@ -16,6 +16,20 @@ type AttachedProbe = Box<dyn Fn(&GitCommand) + Send + Sync>;
 /// file's name.
 pub const ANY_ARG: &str = "<any>";
 
+/// The whole env of a read: the `Standard` profile's vars, spelled out so
+/// a test pins them rather than repeating the profile table.
+pub const STANDARD_ENV: [(&str, &str); 3] = [
+    ("LC_ALL", "C"),
+    ("GIT_OPTIONAL_LOCKS", "0"),
+    ("GIT_LITERAL_PATHSPECS", "1"),
+];
+
+/// `pairs` as `GitCommand::process_env` and `FakeRunner::process_envs`
+/// list them, to compare a command's whole env.
+pub fn env_list(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+    pairs.iter().map(|(k, v)| (k.into(), v.into())).collect()
+}
+
 #[derive(Default)]
 pub struct FakeRunner {
     expected: Mutex<VecDeque<(Vec<String>, GitOutput)>>,

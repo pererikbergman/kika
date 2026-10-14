@@ -875,10 +875,43 @@ pub fn limited_until(limited: &[(ForgeHost, i64)], host: &ForgeHost, now: i64) -
 
 #[cfg(test)]
 pub mod fixtures {
+    use super::Queues;
+
     pub const QUEUES: &str = include_str!("fixtures/review_queues.http");
     pub const DETAIL: &str = include_str!("fixtures/review_detail.http");
     pub const DETAIL_MISSING: &str = include_str!("fixtures/review_detail_missing.http");
     pub const DETAIL_BAD_OID: &str = include_str!("fixtures/review_detail_bad_oid.http");
+
+    /// `queues` with pull request `number`'s title replaced everywhere.
+    pub(crate) fn with_title(queues: Queues, number: u64, title: &str) -> Queues {
+        let mut lists = queues.0;
+        for list in &mut lists {
+            for pr in list.iter_mut().filter(|pr| pr.number == number) {
+                pr.title = title.to_string();
+            }
+        }
+        Queues(lists)
+    }
+
+    pub const HOSTILE: &str = "x\u{1b}[31mred\u{1b}]52;c;eA==\u{7}\r\u{202e}evil";
+
+    /// A detail answer whose every string is `HOSTILE`, and whose failing
+    /// check's page is `url`.
+    pub(crate) fn hostile_detail(url: &str) -> String {
+        let hostile = |s: &str| serde_json::to_string(s).unwrap();
+        let h = hostile(HOSTILE);
+        DETAIL
+            .replace("\"Add widget caching\"", &h)
+            .replace("\"octocat\"", &h)
+            .replace("\"enhancement\"", &h)
+            .replace("\"build\"", &h)
+            .replace("\"main\"", &h)
+            .replace(
+                "## Summary",
+                serde_json::to_string(HOSTILE).unwrap().trim_matches('"'),
+            )
+            .replace("https://ci.example.com/build/1", url)
+    }
 }
 
 #[cfg(test)]
@@ -1230,19 +1263,6 @@ pub(crate) mod tests {
         assert_eq!(queues(&runner), Err(Refusal::Status(ForgeStatus::Failed)));
     }
 
-    /// `queues` with pull request `number`'s title replaced everywhere.
-    pub(crate) fn with_title(queues: Queues, number: u64, title: &str) -> Queues {
-        let mut lists = queues.0;
-        for list in &mut lists {
-            for pr in list.iter_mut().filter(|pr| pr.number == number) {
-                pr.title = title.to_string();
-            }
-        }
-        Queues(lists)
-    }
-
-    const HOSTILE: &str = "x\u{1b}[31mred\u{1b}]52;c;eA==\u{7}\r\u{202e}evil";
-
     fn no_controls(text: &str) {
         assert!(
             !text
@@ -1250,24 +1270,6 @@ pub(crate) mod tests {
                 .any(|c| c.is_control() || crate::git::safe_text::is_invisible_or_bidi(c)),
             "{text:?}"
         );
-    }
-
-    /// A detail answer whose every string is `HOSTILE`, and whose failing
-    /// check's page is `url`.
-    pub(crate) fn hostile_detail(url: &str) -> String {
-        let hostile = |s: &str| serde_json::to_string(s).unwrap();
-        let h = hostile(HOSTILE);
-        DETAIL
-            .replace("\"Add widget caching\"", &h)
-            .replace("\"octocat\"", &h)
-            .replace("\"enhancement\"", &h)
-            .replace("\"build\"", &h)
-            .replace("\"main\"", &h)
-            .replace(
-                "## Summary",
-                serde_json::to_string(HOSTILE).unwrap().trim_matches('"'),
-            )
-            .replace("https://ci.example.com/build/1", url)
     }
 
     #[test]

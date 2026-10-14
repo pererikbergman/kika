@@ -472,7 +472,7 @@ mod tests {
     #[test]
     fn a_failing_query_is_an_error_made_safe() {
         use crate::git::fake::{FakeRunner, fail};
-        use crate::test_support::{STANDARD_ENV, env_list};
+        use crate::git::fake::{STANDARD_ENV, env_list};
         let fake = FakeRunner::new().expect(
             &[
                 "log",

@@ -80,8 +80,8 @@ mod tests {
     use super::*;
     use crate::git::CliRunner;
     use crate::git::fake::{FakeRunner, TempDir, fail, git, ok};
+    use crate::git::fake::{STANDARD_ENV, env_list};
     use crate::git::runner::EnvProfile;
-    use crate::test_support::{STANDARD_ENV, env_list};
 
     fn parse(stdout: &[u8], string_too: bool) -> Result<Vec<u8>, String> {
         parse_comment_config(stdout, string_too)

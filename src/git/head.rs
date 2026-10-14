@@ -51,9 +51,7 @@ mod tests {
         // No path after `--`, so the whole standard profile fits.
         assert_eq!(
             runner.process_envs(),
-            [crate::test_support::env_list(
-                &crate::test_support::STANDARD_ENV
-            )]
+            [crate::git::fake::env_list(&crate::git::fake::STANDARD_ENV)]
         );
     }
 

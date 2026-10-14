@@ -326,7 +326,7 @@ fn run(runner: &dyn GitRunner, cmd: &GitCommand) -> Result<GitOutput, String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::{STANDARD_ENV, env_list};
+    use crate::git::fake::{STANDARD_ENV, env_list};
     use std::path::Path;
 
     use super::*;
@@ -812,7 +812,7 @@ mod tests {
         // The builder names its profile itself, literal pathspecs included.
         assert_eq!(
             cmd.process_env(),
-            crate::test_support::env_list(&crate::test_support::STANDARD_ENV)
+            crate::git::fake::env_list(&crate::git::fake::STANDARD_ENV)
         );
     }
 

@@ -212,9 +212,9 @@ mod tests {
     use std::ffi::OsString;
 
     use super::*;
+    use crate::git::fake::STANDARD_ENV;
     use crate::git::fake::{FakeRunner, fail, ok};
     use crate::git::runner::EnvProfile;
-    use crate::test_support::STANDARD_ENV;
 
     const ASKPASS_UNSET: &[&str] = &["config", "--get", "core.askPass"];
 

@@ -177,7 +177,7 @@ fn run_command(argv: &[OsString], workdir: &Path) -> Result<(), CommandFailure> 
     let Some((program, args)) = argv.split_first() else {
         return Err(CommandFailure::Launch("The command is empty".into()));
     };
-    let status = crate::program::command(program)
+    let status = crate::git::program::command(program)
         .and_then(|mut command| command.args(args).current_dir(workdir).status())
         .map_err(|e| CommandFailure::Launch(start_error(program, &e)))?;
     if status.success() {
@@ -379,7 +379,7 @@ fn launch(editor: &str, file: &Path, line: Option<u32>, workdir: &Path) -> Resul
     let Some((program, args)) = argv.split_first() else {
         return Err("Could not start the editor: no program".into());
     };
-    let status = crate::program::command(program)
+    let status = crate::git::program::command(program)
         .and_then(|mut command| command.args(args).current_dir(workdir).status())
         .map_err(|e| terminal_safe(format!("Could not start the editor: {e}").as_bytes()))?;
     if status.success() {
@@ -608,8 +608,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn decoy_child_run_command_and_editor() {
-        use crate::program::NOT_FOUND;
-        if !crate::program::in_decoy_child() {
+        use crate::git::program::NOT_FOUND;
+        if !crate::spawn_guard::in_decoy_child() {
             return;
         }
         let here = std::env::current_dir().unwrap();

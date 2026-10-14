@@ -10,8 +10,6 @@ pub mod comment_prefix;
 pub mod commit_files;
 pub mod diff;
 pub(crate) mod emoji;
-#[cfg(test)]
-mod env_guard;
 pub mod error;
 #[cfg(test)]
 pub mod fake;
@@ -21,6 +19,7 @@ mod joiner;
 pub mod log;
 pub mod patch;
 pub mod path;
+pub mod program;
 pub mod rebase_plan;
 pub mod recording;
 pub mod refs;

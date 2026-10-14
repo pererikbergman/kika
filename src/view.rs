@@ -3794,7 +3794,7 @@ mod tests {
             &mut state.commits.reflog,
             Ok(crate::features::commits::reflog::Reflog {
                 entries: crate::features::commits::reflog::git::parse_records(include_bytes!(
-                    "git/fixtures/reflog/commit.bin"
+                    "features/commits/reflog/fixtures/commit.bin"
                 )),
                 ..Default::default()
             }),

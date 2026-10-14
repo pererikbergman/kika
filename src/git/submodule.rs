@@ -120,8 +120,8 @@ pub fn read_submodules(runner: &dyn GitRunner) -> Result<Vec<Submodule>, String>
 mod tests {
     use super::*;
     use crate::git::fake::{FakeRunner, fail, ok};
+    use crate::git::fake::{STANDARD_ENV, env_list};
     use crate::git::runner::EnvProfile;
-    use crate::test_support::{STANDARD_ENV, env_list};
 
     const OID: &str = "1234567890abcdef1234567890abcdef12345678";
 

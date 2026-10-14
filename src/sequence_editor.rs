@@ -8,14 +8,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::process::ExitCode;
 
-use crate::git::rebase_plan::{apply, decode, parse_todo};
+use crate::git::rebase_plan::{PLAN_ENV, apply, decode, parse_todo};
 use crate::worktree_file::{read_file, replace_file};
-
-/// The plan, as [`crate::git::rebase_plan::encode`] writes it. A repo
-/// cannot set Kika's env, and `GIT_SEQUENCE_EDITOR` wins over any
-/// `sequence.editor` a repo configures, so only Kika's own `rebase -i`
-/// child reaches this mode.
-pub const PLAN_ENV: &str = "KIKA_REBASE_PLAN";
 
 /// Run the hidden mode if Kika was started as a sequence editor, and say
 /// how to exit; `None` starts Kika as usual.
