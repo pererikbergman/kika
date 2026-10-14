@@ -978,6 +978,70 @@ mod tests {
     }
 
     #[test]
+    fn repo_path_errors_for_a_name_with_control_characters_draw_none_of_them() {
+        let tmp = TempDir::new("worktree-file");
+        let root = tmp.path();
+        let name = "a\x1b[31m\nb";
+        let repo = |suffix: &str| RepoPath::from_bytes(format!("{name}{suffix}").as_bytes());
+        let clean = |err: &str| !err.bytes().any(|b| b < 0x20 || b == 0x7F);
+        fs::write(root.join(name), "x").unwrap();
+        symlink(root.join(name), root.join(format!("{name}-link"))).unwrap();
+        fs::create_dir(root.join("real")).unwrap();
+        symlink(root.join("real"), root.join(format!("{name}-dir"))).unwrap();
+        let add = |_: Option<&[u8]>| Some(b"new\n".to_vec());
+
+        let touch = "Kika will not touch";
+        let (missing, link, under_link) = (repo("-missing"), repo("-link"), repo("-dir/new"));
+        let mut errors = vec![
+            (
+                touch,
+                missing.clone(),
+                read(root, &missing, 1024).unwrap_err(),
+            ),
+            (touch, link.clone(), read(root, &link, 1024).unwrap_err()),
+            (
+                touch,
+                link.clone(),
+                replace(root, &link, b"x", b"y").unwrap_err(),
+            ),
+            (
+                touch,
+                link.clone(),
+                update(root, &link, 1024, add).unwrap_err(),
+            ),
+            (
+                touch,
+                under_link.clone(),
+                create(root, &under_link, b"y").unwrap_err(),
+            ),
+        ];
+        // A directory nobody may write to and a file nobody may read;
+        // root ignores both, so those errors only come up for anyone else.
+        let locked = root.join(format!("{name}-locked"));
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+        let in_locked = repo("-locked/new");
+        let created = create(root, &in_locked, b"new\n");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        if let Err(e) = created {
+            errors.push(("Could not write", in_locked, e));
+        }
+        let unreadable = repo("-unreadable");
+        let file = root.join(format!("{name}-unreadable"));
+        fs::write(&file, "x").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+        if let Err(e) = read(root, &unreadable, 1024) {
+            errors.push(("Could not read", unreadable, e));
+        }
+
+        for (prefix, path, err) in errors {
+            assert!(err.starts_with(prefix), "{err:?} starts with {prefix:?}");
+            assert!(clean(&err), "{err:?}");
+            assert!(err.contains(path.display()), "{err:?} shows {path:?}");
+        }
+    }
+
+    #[test]
     fn the_open_itself_refuses_a_symlink_swapped_in_after_the_check() {
         let tmp = TempDir::new("worktree-file");
         let root = tmp.path();
