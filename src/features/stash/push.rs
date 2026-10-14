@@ -171,11 +171,15 @@ pub(crate) fn leading_dirs(path: &RepoPath) -> Vec<RepoPath> {
 /// What sits where a restore of `restore` would write, the first name
 /// git lists: at an old path or under it, or exactly at one of its leading
 /// directories. A file under a leading directory is fine; that directory
-/// is real.
+/// is real. Output with no name in it still refuses, naming the first old
+/// path, so an odd answer fails closed.
 fn restore_taken(runner: &dyn GitRunner, restore: &[RepoPath]) -> Result<Option<RepoPath>, String> {
     let at_old = checked(runner, &restore_taken_command(restore))?;
-    if let Some(name) = at_old.stdout.split(|&b| b == 0).find(|n| !n.is_empty()) {
-        return Ok(Some(RepoPath::from_bytes(name)));
+    if !at_old.stdout.is_empty() {
+        let name = at_old.stdout.split(|&b| b == 0).find(|n| !n.is_empty());
+        return Ok(name
+            .map(RepoPath::from_bytes)
+            .or_else(|| restore.first().cloned()));
     }
     let mut dirs: Vec<RepoPath> = Vec::new();
     for dir in restore.iter().flat_map(leading_dirs) {
@@ -535,6 +539,26 @@ mod tests {
             .expect(
                 &["ls-files", "-z", "--cached", "--others", "--", "old.rs"],
                 ok(b"old.rs\0"),
+            );
+        assert_eq!(
+            run_op(&runner, &op),
+            Err(stash_rename_taken(&"old.rs".into()))
+        );
+        runner.assert_done();
+    }
+
+    #[test]
+    fn output_with_no_name_in_it_still_refuses_naming_the_old_path() {
+        let head = "ab".repeat(20);
+        let op = set_push(set(StashMode::All, &["new.rs"], &["old.rs"]), None);
+        let runner = FakeRunner::new()
+            .expect(
+                &["rev-parse", "--verify", "-q", "HEAD^{commit}"],
+                ok(head.as_bytes()),
+            )
+            .expect(
+                &["ls-files", "-z", "--cached", "--others", "--", "old.rs"],
+                ok(b"\0"),
             );
         assert_eq!(
             run_op(&runner, &op),
