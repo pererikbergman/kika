@@ -1,13 +1,15 @@
 //! Applying or popping a stash. A stash whose index holds a rename that
 //! only changes case comes back with its index too (`--index`): without
 //! it, a case-insensitive filesystem folds the old name onto the new one
-//! and the index keeps both. That restore runs only where git cannot stop
-//! partway; anywhere else it is refused and the stash kept.
+//! and the index keeps both. That restore runs only on the stash's own
+//! commit, on a clean worktree with nothing at the paths of its untracked
+//! files; anywhere else it is refused and the stash kept. Something that
+//! changes the worktree between those reads and the restore is not caught.
 
 use std::collections::HashMap;
 
 use super::git::{StashRef, checked, stash_index_command};
-use super::push::case_only;
+use super::push::{STASH_NO_TOP, case_only, restore_blocked_on_disk};
 use crate::op::{GitOp, op_command};
 use kika_git::error::GitError;
 use kika_git::path::RepoPath;
@@ -16,13 +18,15 @@ use kika_git::status::{parse_status, status_command};
 
 /// Why a stash with a case-only rename is refused off its own commit:
 /// there git's merge could stop with the index half restored.
-pub const STASH_CASE_BASE: &str =
-    "This stash renames a file by case only; apply it on the commit it was made on";
+pub const STASH_CASE_BASE: &str = "This stash renames a file by case only; \
+     apply it on the commit it was made on. The stash was kept.";
 
 /// Why a stash with a case-only rename is refused on a changed tree: a
-/// local change or untracked file could stop the restore partway.
-pub const STASH_CASE_DIRTY: &str =
-    "This stash renames a file by case only; apply it with no other changes in the worktree";
+/// local change, an untracked file, or an ignored file where the stash
+/// keeps an untracked one could stop the restore partway.
+pub const STASH_CASE_DIRTY: &str = "This stash renames a file by case only; \
+     apply it with no other changes in the worktree, untracked files included. \
+     Commit or stash them first. The stash was kept.";
 
 /// Why the stash's index could not be checked: its diff did not parse.
 pub const STASH_UNREADABLE: &str = "git diff-tree gave output Kika could not read";
@@ -78,9 +82,9 @@ pub(crate) fn holds_case_rename(stdout: &[u8]) -> Result<bool, String> {
 
 /// Apply or pop `op`'s stash; `run_op` has checked the entry is still
 /// where it was chosen. A stash with no case-only rename runs as it
-/// always has. One with such a rename runs with `--index`, after reads
-/// that make sure git cannot stop partway, and never falls back to a
-/// plain pop.
+/// always has. One with such a rename runs with `--index`, only after
+/// [`index_restore_safe`]'s reads pass, and never falls back to a plain
+/// pop.
 pub(crate) fn apply_stash(runner: &dyn GitRunner, op: &GitOp) -> Result<(), String> {
     let (verb, stash) = match op {
         GitOp::StashApply(stash) => ("apply", stash),
@@ -102,9 +106,10 @@ pub(crate) fn apply_stash(runner: &dyn GitRunner, op: &GitOp) -> Result<(), Stri
 }
 
 /// Refuse an `--index` restore git could stop partway: off the stash's
-/// own commit its merge can conflict, and on a changed tree a local
-/// change or untracked file can block it after the index was written.
-/// Both checks only read.
+/// own commit its merge can conflict, and after the index is written a
+/// local change, an untracked file, or anything at the path of one of the
+/// stash's untracked files (an ignored file, say) can block the rest.
+/// Every check only reads; none can see a change made after it ran.
 fn index_restore_safe(runner: &dyn GitRunner, stash: &StashRef) -> Result<(), String> {
     let bases = GitCommand::new("rev-parse")
         .arg("HEAD")
@@ -123,7 +128,50 @@ fn index_restore_safe(runner: &dyn GitRunner, stash: &StashRef) -> Result<(), St
     if !parse_status(&status.stdout)?.files.is_empty() {
         return Err(STASH_CASE_DIRTY.into());
     }
+    let untracked = untracked_paths(runner, stash)?;
+    if untracked.is_empty() {
+        return Ok(());
+    }
+    let top = kika_git::repo_root::find_toplevel(runner).ok_or(STASH_NO_TOP)?;
+    if restore_blocked_on_disk(&top, &untracked).is_some() {
+        return Err(STASH_CASE_DIRTY.into());
+    }
     Ok(())
+}
+
+/// The paths of the untracked files `stash` keeps in its third parent,
+/// none when it has none. The clean status above ignores ignored files,
+/// and git will not write an untracked file over one.
+fn untracked_paths(runner: &dyn GitRunner, stash: &StashRef) -> Result<Vec<RepoPath>, String> {
+    let third = format!("{}^3", stash.oid.as_str());
+    let probe = GitCommand::new("rev-parse")
+        .arg("-q")
+        .arg("--verify")
+        .arg(&third)
+        .standard_env();
+    let output = runner
+        .run(&probe)
+        .map_err(|e| GitError::io(&e).to_string())?;
+    // `-q` makes a missing parent a silent failure; any other says why.
+    if !output.success && output.stdout.is_empty() && output.stderr.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !output.success {
+        return Err(GitError::failed(&probe, &output).to_string());
+    }
+    let files = GitCommand::new("ls-tree")
+        .arg("-r")
+        .arg("-z")
+        .arg("--full-tree")
+        .arg("--name-only")
+        .arg(&third)
+        .arg("--")
+        .standard_env();
+    let files = checked(runner, &files)?;
+    Ok((files.stdout.split(|&b| b == 0))
+        .filter(|name| !name.is_empty())
+        .map(RepoPath::from_bytes)
+        .collect())
 }
 
 #[cfg(test)]
@@ -218,6 +266,27 @@ mod tests {
         "--untracked-files=all",
     ];
     const CASE: &[u8] = b"M\0b.txt\0D\0Old.txt\0A\0old.txt\0";
+    const UNTRACKED: [&str; 4] = ["rev-parse", "-q", "--verify", "5a5a5a^3"];
+    const UNTRACKED_FILES: [&str; 7] = [
+        "ls-tree",
+        "-r",
+        "-z",
+        "--full-tree",
+        "--name-only",
+        "5a5a5a^3",
+        "--",
+    ];
+    const TOP: [&str; 2] = ["rev-parse", "--show-toplevel"];
+
+    /// What `rev-parse -q --verify` gives for a stash with no untracked
+    /// commit: a failure that says nothing.
+    fn no_untracked() -> GitOutput {
+        GitOutput {
+            success: false,
+            stdout: vec![],
+            stderr: vec![],
+        }
+    }
 
     fn bases(head: &str) -> GitOutput {
         ok(format!("{head}\n{OID}\n--\n").as_bytes())
@@ -265,14 +334,77 @@ mod tests {
                 .expect(&DIFF_TREE, ok(CASE))
                 .expect(&BASES, bases(OID))
                 .expect(&STATUS, ok(b"# branch.oid 5a5a5a\0# branch.head main\0"))
+                .expect(&UNTRACKED, no_untracked())
                 .expect(&["stash", verb, "--index", "stash@{0}"], ok(b""));
             assert_eq!(run_op(&runner, &op), Ok(()), "{verb}");
             runner.assert_done();
             assert_eq!(
                 runner.process_envs(),
-                [read_env(), read_env(), read_env(), read_env(), write_env()],
+                [
+                    read_env(),
+                    read_env(),
+                    read_env(),
+                    read_env(),
+                    read_env(),
+                    write_env()
+                ],
                 "{verb}"
             );
+        }
+    }
+
+    /// A worktree whose top level holds `names`, as files.
+    fn top_with(names: &[&str]) -> TempDir {
+        let tmp = TempDir::new("stash-case-top");
+        for name in names {
+            let path = tmp.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "x\n").unwrap();
+        }
+        tmp
+    }
+
+    fn untracked_at(runner: FakeRunner, top: &Path) -> FakeRunner {
+        let top = format!("{}\n", top.display());
+        runner
+            .expect(&UNTRACKED, ok(format!("{}\n", "c3".repeat(20)).as_bytes()))
+            .expect(&UNTRACKED_FILES, ok(b"d/v.txt\0u.txt\0"))
+            .expect(&TOP, ok(top.as_bytes()))
+    }
+
+    #[test]
+    fn untracked_files_with_nothing_at_their_paths_are_restored_with_the_index() {
+        let top = top_with(&["other.txt"]);
+        for (op, verb) in ops() {
+            let runner = verify(FakeRunner::new(), 0)
+                .expect(&DIFF_TREE, ok(CASE))
+                .expect(&BASES, bases(OID))
+                .expect(&STATUS, ok(b""));
+            let runner = untracked_at(runner, top.path())
+                .expect(&["stash", verb, "--index", "stash@{0}"], ok(b""));
+            assert_eq!(run_op(&runner, &op), Ok(()), "{verb}");
+            runner.assert_done();
+        }
+    }
+
+    #[test]
+    fn an_ignored_file_at_an_untracked_path_is_refused_before_any_stash_command() {
+        // The file itself, or a file where a directory of it must go.
+        for names in [&["u.txt"][..], &["d/v.txt"], &["d"]] {
+            let top = top_with(names);
+            for (op, verb) in ops() {
+                let runner = verify(FakeRunner::new(), 0)
+                    .expect(&DIFF_TREE, ok(CASE))
+                    .expect(&BASES, bases(OID))
+                    .expect(&STATUS, ok(b""));
+                let runner = untracked_at(runner, top.path());
+                assert_eq!(
+                    run_op(&runner, &op),
+                    Err(STASH_CASE_DIRTY.into()),
+                    "{names:?} {verb}"
+                );
+                runner.assert_done();
+            }
         }
     }
 
@@ -329,6 +461,33 @@ mod tests {
                 .expect(&STATUS, bad());
             assert_eq!(run_op(&runner, &op), Err(said.into()), "{verb}");
             runner.assert_done();
+            // The untracked commit: a failure that says why is not "none".
+            let runner = verify(FakeRunner::new(), 0)
+                .expect(&DIFF_TREE, ok(CASE))
+                .expect(&BASES, bases(OID))
+                .expect(&STATUS, ok(b""))
+                .expect(&UNTRACKED, bad());
+            assert_eq!(run_op(&runner, &op), Err(said.into()), "{verb}");
+            runner.assert_done();
+            // Its files.
+            let runner = verify(FakeRunner::new(), 0)
+                .expect(&DIFF_TREE, ok(CASE))
+                .expect(&BASES, bases(OID))
+                .expect(&STATUS, ok(b""))
+                .expect(&UNTRACKED, ok(b"c3c3\n"))
+                .expect(&UNTRACKED_FILES, bad());
+            assert_eq!(run_op(&runner, &op), Err(said.into()), "{verb}");
+            runner.assert_done();
+            // The top level.
+            let runner = verify(FakeRunner::new(), 0)
+                .expect(&DIFF_TREE, ok(CASE))
+                .expect(&BASES, bases(OID))
+                .expect(&STATUS, ok(b""))
+                .expect(&UNTRACKED, ok(b"c3c3\n"))
+                .expect(&UNTRACKED_FILES, ok(b"u.txt\0"))
+                .expect(&TOP, bad());
+            assert_eq!(run_op(&runner, &op), Err(STASH_NO_TOP.into()), "{verb}");
+            runner.assert_done();
         }
     }
 
@@ -344,6 +503,7 @@ mod tests {
                 .expect(&DIFF_TREE, ok(CASE))
                 .expect(&BASES, bases(OID))
                 .expect(&STATUS, ok(b""))
+                .expect(&UNTRACKED, no_untracked())
                 .expect(&["stash", verb, "--index", "stash@{0}"], output);
             let error = run_op(&runner, &op).unwrap_err();
             assert!(error.contains("conflicts in index"), "{error:?}");
@@ -482,6 +642,21 @@ mod tests {
         std::fs::write(dir.join("Old.txt"), "later\n").unwrap();
         git(dir, &["commit", "-q", "-am", "later"]);
         assert_eq!(refused(dir), STASH_CASE_BASE);
+    }
+
+    #[test]
+    fn an_ignored_file_at_a_stashed_untracked_path_is_refused_with_nothing_changed_in_real_git() {
+        let tmp = stashed_with_others();
+        let dir = tmp.path();
+        std::fs::create_dir_all(dir.join(".git/info")).unwrap();
+        std::fs::write(dir.join(".git/info/exclude"), "u.txt\n").unwrap();
+        std::fs::write(dir.join("u.txt"), "mine\n").unwrap();
+        assert_eq!(porcelain(dir), "");
+        assert_eq!(refused(dir), STASH_CASE_DIRTY);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("u.txt")).unwrap(),
+            "mine\n"
+        );
     }
 
     #[test]

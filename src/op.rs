@@ -737,15 +737,14 @@ fn run_op_with(
 
 /// Whether git reports `op`'s failure on stdout as well as stderr: hooks
 /// print to stderr, but git says "nothing to commit" and names each
-/// conflict on stdout, and a bisect says there why a mark failed.
+/// conflict on stdout, and a bisect says there why a mark failed. A
+/// stash apply or pop never gets here: `stash::apply` maps its own.
 fn reports_on_stdout(op: &GitOp) -> bool {
     matches!(
         op,
         GitOp::Commit { .. }
             | GitOp::Merge { .. }
             | GitOp::Revert(_)
-            | GitOp::StashApply(_)
-            | GitOp::StashPop(_)
             | GitOp::CherryPick(_)
             | GitOp::BisectMark { .. }
             | GitOp::BisectReset

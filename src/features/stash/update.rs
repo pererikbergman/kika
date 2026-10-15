@@ -1168,7 +1168,8 @@ mod tests {
         let reason = Some(keys::STASH_RENAME_CASE.into());
         assert_eq!(
             keys::STASH_RENAME_CASE,
-            "This rename only changes case and cannot be stashed by file"
+            "This rename only changes case and cannot be stashed by file; \
+             use Stash all changes… and apply it on this commit"
         );
         // Alone.
         let (mut state, _) = with_files(vec![renamed("old.txt", "Old.txt")], 24);
