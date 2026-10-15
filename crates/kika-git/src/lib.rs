@@ -20,6 +20,8 @@ mod joiner;
 pub mod log;
 pub mod patch;
 pub mod path;
+#[cfg(windows)]
+mod process_tree;
 pub mod program;
 pub mod rebase_plan;
 pub mod recording;
