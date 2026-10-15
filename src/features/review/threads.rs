@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use super::files::{FilesStage, PrFiles, ReviewView, files_screen};
-use super::state::{ReviewFetch, ReviewProblem, ReviewScreen};
+use super::state::{NOT_READY, ReviewFetch, ReviewProblem, ReviewScreen};
 use crate::diff_pane::{DIFF_PREFETCH, DiffStart};
 use crate::effect::{Effect, Tag};
 use crate::keymap::Reason;
@@ -20,7 +20,6 @@ use kika_git::commit_files::CommitId;
 use kika_git::patch::{LineId, LineSide};
 use kika_git::path::RepoPath;
 
-const NOT_READY: &str = "Open the files first";
 const THREADS_LOADING: &str = "Review threads are still loading";
 const THREADS_FAILED: &str = "Review threads could not be read";
 const NO_THREADS: &str = "No unresolved review threads";

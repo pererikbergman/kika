@@ -7,6 +7,7 @@ use super::commit_view::review_commit_disabled;
 use super::conversation::{conversation_disabled, page_disabled};
 use super::discussion_write::{general_comment_disabled, thread_write_disabled};
 use super::files::{review_files_disabled, review_search_step_disabled};
+use super::line_link::open_line_disabled;
 use super::merge::merge_disabled;
 use super::pending::{comment_disabled, pending_list_disabled};
 use super::reader::thread_reader_disabled;
@@ -271,6 +272,17 @@ pub(crate) static REVIEW_KEYS: &[Binding] = &[
         label: "read thread",
         bar: true,
         disabled: thread_reader_disabled,
+    },
+    // Starts the browser, so a repository file may not move it.
+    Binding {
+        id: "review_files.open_line",
+        keys: &[KeyPattern::exact(KeyCode::Char('o'), NONE)],
+        scope: KeyScope::ReviewFiles,
+        intent: AppIntent::Review(ReviewIntent::OpenLineOnForge),
+        description: "Open the selected thread's line, else the top line, on GitHub's pull request page",
+        label: "open top line on GitHub",
+        bar: false,
+        disabled: open_line_disabled,
     },
     Binding {
         id: "review_diff.down",
@@ -869,6 +881,60 @@ mod tests {
             assert_eq!(binding.bar, bar, "{id}");
             assert!(!REPO_LOCKED.contains(&id), "{id}");
         }
+    }
+
+    #[test]
+    fn o_opens_the_line_on_the_files_screen_and_a_check_on_the_detail() {
+        use crate::features::review::state::NO_BROWSER;
+        use crate::features::review::state::tests::{fixture_detail, in_detail};
+        use crate::features::review::threads::tests::{files_with, fixture_discussion};
+        use crate::keymap::{KeyPress, Keymap, Resolution, available, registry, resolve};
+        use crate::model::AppState;
+
+        let o = KeyPress::new(KeyCode::Char('o'), NONE);
+        let run = |state: &AppState, focus| match resolve(
+            registry(),
+            &Keymap::default(),
+            focus,
+            state,
+            o,
+        ) {
+            Resolution::Run(b) => b.id,
+            other => panic!("{other:?}"),
+        };
+        let mut files = files_with(&["src/cache.rs"], fixture_discussion());
+        files.diff.pending = false;
+        files.diff.path = Some("src/cache.rs".into());
+        files.diff.lines = crate::features::review::threads::tests::cache_diff();
+        for focus in [KeyScope::ReviewFiles, KeyScope::ReviewDiff] {
+            assert_eq!(run(&files, focus), "review_files.open_line");
+        }
+        let detail = in_detail(fixture_detail().checks);
+        assert_eq!(run(&detail, KeyScope::Review), "review.open_check");
+        assert!(REPO_LOCKED.contains(&"review_files.open_line"));
+
+        let binding = REVIEW_KEYS
+            .iter()
+            .find(|b| b.id == "review_files.open_line")
+            .unwrap();
+        assert_eq!(
+            binding.intent,
+            AppIntent::Review(ReviewIntent::OpenLineOnForge)
+        );
+        assert!(!binding.bar);
+        // The help menu shows why it is off.
+        files.browser = None;
+        let help = available(
+            registry(),
+            &Keymap::default(),
+            KeyScope::ReviewFiles,
+            &files,
+        );
+        let (_, reason) = help
+            .iter()
+            .find(|(b, _)| b.id == "review_files.open_line")
+            .unwrap();
+        assert_eq!(reason.as_deref(), Some(NO_BROWSER));
     }
 
     /// The binding `key` reaches from `focus`, enabled or not, by id.
