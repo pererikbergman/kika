@@ -7,6 +7,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use super::error::GitError;
+#[cfg(windows)]
+use crate::process_tree::ProcessTree;
 
 /// Which standard env vars the runner adds to a command. Every command
 /// names its profile; the runner owns the vars, so the rules live in one
@@ -260,7 +262,7 @@ pub struct CliRunner {
     /// Removed from every command's environment, for the same reason.
     env_remove: Vec<OsString>,
     /// Processes started by `run` and not yet reaped, for `interrupt`.
-    running: Mutex<Vec<(u64, Arc<Mutex<Child>>)>>,
+    running: Mutex<Vec<Running>>,
     next_id: AtomicU64,
     /// Counts `interrupt` calls, so a `run` can tell one landed before its
     /// child was registered.
@@ -269,6 +271,15 @@ pub struct CliRunner {
     /// can land an interrupt in that gap.
     #[cfg(test)]
     before_register: Option<Box<dyn Fn() + Send + Sync>>,
+}
+
+/// A process `run` started, as `interrupt` needs it.
+struct Running {
+    id: u64,
+    child: Arc<Mutex<Child>>,
+    /// The Job Object holding git and what it starts, if one could be made.
+    #[cfg(windows)]
+    tree: Option<Arc<ProcessTree>>,
 }
 
 impl CliRunner {
@@ -415,7 +426,9 @@ fn own_child_group(pid: libc::pid_t, its_pgid: libc::pid_t, our_pgid: libc::pid_
 /// process group, so hooks it runs are stopped too; SIGTERM lets git remove
 /// its lock files on the way out. The group is also continued: a background
 /// read of `/dev/tty` stops it with SIGTTIN, and a stopped process only acts
-/// on SIGTERM once it runs again. Off unix only `child` itself is killed.
+/// on SIGTERM once it runs again. Off unix only `child` itself is killed
+/// here; on Windows the caller first stops the Job Object (`ProcessTree`)
+/// that holds git and everything it started.
 ///
 /// The caller must hold `child` unreaped, so its pid, which is also its
 /// group id, cannot have been reused by another process.
@@ -469,25 +482,45 @@ impl GitRunner for CliRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
+        // No tree only means git stops as it did before trees existed.
+        // KILL_ON_JOB_CLOSE also ends what git leaves running (such as
+        // fsmonitor--daemon) once the run is done; accepted, see #459.
+        #[cfg(windows)]
+        let tree = ProcessTree::for_child(&child).ok().map(Arc::new);
         let child = Arc::new(Mutex::new(child));
         #[cfg(test)]
         if let Some(hook) = &self.before_register {
             hook();
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        lock(&self.running).push((id, Arc::clone(&child)));
+        lock(&self.running).push(Running {
+            id,
+            child: Arc::clone(&child),
+            #[cfg(windows)]
+            tree: tree.clone(),
+        });
         // An interrupt either locks `running` after the push and signals git
         // itself, or locked it before, so its count, raised before it locks,
         // shows here. If both, git is told twice, which is harmless.
         if self.interrupts.load(Ordering::SeqCst) != seen {
+            // A job handle cannot be reused, so the tree is stopped even when
+            // git.exe has exited but something it started holds the pipes.
+            #[cfg(windows)]
+            if let Some(tree) = &tree {
+                tree.terminate();
+            }
             let mut child = lock(&child);
             if matches!(child.try_wait(), Ok(None)) {
                 terminate(&mut child);
             }
         }
         let output = Self::collect(&child, cmd.input());
-        lock(&self.running).retain(|(other, _)| *other != id);
+        lock(&self.running).retain(|running| running.id != id);
         if output.is_err() {
+            #[cfg(windows)]
+            if let Some(tree) = &tree {
+                tree.terminate();
+            }
             let mut child = lock(&child);
             let _ = child.kill();
             let _ = child.wait();
@@ -525,8 +558,14 @@ impl GitRunner for CliRunner {
 
     fn interrupt(&self) {
         self.interrupts.fetch_add(1, Ordering::SeqCst);
-        for (_, child) in lock(&self.running).iter() {
-            let mut child = lock(child);
+        for running in lock(&self.running).iter() {
+            // A job handle cannot be reused, so the tree is stopped even when
+            // git.exe has exited but something it started holds the pipes.
+            #[cfg(windows)]
+            if let Some(tree) = &running.tree {
+                tree.terminate();
+            }
+            let mut child = lock(&running.child);
             // Only a child not yet reaped still owns its pid and group.
             if matches!(child.try_wait(), Ok(None)) {
                 terminate(&mut child);
@@ -540,6 +579,11 @@ impl GitRunner for CliRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
+        // No tree only means git stops as it did before trees existed.
+        // KILL_ON_JOB_CLOSE also ends what git leaves running (such as
+        // fsmonitor--daemon) once the stream is done; accepted, see #459.
+        #[cfg(windows)]
+        let tree = ProcessTree::for_child(&child).ok();
         let stdout = child.stdout.take().expect("stdout is piped");
         let stderr = child.stderr.take();
         Ok(GitChild {
@@ -547,6 +591,8 @@ impl GitRunner for CliRunner {
             handle: Arc::new(CliChild {
                 child: Mutex::new(child),
                 stderr: Mutex::new(stderr),
+                #[cfg(windows)]
+                tree,
             }),
         })
     }
@@ -557,10 +603,17 @@ impl GitRunner for CliRunner {
 struct CliChild {
     child: Mutex<Child>,
     stderr: Mutex<Option<ChildStderr>>,
+    /// The Job Object holding git and what it starts, if one could be made.
+    #[cfg(windows)]
+    tree: Option<ProcessTree>,
 }
 
 impl ChildHandle for CliChild {
     fn kill(&self) {
+        #[cfg(windows)]
+        if let Some(tree) = &self.tree {
+            tree.terminate();
+        }
         // Fails only if the process already exited, which is what we wanted.
         let _ = lock(&self.child).kill();
     }
@@ -582,6 +635,10 @@ impl ChildHandle for CliChild {
 impl Drop for CliChild {
     /// Reap the process whatever happened to the reader, so no zombies remain.
     fn drop(&mut self) {
+        #[cfg(windows)]
+        if let Some(tree) = &self.tree {
+            tree.terminate();
+        }
         let child = self.child.get_mut().unwrap_or_else(|e| e.into_inner());
         let _ = child.kill();
         let _ = child.wait();
@@ -613,6 +670,23 @@ fn describe_exit(status: std::process::ExitStatus) -> String {
         return format!("signal {signal}");
     }
     status.to_string()
+}
+
+/// Whether the Job Object of a `handle` from [`CliRunner::spawn`] holds its
+/// git, or `None` when it has no tree.
+///
+/// # Safety
+///
+/// `handle` must hold a `CliChild`: one returned by [`CliRunner::spawn`], or
+/// a `CliChild` a test built itself. Any other [`ChildHandle`] is read as a
+/// `CliChild`, which is undefined behaviour.
+#[cfg(all(test, windows))]
+pub(crate) unsafe fn cli_child_tree_holds_git(handle: &Arc<dyn ChildHandle>) -> Option<bool> {
+    // SAFETY: the caller promises the data pointer points at a `CliChild`;
+    // the borrow of `handle` keeps it alive while this reads it.
+    let child = unsafe { &*Arc::as_ptr(handle).cast::<CliChild>() };
+    let tree = child.tree.as_ref()?;
+    Some(tree.contains(&lock(&child.child)).unwrap())
 }
 
 /// A poisoned lock only means another thread panicked; the child is still valid.
@@ -1560,11 +1634,137 @@ mod tests {
         assert_eq!(exit.status, "status 1");
     }
 
+    /// On Windows a hook runs under git's own process, outside what killing
+    /// `git.exe` reaches; the Job Object stops it with git.
+    #[cfg(windows)]
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "kill stops git.exe but not the process it starts, which keeps writing; process-group kill is Unix-only"
-    )]
+    fn interrupt_stops_a_commit_s_hook_on_windows() {
+        use crate::fake::{TempDir, git};
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let tmp = TempDir::new("interrupt-tree");
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        std::fs::create_dir_all(dir.join(".git/hooks")).unwrap();
+        std::fs::write(
+            dir.join(".git/hooks/pre-commit"),
+            "#!/bin/sh\necho > started\nsleep 5\necho > marker\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("a"), "a\n").unwrap();
+        git(dir, &["add", "a"]);
+        let runner = Arc::new(CliRunner::isolated(dir));
+        let cmd = GitCommand::new("-c")
+            .arg("user.name=t")
+            .arg("-c")
+            .arg("user.email=t@t")
+            .arg("commit")
+            .arg("-m")
+            .arg("msg")
+            .user_env();
+        // A channel, not `join`, so a failed interrupt cannot hang the test.
+        let (tx, rx) = mpsc::channel();
+        {
+            let runner = Arc::clone(&runner);
+            std::thread::spawn(move || {
+                let _ = tx.send(runner.run(&cmd));
+            });
+        }
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !dir.join("started").exists() || lock(&runner.running).len() != 1 {
+            assert!(Instant::now() < deadline, "the hook never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        runner.interrupt();
+        let output = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the interrupt left the hook running")
+            .unwrap();
+        assert!(!output.success);
+        std::thread::sleep(Duration::from_secs(8));
+        assert!(!dir.join("marker").exists(), "the hook outlived git");
+    }
+
+    /// Once `git.exe` has exited, a process it started can still hold the
+    /// pipes `run` reads, so `run` keeps waiting. Interrupt stops the tree
+    /// even then, which ends the holder and lets `run` return.
+    #[cfg(windows)]
+    #[test]
+    fn interrupt_stops_a_grandchild_holding_the_pipes_after_git_exits() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let runner = Arc::new(CliRunner::isolated(std::env::temp_dir()));
+        // The alias's shell backgrounds `sleep` and exits, then git exits;
+        // `sleep` keeps the inherited stdout and stderr open for 30 s.
+        let cmd = GitCommand::new("-c")
+            .arg("alias.hold=!sleep 30 &")
+            .arg("hold")
+            .user_env();
+        // A channel, not `join`, so a failed interrupt cannot hang the test.
+        let (tx, rx) = mpsc::channel();
+        {
+            let runner = Arc::clone(&runner);
+            std::thread::spawn(move || {
+                let _ = tx.send(runner.run(&cmd));
+            });
+        }
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let git_exited = lock(&runner.running)
+                .first()
+                .is_some_and(|running| matches!(lock(&running.child).try_wait(), Ok(Some(_))));
+            if git_exited {
+                break;
+            }
+            assert!(
+                rx.try_recv().is_err(),
+                "run returned on its own, so nothing held the pipes"
+            );
+            assert!(Instant::now() < deadline, "git never exited");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        runner.interrupt();
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("the interrupt left the pipes held")
+            .unwrap();
+    }
+
+    /// A child whose tree could not be made is stopped and reaped as before
+    /// trees existed: `kill`, `finish` and `drop` touch only the child.
+    #[cfg(windows)]
+    #[test]
+    fn a_child_without_a_tree_is_handled_as_before() {
+        let runner = CliRunner::new(std::env::temp_dir());
+        let mut child = runner
+            .command(&GitCommand::new("--version").standard_env())
+            .unwrap()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let handle: Arc<dyn ChildHandle> = Arc::new(CliChild {
+            stderr: Mutex::new(child.stderr.take()),
+            child: Mutex::new(child),
+            tree: None,
+        });
+        // SAFETY: `handle` was built from a `CliChild` just above.
+        assert_eq!(unsafe { cli_child_tree_holds_git(&handle) }, None);
+
+        let mut out = String::new();
+        stdout.read_to_string(&mut out).unwrap();
+        assert!(out.starts_with("git version"), "{out}");
+        assert!(handle.finish().unwrap().success);
+        handle.kill();
+        handle.kill();
+        drop(handle);
+    }
+
+    #[test]
     fn kill_unblocks_a_reader_of_a_large_diff() {
         let tmp = crate::fake::TempDir::new("kill");
         let dir = tmp.path();
