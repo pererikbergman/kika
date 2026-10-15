@@ -24,6 +24,7 @@ use crate::model::AppState;
 use crate::view;
 use crate::watch::{WatchConfig, WatchEvent};
 use kika_forge::github::CliGh;
+use kika_forge::gitlab::CliGlab;
 use kika_forge::task::ForgeContext;
 use kika_git::GitRunner;
 use kika_git::recording::CommandSink;
@@ -46,14 +47,19 @@ pub async fn run(
     sink.connect(move |event| {
         let _ = log_tx.send(CommandLogIntent::Logged(event).into());
     });
-    // Only when the user named hosts; otherwise `gh` is never run.
+    // Only when the user named hosts; otherwise no forge CLI is ever run.
     let forge = (!config.forge_hosts.is_empty()).then(|| ForgeContext {
         gh: Arc::new(CliGh),
+        // Not reached yet: no configured host is GitLab-kind.
+        glab: Arc::new(CliGlab::new("glab")),
         sink: sink.clone(),
         cache_dir: kika_forge::cache::default_dir(|key| std::env::var_os(key)),
     });
     let runtime = Runtime::new(Arc::clone(&runner), tx.clone())
         .with_recent_store(recent_store)
+        .with_pending_store(kika_forge::pending::default_dir(|key| {
+            std::env::var_os(key)
+        }))
         .with_global_config(global_config)
         .with_diff_pager(config.diff_pager.clone())
         .with_diff_tool(config.diff_tool.clone())

@@ -8,14 +8,18 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
-use super::files::{FilesFocus, FilesStage, PrFile, PrFiles};
+use super::files::{FilesFocus, FilesStage, PrFile, PrFiles, ReviewView};
 use super::git::FileCounts;
 use super::markdown;
+use super::pending_view::{comment_marks, has_comment_marks, no_discussion};
 use super::state::{NO_FORGE, ReviewProblem, ReviewScreen, ReviewState};
+use super::threads::{ThreadScope, thread_note};
+use super::threads_view::thread_diff_body;
 use crate::diff_pane_view::{diff_pane_body, diff_position, found_note};
 use crate::model::AppState;
 use crate::rows::{clock, drawn_path, status_colour};
 use crate::view::{self, elide_right};
+use kika_forge::anchor::row_numbers;
 use kika_forge::merge::{MergeBlock, merge_options};
 use kika_forge::review::{
     CheckStatus, Mergeability, PrDetail, PrSummary, QueueKind, ReviewVerdict, ViewedState,
@@ -30,7 +34,9 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
         .map(|r| format!(" · {}/{}", r.owner, r.name))
         .unwrap_or_default();
     let number = match review.screen {
-        ReviewScreen::Detail(number) | ReviewScreen::Files(number) => format!(" #{number}"),
+        ReviewScreen::Detail(number)
+        | ReviewScreen::Files(number)
+        | ReviewScreen::Conversation(number) => format!(" #{number}"),
         ReviewScreen::Queue => String::new(),
     };
     let title = format!(" Review{repo}{number} ");
@@ -44,6 +50,13 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
             Some(files) => return files_screen(state, files, frame, inner),
             None => Vec::new(),
         },
+        ReviewScreen::Conversation(_) => {
+            let lines = super::conversation_view::conversation_view(review, inner);
+            frame.render_widget(Paragraph::new(lines), inner);
+            // A general comment is typed over it.
+            super::pending_view::render_pending(review, frame, inner);
+            return;
+        }
     };
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -224,7 +237,8 @@ fn detail_screen(review: &ReviewState, number: u64, inner: Rect) -> Vec<Line<'st
                     &fresh
                 }
             };
-            let lines = detail_lines(detail, body, width);
+            let threads = super::threads_view::thread_summary(review);
+            let lines = detail_lines(detail, body, threads.as_deref(), width);
             let max = lines.len().saturating_sub(usize::from(inner.height));
             lines
                 .into_iter()
@@ -253,20 +267,27 @@ pub fn files_diff_rows(main: Rect) -> usize {
 /// as the workspace frames its focused panel.
 fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rect) {
     let [list, diff] = files_areas(inner);
-    let title = format!(
-        " PR #{} · files ({}/{}) ",
-        files.number,
-        files.viewed_count(),
-        files.rows.len()
-    );
+    let pending = state
+        .review
+        .pending
+        .as_ref()
+        .and_then(|slot| slot.review())
+        .map_or(0, |review| review.comments.len());
+    let title = files_title(files, pending, usize::from(list.width));
     let block = view::panel_block(title, files.focus == FilesFocus::List);
     let list_inner = block.inner(list);
     frame.render_widget(block, list);
     frame.render_widget(Paragraph::new(file_lines(files, list_inner)), list_inner);
 
     let stream = &state.diff;
+    // Without it, threads still loading or not read look like none.
+    let threads = if files.stage == FilesStage::Ready {
+        thread_note(state)
+    } else {
+        String::new()
+    };
     let tail = format!(
-        "{}{}",
+        "{}{}{threads}",
         diff_position(stream),
         found_note(stream.search.as_ref(), !stream.done)
     );
@@ -278,8 +299,43 @@ fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rec
     let title = diff_title(path, &tail, usize::from(diff.width));
     let block = view::panel_block(title, files.focus == FilesFocus::Diff);
     let diff_inner = block.inner(diff);
+    let commenting = has_comment_marks(state, files);
+    let no_threads;
     let body = match &files.stage {
-        FilesStage::Ready => diff_pane_body(&state.diff, diff_inner),
+        FilesStage::Ready => match files.selected() {
+            Some(row) if state.review.discussion.is_some() || commenting => {
+                let discussion = match &state.review.discussion {
+                    Some(discussion) => discussion,
+                    None => {
+                        no_threads = no_discussion();
+                        &no_threads
+                    }
+                };
+                let scope = ThreadScope::of(files, discussion);
+                let mut threads = scope.file_threads(&row.file.path, None);
+                // Numbered once a frame, for the shown file only, and only
+                // when it has a thread on a line or a comment to mark.
+                let numbers = if threads.lines.is_empty() && !commenting {
+                    Vec::new()
+                } else {
+                    row_numbers(&stream.lines)
+                };
+                if stream.done && !threads.lines.is_empty() {
+                    threads = scope.file_threads(&row.file.path, Some(&numbers));
+                }
+                let marks = comment_marks(state, files, &numbers);
+                thread_diff_body(
+                    stream,
+                    &numbers,
+                    &threads,
+                    &scope,
+                    files.thread,
+                    &marks,
+                    diff_inner,
+                )
+            }
+            _ => diff_pane_body(&state.diff, diff_inner),
+        },
         FilesStage::Failed(_) => Paragraph::new(Line::styled("No diff to show", dim())),
         _ => Paragraph::new(Line::styled(
             "The diff shows once the files are listed",
@@ -287,6 +343,58 @@ fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rec
         )),
     };
     frame.render_widget(body.block(block), diff);
+    if let Some(reader) = &files.reader {
+        let discussion = state.review.discussion.as_ref();
+        super::reader_view::render_reader(files, discussion, reader, frame, inner);
+    }
+    super::pending_view::render_pending(&state.review, frame, inner);
+}
+
+/// What the list shows, long and short: `whole pull request` or
+/// `commit k/N <7-hex>`.
+fn view_labels(files: &PrFiles) -> (String, String) {
+    let commit = match files.view {
+        ReviewView::Whole => None,
+        ReviewView::Commit(i) => files.commits.as_ref().and_then(|(commits, _)| {
+            let commit = commits.get(i)?;
+            Some((i + 1, commits.len(), commit.range.oid.as_str()))
+        }),
+    };
+    match commit {
+        None => ("whole pull request".into(), "whole".into()),
+        Some((k, n, oid)) => {
+            let hex = view::short_hash(oid);
+            (format!("commit {k}/{n} {hex}"), format!("{k}/{n} {hex}"))
+        }
+    }
+}
+
+/// ` PR #N · files (viewed/listed) · K pending · <view> ` for a list
+/// `width` wide, the pending count only when there is one: the number
+/// goes first, then the view's long label, so which commit is shown
+/// stays as long as it can.
+fn files_title(files: &PrFiles, pending: usize, width: usize) -> String {
+    let count = format!("files ({}/{})", files.viewed_count(), files.rows.len());
+    // The pending review's count gives way only to the view's short label.
+    let pending = if pending > 0 {
+        format!(" · {pending} pending")
+    } else {
+        String::new()
+    };
+    let (long, short) = view_labels(files);
+    let room = width.saturating_sub(2);
+    let candidates = [
+        format!(" PR #{} · {count}{pending} · {long} ", files.number),
+        format!(" {count}{pending} · {long} "),
+        format!(" {count}{pending} · {short} "),
+        format!(" {short}{pending} "),
+        format!(" {short} "),
+    ];
+    candidates
+        .iter()
+        .find(|title| width_of(title) <= room)
+        .cloned()
+        .unwrap_or_else(|| format!(" {} ", elide_right(&short, room.saturating_sub(2))))
 }
 
 /// ` Diff <path><tail> ` for a pane `width` wide: the path gives way
@@ -326,7 +434,14 @@ fn file_lines(files: &PrFiles, inner: Rect) -> Vec<Line<'static>> {
         .enumerate()
         .skip(start)
         .take(height)
-        .map(|(i, row)| file_row(row, i == files.cursor, width))
+        .map(|(i, row)| {
+            // The mark GitHub has been asked for and not yet answered.
+            let pending = files
+                .marking
+                .as_ref()
+                .is_some_and(|m| row.file.path.as_bytes() == m.path.as_bytes());
+            file_row(row, i == files.cursor, pending, width)
+        })
         .collect()
 }
 
@@ -335,10 +450,12 @@ const MIN_PATH: usize = 6;
 
 /// `<status> <viewed> <path>  +A −D`, exactly `width` wide (at least the
 /// four columns of status and mark): the path loses its start to fit, and
-/// on a list too narrow for both the counts give way to it.
-fn file_row(row: &PrFile, cursor: bool, width: usize) -> Line<'static> {
+/// on a list too narrow for both the counts give way to it. While its
+/// viewed mark is `pending` on GitHub, the mark is a dim `…`.
+fn file_row(row: &PrFile, cursor: bool, pending: bool, width: usize) -> Line<'static> {
     let colour = status_colour(row.file.status);
     let (mark, mark_style) = match row.viewed {
+        _ if pending => ("…", dim()),
         Some(ViewedState::Viewed) => ("✓", Style::new().fg(Color::Green)),
         Some(ViewedState::Dismissed) => ("~", Style::new().fg(Color::Yellow)),
         Some(ViewedState::Unviewed) => (" ", Style::new()),
@@ -387,8 +504,13 @@ pub fn detail_area(main: Rect) -> Rect {
 
 /// How far the detail scrolls in `inner`, with `body` its rendered
 /// description.
-pub fn detail_max_scroll(detail: &PrDetail, body: &[Line<'static>], inner: Rect) -> usize {
-    detail_lines(detail, body, usize::from(inner.width))
+pub fn detail_max_scroll(
+    detail: &PrDetail,
+    body: &[Line<'static>],
+    threads: Option<&str>,
+    inner: Rect,
+) -> usize {
+    detail_lines(detail, body, threads, usize::from(inner.width))
         .len()
         .saturating_sub(usize::from(inner.height))
 }
@@ -402,9 +524,14 @@ fn dim() -> Style {
 }
 
 /// Every line of the detail at `width`: the header and checks first, so
-/// a small screen still shows them, then labels, reviewers and `body`,
-/// the description already rendered.
-pub fn detail_lines(detail: &PrDetail, body: &[Line<'static>], width: usize) -> Vec<Line<'static>> {
+/// a small screen still shows them, then labels, reviewers, the review
+/// `threads` line and `body`, the description already rendered.
+pub fn detail_lines(
+    detail: &PrDetail,
+    body: &[Line<'static>],
+    threads: Option<&str>,
+    width: usize,
+) -> Vec<Line<'static>> {
     let mut lines = markdown::wrap_text(&detail.title, bold(), width);
     let by = format!("#{} by ", detail.number);
     lines.push(Line::from(vec![
@@ -461,6 +588,9 @@ pub fn detail_lines(detail: &PrDetail, body: &[Line<'static>], width: usize) -> 
         )
         .collect();
     lines.extend(packed("Reviewers: ", &reviewers, width));
+    if let Some(threads) = threads {
+        lines.extend(markdown::wrap_text(threads, Style::new(), width));
+    }
     if !body.is_empty() {
         lines.push(Line::default());
         lines.extend(body.iter().cloned());
@@ -602,6 +732,40 @@ mod tests {
             assert!(contains(&rows, text), "{text:?} missing in {rows:#?}");
         }
         assert!(!contains(&rows, "## Summary"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_detail_counts_its_review_threads_or_says_why_not() {
+        use crate::features::review::threads::tests::fixture_discussion;
+        let mut state = reviewing(ReviewScreen::Detail(42));
+        state.review.detail = Some(fixture_detail());
+        state.review.discussion = Some(fixture_discussion());
+        let rows = draw(&state, 80, 30);
+        let threads = rows
+            .iter()
+            .position(|r| {
+                r.contains("Threads: 2 unresolved of 5 · 1 addressed · 3 conversation comments")
+            })
+            .unwrap_or_else(|| panic!("{rows:#?}"));
+        // Right after the reviewers, which wrap to two lines here.
+        assert!(rows[threads - 2].contains("Reviewers: "), "{rows:#?}");
+        assert!(rows[threads - 1].contains("core requested"), "{rows:#?}");
+
+        state.review.discussion = None;
+        state.review.discussion_fetch.loading = true;
+        let rows = draw(&state, 80, 30);
+        assert!(contains(&rows, "Threads: loading…"), "{rows:#?}");
+
+        state.review.discussion_fetch.loading = false;
+        state.review.discussion_fetch.error = Some(ReviewProblem::Status(ForgeStatus::NoAccess));
+        let rows = draw(&state, 80, 30);
+        assert!(
+            contains(
+                &rows,
+                "Threads: could not be read (No access to the repository with gh's login), r to"
+            ),
+            "{rows:#?}"
+        );
     }
 
     #[test]
@@ -809,7 +973,7 @@ mod tests {
         let mut detail = fixture_detail();
         detail.title = "A title that is far too long for a narrow screen".into();
         detail.head = "feature/a-branch-name-that-goes-on".into();
-        let lines = detail_lines(&detail, &[], 28);
+        let lines = detail_lines(&detail, &[], None, 28);
         let text: Vec<String> = lines
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
@@ -902,6 +1066,9 @@ mod tests {
             head: id('1'),
             base: id('2'),
             range: None,
+            whole: None,
+            view: ReviewView::Whole,
+            commits: None,
             rows: vec![
                 pr_file('M', b"src/cache.rs", lines(3, 1), Some(ViewedState::Viewed)),
                 pr_file(
@@ -920,10 +1087,17 @@ mod tests {
                 pr_file('D', b"evil\x1b]52;c;eA==\x07\x1b[2Jname", lines(0, 4), None),
             ],
             cursor: 0,
+            keep: None,
             focus: FilesFocus::List,
             stage: FilesStage::Ready,
             fetched: false,
             seq: None,
+            marking: None,
+            thread: None,
+            jump: None,
+            reader: None,
+            pick: None,
+            reopen_thread: None,
         });
         state
     }
@@ -932,7 +1106,10 @@ mod tests {
     fn each_file_row_shows_status_viewed_mark_path_and_counts() {
         let state = files_state();
         let rows = draw(&state, 120, 20);
-        assert!(contains(&rows, "PR #12 · files (1/5)"), "{rows:#?}");
+        assert!(
+            contains(&rows, "files (1/5) · whole pull request"),
+            "{rows:#?}"
+        );
         for (status, mark, path, counts) in [
             ("M", "✓", "src/cache.rs", "+3 −1"),
             ("M", "~", "src/lib.rs", "+1 −2"),
@@ -950,6 +1127,26 @@ mod tests {
         let evil = rows.iter().find(|r| r.contains("evil")).unwrap();
         assert!(!evil.chars().any(char::is_control), "{evil:?}");
         assert!(evil.contains("name") && evil.contains("−4"), "{evil:?}");
+    }
+
+    #[test]
+    fn a_file_past_the_first_page_of_marks_draws_its_mark_when_scrolled_to() {
+        use crate::features::review::files::tests::large_ready;
+        use kika_forge::github::fixtures::GRAPHQL_RATE_LIMITED;
+        use kika_forge::review::fixtures::files_page;
+
+        let mut state = large_ready(files_page(100..150, None));
+        state.review.files.as_mut().unwrap().cursor = 120;
+        let rows = draw(&state, 100, 24);
+        assert!(contains(&rows, "M ✓ f0120"), "{rows:#?}");
+        assert!(contains(&rows, "M ~ f0118"), "{rows:#?}");
+        assert!(!contains(&rows, "M ? "), "{rows:#?}");
+
+        // Where paging stopped, the files past it are unknown.
+        let mut state = large_ready(GRAPHQL_RATE_LIMITED.to_string());
+        state.review.files.as_mut().unwrap().cursor = 120;
+        let rows = draw(&state, 100, 24);
+        assert!(contains(&rows, "M ? f0120"), "{rows:#?}");
     }
 
     #[test]
@@ -1032,9 +1229,76 @@ mod tests {
             }
         }
         let rows = draw(&files_state(), 80, 24);
-        assert!(contains(&rows, "PR #12 · files (1/5)"), "{rows:#?}");
+        assert!(contains(&rows, "files (1/5) · whole"), "{rows:#?}");
         for counts in ["+3 −1", "+1 −2", "bin", "−4"] {
             assert!(contains(&rows, counts), "{counts:?} missing in {rows:#?}");
+        }
+    }
+
+    /// `files_state()` showing the second of three commits.
+    fn in_commit_view() -> AppState {
+        use crate::features::review::PrCommit;
+        use kika_git::commit_files::{CommitId, CommitRange};
+        let mut state = files_state();
+        let id = |c: char| CommitId::parse(&c.to_string().repeat(40)).unwrap();
+        let commit = |oid, parent| PrCommit {
+            range: CommitRange {
+                oid: id(oid),
+                parent: Some(id(parent)),
+            },
+            subject: "s".into(),
+        };
+        let files = state.review.files.as_mut().unwrap();
+        files.commits = Some((
+            vec![commit('a', '3'), commit('b', 'a'), commit('1', 'b')],
+            false,
+        ));
+        files.view = ReviewView::Commit(1);
+        state
+    }
+
+    #[test]
+    fn the_file_list_title_says_which_commit_is_shown() {
+        let state = in_commit_view();
+        let rows = draw(&state, 200, 24);
+        assert!(
+            contains(&rows, " PR #12 · files (1/5) · commit 2/3 bbbbbbb "),
+            "{rows:#?}"
+        );
+        let rows = draw(&state, 120, 24);
+        assert!(
+            contains(&rows, " files (1/5) · commit 2/3 bbbbbbb "),
+            "{rows:#?}"
+        );
+        // A narrow list keeps the commit before the count.
+        let rows = draw(&state, 80, 24);
+        assert!(contains(&rows, " 2/3 bbbbbbb "), "{rows:#?}");
+        let rows = draw(&files_state(), 200, 24);
+        assert!(
+            contains(&rows, " PR #12 · files (1/5) · whole pull request "),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn the_file_list_title_never_overflows_its_border() {
+        let mut state = in_commit_view();
+        for pending in [0, 1, 500] {
+            for width in 0..70 {
+                let title = files_title(state.review.files.as_ref().unwrap(), pending, width);
+                assert!(
+                    width_of(&title) <= width.saturating_sub(2) || width < 4,
+                    "{pending} {width}: {title:?}"
+                );
+            }
+        }
+        // The count gives way only to the short view label.
+        let files = state.review.files.as_ref().unwrap();
+        assert!(files_title(files, 3, 70).contains("· 3 pending"));
+        assert!(files_title(files, 3, 30).contains("3 pending"));
+        for (width, height) in [(80, 24), (40, 10), (20, 5), (10, 3), (3, 2), (1, 1)] {
+            state.size = (width, height);
+            draw(&state, width, height);
         }
     }
 
@@ -1060,18 +1324,18 @@ mod tests {
         for width in [60, 30, 21, 17] {
             for row in [&wide, &rename] {
                 for cursor in [false, true] {
-                    let line = file_row(row, cursor, width);
+                    let line = file_row(row, cursor, false, width);
                     assert_eq!(row_width(&line), width, "{:?}", row_text(&line));
                 }
             }
         }
-        let text = row_text(&file_row(&rename, false, 60));
+        let text = row_text(&file_row(&rename, false, false, 60));
         assert!(
             text.contains("src/older/name.rs → src/old/name.rs"),
             "{text:?}"
         );
         // Cut from the start, keeping the file name and the counts.
-        let text = row_text(&file_row(&wide, false, 30));
+        let text = row_text(&file_row(&wide, false, false, 30));
         assert!(
             text.contains('…') && text.contains("数据文件.rs"),
             "{text:?}"
@@ -1090,11 +1354,11 @@ mod tests {
             },
             Some(ViewedState::Viewed),
         );
-        let text = row_text(&file_row(&row, false, 12));
+        let text = row_text(&file_row(&row, false, false, 12));
         assert_eq!(width_of(&text), 12, "{text:?}");
         assert!(!text.contains('+'), "{text:?}");
         assert!(text.starts_with("M ✓ …"), "{text:?}");
-        let text = row_text(&file_row(&row, false, 30));
+        let text = row_text(&file_row(&row, false, false, 30));
         assert!(text.ends_with("+120 −45"), "{text:?}");
     }
 

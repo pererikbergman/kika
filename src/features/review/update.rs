@@ -36,6 +36,34 @@ pub(crate) fn update(state: &mut AppState, intent: ReviewIntent) -> Vec<Effect> 
         ReviewIntent::FilesLoaded { tag, result } => {
             return state.review_files_loaded(tag, result);
         }
+        ReviewIntent::PickCommit => return state.open_review_commits(),
+        ReviewIntent::CommitsLoaded { tag, result } => {
+            return state.review_commits_loaded(tag, result);
+        }
+        ReviewIntent::ToggleViewed => return state.toggle_viewed(),
+        ReviewIntent::NextThread => return state.step_review_thread(false),
+        ReviewIntent::PrevThread => return state.step_review_thread(true),
+        ReviewIntent::OpenConversation => state.open_review_conversation(),
+        ReviewIntent::PageDown => state.review_page(1),
+        ReviewIntent::PageUp => state.review_page(-1),
+        ReviewIntent::OpenThreadReader => state.open_thread_reader(),
+        ReviewIntent::ThreadReaderScroll(by) => state.scroll_thread_reader(by),
+        ReviewIntent::ThreadReaderStep(delta) => state.step_thread_reader(delta),
+        ReviewIntent::CloseThreadReader => state.close_thread_reader(),
+        ReviewIntent::DiscussionLoaded {
+            tag,
+            number,
+            repo,
+            result,
+        } => state.discussion_loaded(tag, number, repo, result),
+        ReviewIntent::ViewedSet {
+            tag,
+            host,
+            number,
+            path,
+            viewed,
+            result,
+        } => state.viewed_set(tag, &host, number, path, viewed, result),
         ReviewIntent::QueuesLoaded { tag, repo, result } => {
             state.review_queues_loaded(tag, repo, result)
         }
@@ -44,7 +72,42 @@ pub(crate) fn update(state: &mut AppState, intent: ReviewIntent) -> Vec<Effect> 
             number,
             repo,
             result,
-        } => state.pr_detail_loaded(tag, number, repo, result),
+        } => return state.pr_detail_loaded(tag, number, repo, result),
+        ReviewIntent::StartComment => state.start_comment_pick(),
+        ReviewIntent::StepCommentPick(down) => return state.step_comment_pick(down),
+        ReviewIntent::ToggleCommentRange => state.toggle_comment_range(),
+        ReviewIntent::ConfirmCommentPick => state.confirm_comment_pick(),
+        ReviewIntent::CancelCommentPick => return state.end_comment_pick(),
+        ReviewIntent::TypeComment(key) => state.type_comment(key),
+        ReviewIntent::SaveComment => return state.save_comment(),
+        ReviewIntent::EscapeComment => state.escape_comment(),
+        ReviewIntent::DiscardComment => state.discard_comment(),
+        ReviewIntent::ReplyToThread => state.reply_to_thread(),
+        ReviewIntent::ToggleThreadResolved => return state.toggle_thread_resolved(),
+        ReviewIntent::StartGeneralComment => state.start_general_comment(),
+        ReviewIntent::PostComment => return state.post_comment(),
+        ReviewIntent::DiscussionWritten {
+            tag,
+            host,
+            number,
+            write,
+            result,
+        } => return state.discussion_written(tag, &host, number, write, result),
+        ReviewIntent::OpenPendingList => state.open_pending_list(),
+        ReviewIntent::MovePendingList(delta) => state.move_pending_list(delta),
+        ReviewIntent::EditPending => state.edit_pending(),
+        ReviewIntent::AskDeletePending => state.ask_delete_pending(),
+        ReviewIntent::DeletePending(id) => return state.delete_pending(id),
+        ReviewIntent::ClosePendingList => state.close_pending_list(),
+        ReviewIntent::PendingLoaded { tag, result, file } => {
+            state.pending_loaded(tag, result, file)
+        }
+        ReviewIntent::PendingSaved { tag, result } => return state.pending_saved(tag, result),
+        ReviewIntent::CheckoutPr => return state.open_pr_checkout(),
+        ReviewIntent::ConfirmCheckoutPr => return state.confirm_pr_checkout(),
+        ReviewIntent::CheckoutPlanned { tag, result } => {
+            return state.pr_checkout_planned(tag, result);
+        }
     }
     Vec::new()
 }

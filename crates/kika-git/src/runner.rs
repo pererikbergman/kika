@@ -262,6 +262,13 @@ pub struct CliRunner {
     /// Processes started by `run` and not yet reaped, for `interrupt`.
     running: Mutex<Vec<(u64, Arc<Mutex<Child>>)>>,
     next_id: AtomicU64,
+    /// Counts `interrupt` calls, so a `run` can tell one landed before its
+    /// child was registered.
+    interrupts: AtomicU64,
+    /// Called by `run` between spawning git and registering it, so a test
+    /// can land an interrupt in that gap.
+    #[cfg(test)]
+    before_register: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl CliRunner {
@@ -272,7 +279,17 @@ impl CliRunner {
             env_remove: Vec::new(),
             running: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(0),
+            interrupts: AtomicU64::new(0),
+            #[cfg(test)]
+            before_register: None,
         }
+    }
+
+    /// Makes `run` call `hook` after spawning git and before registering it.
+    #[cfg(test)]
+    fn pause_before_register(mut self, hook: impl Fn() + Send + Sync + 'static) -> Self {
+        self.before_register = Some(Box::new(hook));
+        self
     }
 
     /// A runner that ignores the global and system git config and the
@@ -435,6 +452,7 @@ impl GitRunner for CliRunner {
     }
 
     fn run(&self, cmd: &GitCommand) -> io::Result<GitOutput> {
+        let seen = self.interrupts.load(Ordering::SeqCst);
         let mut command = self.command(cmd)?;
         if cmd.input().is_some() {
             command.stdin(Stdio::piped());
@@ -452,8 +470,21 @@ impl GitRunner for CliRunner {
             .stderr(Stdio::piped())
             .spawn()?;
         let child = Arc::new(Mutex::new(child));
+        #[cfg(test)]
+        if let Some(hook) = &self.before_register {
+            hook();
+        }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         lock(&self.running).push((id, Arc::clone(&child)));
+        // An interrupt either locks `running` after the push and signals git
+        // itself, or locked it before, so its count, raised before it locks,
+        // shows here. If both, git is told twice, which is harmless.
+        if self.interrupts.load(Ordering::SeqCst) != seen {
+            let mut child = lock(&child);
+            if matches!(child.try_wait(), Ok(None)) {
+                terminate(&mut child);
+            }
+        }
         let output = Self::collect(&child, cmd.input());
         lock(&self.running).retain(|(other, _)| *other != id);
         if output.is_err() {
@@ -493,6 +524,7 @@ impl GitRunner for CliRunner {
     }
 
     fn interrupt(&self) {
+        self.interrupts.fetch_add(1, Ordering::SeqCst);
         for (_, child) in lock(&self.running).iter() {
             let mut child = lock(child);
             // Only a child not yet reaped still owns its pid and group.
@@ -1010,6 +1042,115 @@ mod tests {
         runner.interrupt();
     }
 
+    /// An interrupt that lands after git is spawned but before `run` has
+    /// registered it finds nothing to signal; `run` must stop git itself.
+    /// The seam holds `run` in that gap until the test has interrupted.
+    #[cfg(unix)]
+    #[test]
+    fn an_interrupt_before_git_is_registered_still_stops_it() {
+        use crate::fake::{TempDir, git};
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let tmp = TempDir::new("interrupt-gap");
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "core.hooksPath", ".git/hooks"]);
+        std::fs::create_dir_all(dir.join(".git/hooks")).unwrap();
+        let hook = dir.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, HANGING_HOOK).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("a"), "a\n").unwrap();
+        git(dir, &["add", "a"]);
+
+        // The gate: `run` reports that git is spawned, then waits for the
+        // test to let it register git.
+        let (spawned_tx, spawned_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        let runner = Arc::new(CliRunner::new(dir).pause_before_register(move || {
+            let _ = spawned_tx.send(());
+            // A dropped sender (the test failed) releases the gate too.
+            let _ = lock(&release_rx).recv();
+        }));
+        // SAFETY: `getpgrp` only reads this process's group id.
+        let ours = unsafe { libc::getpgrp() };
+        let cmd = GitCommand::new("-c")
+            .arg("user.name=t")
+            .arg("-c")
+            .arg("user.email=t@t")
+            .arg("commit")
+            .arg("-a")
+            .arg("-F")
+            .arg("-")
+            .env("OUTER_GROUP", ours.to_string())
+            .stdin(b"msg\n".to_vec())
+            .user_env();
+        // A channel, not `join`, so a lost interrupt cannot hang the test.
+        let (tx, rx) = mpsc::channel();
+        {
+            let runner = Arc::clone(&runner);
+            std::thread::spawn(move || {
+                let _ = tx.send(runner.run(&cmd));
+            });
+        }
+        // Built before anything can panic on `started`, so a failure past
+        // this point still cleans up whatever was recorded.
+        let mut hanging = GroupGuard {
+            pids: Vec::new(),
+            group: String::new(),
+        };
+        spawned_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("run never spawned git");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !dir.join("started").exists() {
+            assert!(Instant::now() < deadline, "the hook never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // The hook, its sleep, and git.
+        hanging.record(&dir.join("started"));
+        assert!(
+            lock(&runner.running).is_empty(),
+            "git is already registered"
+        );
+
+        runner.interrupt();
+        release_tx.send(()).unwrap();
+        let output = rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the interrupt before registration was lost")
+            .unwrap();
+
+        assert!(!output.success);
+        assert!(!dir.join(".git/index.lock").exists());
+    }
+
+    /// An interrupt stops only the runs already in flight, never a later one.
+    #[test]
+    fn an_interrupt_does_not_stop_a_run_that_starts_after_it() {
+        let runner = CliRunner::isolated(std::env::temp_dir());
+        runner.interrupt();
+        let output = runner
+            .run(&GitCommand::new("--version").standard_env())
+            .unwrap();
+        assert!(output.success);
+        assert!(output.stdout.starts_with(b"git version"));
+    }
+
+    /// With no interrupt, the pause between spawn and registration changes
+    /// nothing.
+    #[test]
+    fn a_run_paused_before_registration_without_an_interrupt_succeeds() {
+        let runner = CliRunner::isolated(std::env::temp_dir()).pause_before_register(|| {});
+        let output = runner
+            .run(&GitCommand::new("--version").standard_env())
+            .unwrap();
+        assert!(output.success);
+        assert!(output.stdout.starts_with(b"git version"));
+    }
+
     /// Hangs in a `sleep` that holds git's output pipes open. It announces
     /// itself only once that `sleep` exists, so a group SIGTERM from then on
     /// reaches it. The hang far outlasts the test's bound, so a failed
@@ -1040,8 +1181,9 @@ mod tests {
     /// SIGKILLs what is left of a hook's group (stopped or hanging) if the
     /// test fails before the interrupt ends it. Each pid is signalled only
     /// while it is still in git's group, and never if that group is ours, so
-    /// a reused pid or an unrelated process is never touched. It never panics: a panic inside
-    /// `drop` while the test unwinds would abort the whole test binary.
+    /// a reused pid or an unrelated process is never touched. It never
+    /// panics: a panic inside `drop` while the test unwinds would abort the
+    /// whole test binary.
     #[cfg(unix)]
     struct GroupGuard {
         pids: Vec<String>,
@@ -1207,6 +1349,9 @@ mod tests {
             .arg("-c")
             .arg("user.email=t@t")
             .arg("commit")
+            // `-a` holds the index lock while the hook runs; a plain
+            // commit has already released it.
+            .arg("-a")
             .arg("-F")
             .arg("-")
             .env("OUTER_GROUP", ours.to_string())
@@ -1247,6 +1392,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
 
+        assert!(dir.join(".git/index.lock").exists(), "git holds no lock");
         runner.interrupt();
         let output = rx
             .recv_timeout(Duration::from_secs(10))
@@ -1254,7 +1400,10 @@ mod tests {
             .unwrap();
 
         assert!(!output.success);
-        assert!(!dir.join(".git/index.lock").exists());
+        assert!(
+            !dir.join(".git/index.lock").exists(),
+            "git left its lock behind"
+        );
     }
 
     #[cfg(unix)]

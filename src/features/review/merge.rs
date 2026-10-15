@@ -14,7 +14,7 @@ use crate::refresh::{RefreshPlan, Scope};
 use kika_forge::merge::{MergeMethod, merge_options};
 use kika_forge::remote::allowed;
 use kika_forge::review::MergeState;
-use kika_forge::{CreateError, ForgeHost, ForgeRepo, PrBadge, PrState, REFRESH_LIMITED, same_repo};
+use kika_forge::{CreateError, ForgeHost, ForgeRepo, PrBadge, PrState, same_repo};
 
 const NO_PR_SHOWN: &str = "Open a pull request first";
 const MERGING: &str = "A merge is already running";
@@ -32,6 +32,9 @@ pub struct PrMerging {
 /// Why `M` cannot start a merge: only from a loaded pull request's
 /// detail screen.
 pub(crate) fn merge_disabled(state: &AppState) -> Option<Reason> {
+    if let Some(reason) = super::conversation::on_conversation(state) {
+        return Some(reason);
+    }
     let shown = matches!(state.context, Context::Review { .. })
         && matches!(
             (state.review.screen, &state.review.detail),
@@ -41,34 +44,6 @@ pub(crate) fn merge_disabled(state: &AppState) -> Option<Reason> {
 }
 
 impl AppState {
-    /// The host and repository a merge goes to, or why it may not: the
-    /// repository the detail came from, on a configured host whose
-    /// `[forge.allow]` names it and that is not rate limited now.
-    fn merge_target(&self) -> Result<(ForgeHost, ForgeRepo), Reason> {
-        let repo = self
-            .forge
-            .repo
-            .clone()
-            .or_else(|| self.review.repo.clone())
-            .ok_or(NO_FORGE)?;
-        // A repository `[forge.allow]` leaves out is never asked about.
-        let host = allowed(&repo, &self.forge.hosts).ok_or(NO_FORGE)?.clone();
-        self.merge_allowed(&host)?;
-        Ok((host, repo))
-    }
-
-    /// `host` may be asked now: it is configured and not rate limited.
-    fn merge_allowed(&self, host: &ForgeHost) -> Result<(), Reason> {
-        if !self.forge.hosts.contains(host) {
-            return Err(NO_FORGE.into());
-        }
-        let limited = self.forge.limited.get(host.as_str());
-        if limited.is_some_and(|until| *until > self.now) {
-            return Err(REFRESH_LIMITED.into());
-        }
-        Ok(())
-    }
-
     /// `M`: say why the open pull request cannot be merged, or ask how
     /// when several ways are allowed, or ask at once when one is.
     pub(crate) fn open_merge_pr(&mut self) {
@@ -90,7 +65,7 @@ impl AppState {
                 return;
             }
         };
-        let (host, repo) = match self.merge_target() {
+        let (host, repo) = match self.review_forge_target() {
             Ok(target) => target,
             Err(reason) => {
                 self.notice = Some(reason);
@@ -152,7 +127,7 @@ impl AppState {
             self.notice = Some(NO_FORGE.into());
             return vec![];
         }
-        if let Err(reason) = self.merge_allowed(&confirm.host) {
+        if let Err(reason) = self.review_host_allowed(&confirm.host) {
             self.notice = Some(reason);
             return vec![];
         }
@@ -272,7 +247,7 @@ mod tests {
     use crate::keymap::KeyPress;
     use crate::test_support::{load_list, pull_requests_fetched};
     use kika_forge::review::{MergeState, Mergeability, PrDetail, QueueKind};
-    use kika_forge::{CiState, ForgeView};
+    use kika_forge::{CiState, ForgeView, REFRESH_LIMITED};
     use kika_git::branches::{Branch, BranchName, Track};
 
     const NOW: i64 = 1_700_000_000;

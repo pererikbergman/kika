@@ -1,18 +1,24 @@
 //! A pull request's commits in the local repository: whether they are
-//! here, fetching the missing ones from the forge's remote by id, and the
-//! changed files between the merge base and the head. Ids reach argv only
+//! here, fetching the missing ones from the forge's remote by id, the
+//! changed files between the merge base and the head, and the commits in
+//! between, each of which can be reviewed on its own. Ids reach argv only
 //! as [`CommitId`]s, hex digits, so nothing in it reads as an option; no
-//! ref name from the server ever does, and no ref is written.
+//! ref name from the server ever does. The one ref written is the local
+//! branch `pr/<number>` a checkout makes or moves (see [`plan_checkout`]
+//! and [`pr_checkout_commands`]), named from the number alone.
 
 use std::collections::HashMap;
 
+use kika_git::branches::BranchName;
 use kika_git::commit_files::{
     CommitFile, CommitId, CommitRange, LineCounts, commit_files, numstat,
 };
 use kika_git::error::GitError;
 use kika_git::remote::{AskpassEnv, askpass_for, with_prompts};
 use kika_git::remotes::RemoteName;
+use kika_git::repo_state::{Operation, git_dir_command, git_dir_from, in_progress};
 use kika_git::runner::{GitCommand, GitRunner};
+use kika_git::safe_text::sanitize;
 
 /// What a changed file's line counts are known to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,13 +164,20 @@ pub fn pr_files(
         oid: head.clone(),
         parent: Some(merge_base(runner, base, head)?),
     };
-    let files = commit_files(runner, &range)?;
+    let rows = range_files(runner, &range)?;
+    Ok((range, rows))
+}
+
+/// The files `range` changes with their line counts: the whole pull
+/// request from its merge base, or one of its commits.
+pub fn range_files(runner: &dyn GitRunner, range: &CommitRange) -> Result<Vec<PrFileRow>, String> {
+    let files = commit_files(runner, range)?;
     // By name, so a pull request of thousands of files is no slower to match.
-    let stats: HashMap<Vec<u8>, LineCounts> = numstat(runner, &range)?
+    let stats: HashMap<Vec<u8>, LineCounts> = numstat(runner, range)?
         .into_iter()
         .map(|(path, counts)| (path.as_bytes().to_vec(), counts))
         .collect();
-    let rows = files
+    Ok(files
         .into_iter()
         .map(|file| {
             let counts = match stats.get(file.path.as_bytes()) {
@@ -177,8 +190,313 @@ pub fn pr_files(
             };
             PrFileRow { file, counts }
         })
-        .collect();
-    Ok((range, rows))
+        .collect())
+}
+
+/// Where the local branch `pr/<number>` stands against the pull
+/// request's head.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchAt {
+    /// No such branch: it is made at the head.
+    Absent,
+    /// It is at the head already.
+    Same,
+    /// It is at this older commit, which the head contains, so it can
+    /// move forward. Before a missing head is fetched this is only what
+    /// the branch holds; the plan made after the fetch checks it.
+    FastForward(CommitId),
+    /// It has commits the head does not: never moved by Kika.
+    Diverged,
+    /// Another worktree has it checked out: never moved by Kika.
+    OtherWorktree,
+}
+
+/// What checking out a pull request's head as `pr/<number>` would do,
+/// read from local git only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckoutPlan {
+    /// The head commit is in the local repository.
+    pub head_here: bool,
+    /// Where a missing head may be fetched from; `None` when it is here
+    /// or no remote names the reviewed repository on a configured host.
+    pub remote: Option<RemoteName>,
+    pub at: BranchAt,
+    /// The branch is the one checked out in this worktree.
+    pub current: bool,
+    /// Operations in progress in this repository, which a checkout
+    /// would mix with.
+    pub in_progress: Vec<Operation>,
+}
+
+/// The local branch a pull request is checked out as: `pr/<number>`,
+/// built from the number only, so no text from the server reaches argv.
+pub fn pr_branch(number: u64) -> BranchName {
+    BranchName(format!("pr/{number}").into_bytes())
+}
+
+/// `git for-each-ref` of `branch`: its full name, commit, whether it is
+/// `HEAD` here, and the worktree that has it checked out, NUL-separated.
+/// `%(worktreepath)` needs git 2.23; an older git fails the read, and the
+/// checkout with it.
+pub fn branch_ref_command(branch: &BranchName) -> GitCommand {
+    query(
+        GitCommand::new("for-each-ref")
+            .arg("--format=%(refname)%00%(objectname)%00%(HEAD)%00%(worktreepath)")
+            .arg(branch.full_ref()),
+    )
+}
+
+/// `git merge-base --is-ancestor <old> <head>`: exit 0 when `head`
+/// contains `old`.
+pub fn is_ancestor_command(old: &CommitId, head: &CommitId) -> GitCommand {
+    query(
+        GitCommand::new("merge-base")
+            .arg("--is-ancestor")
+            .arg(old.as_str())
+            .arg(head.as_str()),
+    )
+}
+
+/// The git commands that check out `head` as `branch`, which held `old`
+/// (`None`: no such branch) and is checked out here when `current`. Each
+/// takes only fixed words, the branch built from the number and hex ids:
+/// - absent: `checkout -q -b <branch> <head> --`;
+/// - at the head, elsewhere: `checkout -q <branch> --`;
+/// - behind, checked out: `merge --ff-only -q <head>`;
+/// - behind, elsewhere: `checkout -q <branch> --`, then the same merge.
+///
+/// The branch only moves once it is checked out, so a switch git refuses
+/// (for local changes it would overwrite) leaves it where it was. At the
+/// head and checked out, there is nothing to run: none. Run them only
+/// after [`verify_pr_branch`] says the branch is still as planned.
+pub fn pr_checkout_commands(
+    branch: &BranchName,
+    head: &CommitId,
+    old: Option<&CommitId>,
+    current: bool,
+) -> Vec<GitCommand> {
+    let switch = || crate::op::checkout_command(branch).write_env();
+    // It may run the user's post-merge hook, as any merge does.
+    let forward = || {
+        GitCommand::new("merge")
+            .arg("--ff-only")
+            .arg("-q")
+            .arg(head.as_str())
+            .user_env()
+    };
+    match old {
+        None => vec![
+            GitCommand::new("checkout")
+                .arg("-q")
+                .arg("-b")
+                .arg(branch.as_os_string())
+                .arg(head.as_str())
+                .arg("--")
+                .write_env(),
+        ],
+        Some(old) if old == head && current => vec![],
+        Some(old) if old == head => vec![switch()],
+        Some(_) if current => vec![forward()],
+        Some(_) => vec![switch(), forward()],
+    }
+}
+
+/// Whether `branch` is still where the question saw it, read again right
+/// before the checkout runs: absent when `old` is `None`, else at `old`,
+/// checked out here exactly when `current` (so `HEAD` is the branch at
+/// `old` before a merge moves it), and in no other worktree. Anything else
+/// may have moved while the question was open, and nothing runs.
+pub fn verify_pr_branch(
+    runner: &dyn GitRunner,
+    branch: &BranchName,
+    old: Option<&CommitId>,
+    current: bool,
+) -> Result<(), String> {
+    let still = match (old, read_branch(runner, branch)?) {
+        (None, None) => !current,
+        (Some(old), Some((oid, here, elsewhere))) => &oid == old && here == current && !elsewhere,
+        _ => false,
+    };
+    if still {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} moved since the question; press b again",
+            branch.display()
+        ))
+    }
+}
+
+/// `branch`'s commit, whether it is checked out here, and whether another
+/// worktree has it, or `None` when there is no such branch.
+fn read_branch(
+    runner: &dyn GitRunner,
+    branch: &BranchName,
+) -> Result<Option<(CommitId, bool, bool)>, String> {
+    let output = runner
+        .run_checked(&branch_ref_command(branch))
+        .map_err(|e| e.message_or("git could not list the branch"))?;
+    let full = branch.full_ref();
+    let full = full.as_encoded_bytes();
+    for line in output.stdout.split(|&b| b == b'\n') {
+        let fields: Vec<&[u8]> = line.split(|&b| b == 0).collect();
+        // A pattern matches below a slash too: only the branch itself counts.
+        let [name, oid, head, worktree] = fields.as_slice() else {
+            continue;
+        };
+        if *name != full {
+            continue;
+        }
+        let oid = std::str::from_utf8(oid)
+            .ok()
+            .and_then(CommitId::parse)
+            .ok_or("git listed the branch with an id Kika could not read")?;
+        let current = *head == b"*";
+        return Ok(Some((oid, current, !current && !worktree.is_empty())));
+    }
+    Ok(None)
+}
+
+/// Whether `head` contains `old`. A failure with nothing on stderr is
+/// git's "no"; anything else is an error.
+fn contains(runner: &dyn GitRunner, old: &CommitId, head: &CommitId) -> Result<bool, String> {
+    let output = runner
+        .run(&is_ancestor_command(old, head))
+        .map_err(|e| GitError::io(&e).to_string())?;
+    if output.success {
+        return Ok(true);
+    }
+    if output.stderr.iter().all(u8::is_ascii_whitespace) {
+        return Ok(false);
+    }
+    Err(format!(
+        "git merge-base failed: {}",
+        sanitize(String::from_utf8_lossy(&output.stderr).trim().as_bytes())
+    ))
+}
+
+/// The operations in progress here, read from git's own dir.
+fn operations(runner: &dyn GitRunner) -> Result<Vec<Operation>, String> {
+    let output = runner
+        .run_checked(&git_dir_command())
+        .map_err(|e| e.message_or("git could not say where its dir is"))?;
+    Ok(in_progress(&git_dir_from(&output.stdout)))
+}
+
+/// What checking out `head` as `branch` would do. Local reads only: no
+/// network, and `remote` is left for the caller to fill in.
+pub fn plan_checkout(
+    runner: &dyn GitRunner,
+    head: &CommitId,
+    branch: &BranchName,
+) -> Result<CheckoutPlan, String> {
+    let head_here = missing_commits(runner, &[head])?.is_empty();
+    let (at, current) = match read_branch(runner, branch)? {
+        None => (BranchAt::Absent, false),
+        Some((_, _, true)) => (BranchAt::OtherWorktree, false),
+        Some((old, current, false)) if &old == head => (BranchAt::Same, current),
+        // Only once the head is here can git say whether it contains the branch.
+        Some((old, current, false)) if !head_here => (BranchAt::FastForward(old), current),
+        Some((old, current, false)) => {
+            let at = if contains(runner, &old, head)? {
+                BranchAt::FastForward(old)
+            } else {
+                BranchAt::Diverged
+            };
+            (at, current)
+        }
+    };
+    Ok(CheckoutPlan {
+        head_here,
+        remote: None,
+        at,
+        current,
+        in_progress: operations(runner)?,
+    })
+}
+
+/// The most commits of a pull request offered one by one.
+pub const MAX_PR_COMMITS: usize = 250;
+
+/// One commit of a pull request, shown against its first parent, and its
+/// subject, already safe to draw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrCommit {
+    pub range: CommitRange,
+    pub subject: String,
+}
+
+/// `git log` of the commits in `range`, merge base to head, newest first,
+/// one more than [`MAX_PR_COMMITS`] so a longer list is known to be cut.
+/// Ids reach argv only as hex; `--` ends the revisions, so no path is
+/// read. No signature is checked, which would run gpg and add lines. A
+/// range with no base lists the head's history, as far as the cap.
+pub fn pr_commits_command(range: &CommitRange) -> GitCommand {
+    let revisions = match &range.parent {
+        Some(base) => format!("{}..{}", base.as_str(), range.oid.as_str()),
+        None => range.oid.as_str().to_string(),
+    };
+    query(
+        GitCommand::new("log")
+            .arg("--no-show-signature")
+            .arg("--no-color")
+            .arg("--format=%H%x00%P%x00%s")
+            .arg("-n")
+            .arg((MAX_PR_COMMITS + 1).to_string())
+            .arg(revisions)
+            .arg("--"),
+    )
+}
+
+/// The commits in `range`, oldest first, at most [`MAX_PR_COMMITS`] of
+/// the newest, and whether there were more. An id or parent that is not
+/// hex refuses the whole list rather than showing a commit against the
+/// wrong tree.
+pub fn pr_commits(
+    runner: &dyn GitRunner,
+    range: &CommitRange,
+) -> Result<(Vec<PrCommit>, bool), String> {
+    let output = runner
+        .run_checked(&pr_commits_command(range))
+        .map_err(|e| e.message_or("git log failed"))?;
+    let mut commits = output
+        .stdout
+        .split(|&b| b == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(parse_commit)
+        .collect::<Result<Vec<_>, _>>()?;
+    let truncated = commits.len() > MAX_PR_COMMITS;
+    commits.truncate(MAX_PR_COMMITS);
+    commits.reverse();
+    Ok((commits, truncated))
+}
+
+/// One `%H NUL %P NUL %s` line of [`pr_commits_command`].
+fn parse_commit(line: &[u8]) -> Result<PrCommit, String> {
+    const GARBLED: &str = "git log gave a commit Kika could not read";
+    let mut fields = line.splitn(3, |&b| b == 0);
+    let (Some(oid), Some(parents), Some(subject)) = (fields.next(), fields.next(), fields.next())
+    else {
+        return Err(GARBLED.into());
+    };
+    let id = |raw: &[u8]| {
+        std::str::from_utf8(raw)
+            .ok()
+            .and_then(CommitId::parse)
+            .ok_or_else(|| GARBLED.to_string())
+    };
+    let parent = parents
+        .split(|&b| b == b' ')
+        .find(|p| !p.is_empty())
+        .map(id)
+        .transpose()?;
+    Ok(PrCommit {
+        range: CommitRange {
+            oid: id(oid)?,
+            parent,
+        },
+        subject: sanitize(subject),
+    })
 }
 
 #[cfg(test)]
@@ -186,7 +504,7 @@ mod tests {
     use super::*;
     use crate::test_support::{STANDARD_ENV, env_list};
     use kika_git::fake::{FakeRunner, fail, ok};
-    use kika_git::runner::EnvProfile;
+    use kika_git::runner::{EnvProfile, GitOutput};
 
     fn id(hex: &str) -> CommitId {
         CommitId::parse(hex).unwrap()
@@ -396,6 +714,135 @@ mod tests {
         assert_eq!(rows[2].file.orig_path, Some("old".into()));
     }
 
+    fn log_argv(mb: &str, head: &str) -> Vec<String> {
+        [
+            "log",
+            "--no-show-signature",
+            "--no-color",
+            "--format=%H%x00%P%x00%s",
+            "-n",
+            "251",
+            &format!("{mb}..{head}"),
+            "--",
+        ]
+        .map(String::from)
+        .to_vec()
+    }
+
+    fn whole() -> CommitRange {
+        CommitRange {
+            oid: id("a1"),
+            parent: Some(id("c2")),
+        }
+    }
+
+    #[test]
+    fn the_commit_list_is_a_fixed_log_of_the_merge_base_to_the_head() {
+        let cmd = pr_commits_command(&whole());
+        assert_eq!(args(&cmd), log_argv("c2", "a1"));
+        let query = env_list(&[STANDARD_ENV.as_slice(), &[("GIT_NO_LAZY_FETCH", "1")]].concat());
+        assert_eq!(cmd.env_profile(), Some(EnvProfile::Standard));
+        assert_eq!(cmd.process_env(), query);
+    }
+
+    #[test]
+    fn commits_come_oldest_first_against_their_first_parent_with_safe_subjects() {
+        let argv = log_argv("c2", "a1");
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let fake = FakeRunner::new().expect(
+            &argv,
+            ok(b"a1\0b3 d4\0Merge main\nb3\0c2\0Fix \x1b[2Jit\x07\n"),
+        );
+        let (commits, truncated) = pr_commits(&fake, &whole()).unwrap();
+        assert!(!truncated);
+        assert_eq!(
+            commits,
+            [
+                PrCommit {
+                    range: CommitRange {
+                        oid: id("b3"),
+                        parent: Some(id("c2"))
+                    },
+                    subject: "Fix \u{FFFD}[2Jit\u{FFFD}".into(),
+                },
+                PrCommit {
+                    range: CommitRange {
+                        oid: id("a1"),
+                        parent: Some(id("b3"))
+                    },
+                    subject: "Merge main".into(),
+                },
+            ]
+        );
+        fake.assert_done();
+    }
+
+    #[test]
+    fn past_250_commits_the_list_says_it_is_cut_and_keeps_the_latest() {
+        let argv = log_argv("c2", "a1");
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let lines = |n: usize| -> Vec<u8> {
+            (0..n)
+                .flat_map(|i| format!("{:x}\0c2\0c {i}\n", 0x1000 + i).into_bytes())
+                .collect()
+        };
+        let fake = FakeRunner::new()
+            .expect(&argv, ok(&lines(251)))
+            .expect(&argv, ok(&lines(250)));
+        let (commits, truncated) = pr_commits(&fake, &whole()).unwrap();
+        assert!(truncated);
+        assert_eq!(commits.len(), MAX_PR_COMMITS);
+        // git lists newest first: the 251st line, the oldest, is the one left out.
+        assert_eq!(commits[0].subject, "c 249");
+        assert_eq!(commits[249].subject, "c 0");
+        let (commits, truncated) = pr_commits(&fake, &whole()).unwrap();
+        assert!(!truncated);
+        assert_eq!(commits.len(), 250);
+    }
+
+    #[test]
+    fn a_non_hex_id_or_parent_or_a_failed_log_refuses_the_whole_list() {
+        let argv = log_argv("c2", "a1");
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let fake = FakeRunner::new()
+            .expect(&argv, ok(b"a1\0c2\0ok\n--evil\0c2\0bad\n"))
+            .expect(&argv, ok(b"a1\0-c2\0bad\n"))
+            .expect(&argv, ok(b"a1 no separators\n"))
+            .expect(&argv, fail("fatal: bad revision \x1b[2J\n"));
+        for _ in 0..3 {
+            assert!(pr_commits(&fake, &whole()).is_err());
+        }
+        let message = pr_commits(&fake, &whole()).unwrap_err();
+        assert!(!message.contains('\x1b'), "{message}");
+        fake.assert_done();
+    }
+
+    #[test]
+    fn a_root_commit_has_no_parent_and_a_range_without_a_base_lists_from_the_head() {
+        let root = CommitRange {
+            oid: id("a1"),
+            parent: None,
+        };
+        assert_eq!(
+            args(&pr_commits_command(&root)),
+            [
+                "log",
+                "--no-show-signature",
+                "--no-color",
+                "--format=%H%x00%P%x00%s",
+                "-n",
+                "251",
+                "a1",
+                "--"
+            ]
+        );
+        let argv = log_argv("c2", "a1");
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let fake = FakeRunner::new().expect(&argv, ok(b"a1\0\0root\n"));
+        let (commits, _) = pr_commits(&fake, &whole()).unwrap();
+        assert_eq!(commits[0].range.parent, None);
+    }
+
     #[test]
     fn unrelated_histories_or_a_garbled_answer_say_why() {
         let fake = FakeRunner::new()
@@ -403,6 +850,150 @@ mod tests {
             .expect(&["merge-base", "b0", "a1"], ok(b"--evil\n"));
         assert!(merge_base(&fake, &id("b0"), &id("a1")).is_err());
         assert!(merge_base(&fake, &id("b0"), &id("a1")).is_err());
+    }
+
+    const HEAD: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+    const OLD: &str = "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0";
+
+    fn ref_line(name: &str, oid: &str, head: &str, worktree: &str) -> Vec<u8> {
+        format!("{name}\0{oid}\0{head}\0{worktree}\n").into_bytes()
+    }
+
+    const FOR_EACH_REF: [&str; 3] = [
+        "for-each-ref",
+        "--format=%(refname)%00%(objectname)%00%(HEAD)%00%(worktreepath)",
+        "refs/heads/pr/7",
+    ];
+
+    /// A runner that answers the plan's reads: the head here or not, the
+    /// branch's line, then `is_ancestor` when asked.
+    fn plan_runner(here: bool, listed: &[u8], ancestor: Option<GitOutput>) -> FakeRunner {
+        let has = format!("{HEAD}^{{commit}}");
+        let fake = FakeRunner::new()
+            .expect(
+                &["cat-file", "-e", &has],
+                if here { ok(b"") } else { fail("") },
+            )
+            .expect(&FOR_EACH_REF, ok(listed));
+        let fake = match ancestor {
+            Some(answer) => fake.expect(&["merge-base", "--is-ancestor", OLD, HEAD], answer),
+            None => fake,
+        };
+        fake.expect(
+            &["rev-parse", "--absolute-git-dir"],
+            ok(b"/nonexistent/kika-test/.git\n"),
+        )
+    }
+
+    fn plan(fake: &FakeRunner) -> Result<CheckoutPlan, String> {
+        let result = plan_checkout(fake, &id(HEAD), &pr_branch(7));
+        fake.assert_done();
+        result
+    }
+
+    #[test]
+    fn the_branch_is_named_from_the_number_and_its_reads_are_fixed_queries() {
+        assert_eq!(pr_branch(7), BranchName::from("pr/7"));
+        assert_eq!(pr_branch(12345).display(), "pr/12345");
+        assert_eq!(args(&branch_ref_command(&pr_branch(7))), FOR_EACH_REF);
+        assert_eq!(
+            args(&is_ancestor_command(&id(OLD), &id(HEAD))),
+            ["merge-base", "--is-ancestor", OLD, HEAD]
+        );
+        let query = env_list(&[STANDARD_ENV.as_slice(), &[("GIT_NO_LAZY_FETCH", "1")]].concat());
+        for cmd in [
+            branch_ref_command(&pr_branch(7)),
+            is_ancestor_command(&id(OLD), &id(HEAD)),
+        ] {
+            assert_eq!(cmd.process_env(), query, "{cmd:?}");
+        }
+        // Each checkout names only fixed words, the branch and hex ids.
+        let steps = |old: Option<&str>, current| {
+            let old = old.map(id);
+            pr_checkout_commands(&pr_branch(7), &id(HEAD), old.as_ref(), current)
+                .iter()
+                .map(args)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            steps(None, false),
+            [["checkout", "-q", "-b", "pr/7", HEAD, "--"]]
+        );
+        assert_eq!(steps(Some(HEAD), false), [["checkout", "-q", "pr/7", "--"]]);
+        assert!(steps(Some(HEAD), true).is_empty());
+        assert_eq!(steps(Some(OLD), true), [["merge", "--ff-only", "-q", HEAD]]);
+        assert_eq!(
+            steps(Some(OLD), false),
+            [
+                vec!["checkout", "-q", "pr/7", "--"],
+                vec!["merge", "--ff-only", "-q", HEAD],
+            ]
+        );
+    }
+
+    #[test]
+    fn each_place_of_the_branch_plans_as_itself() {
+        let pr7 = "refs/heads/pr/7";
+        let absent = plan(&plan_runner(true, b"", None)).unwrap();
+        assert_eq!(
+            absent,
+            CheckoutPlan {
+                head_here: true,
+                remote: None,
+                at: BranchAt::Absent,
+                current: false,
+                in_progress: vec![],
+            }
+        );
+        // Only the branch itself counts, not one below it.
+        let below = ref_line("refs/heads/pr/7/x", OLD, " ", "");
+        assert_eq!(
+            plan(&plan_runner(true, &below, None)).unwrap().at,
+            BranchAt::Absent
+        );
+        let same = plan(&plan_runner(true, &ref_line(pr7, HEAD, "*", "/w"), None)).unwrap();
+        assert_eq!((same.at, same.current), (BranchAt::Same, true));
+        let behind = ref_line(pr7, OLD, " ", "");
+        let ff = plan(&plan_runner(true, &behind, Some(ok(b"")))).unwrap();
+        assert_eq!(ff.at, BranchAt::FastForward(id(OLD)));
+        assert!(!ff.current);
+        let diverged = plan(&plan_runner(true, &behind, Some(fail("")))).unwrap();
+        assert_eq!(diverged.at, BranchAt::Diverged);
+        let elsewhere = ref_line(pr7, OLD, " ", "/other/worktree");
+        assert_eq!(
+            plan(&plan_runner(true, &elsewhere, None)).unwrap().at,
+            BranchAt::OtherWorktree
+        );
+        // A missing head cannot be compared yet: no merge-base runs.
+        let missing = plan(&plan_runner(false, &behind, None)).unwrap();
+        assert!(!missing.head_here);
+        assert_eq!(missing.at, BranchAt::FastForward(id(OLD)));
+    }
+
+    #[test]
+    fn a_failed_read_or_a_garbled_id_refuses_the_plan() {
+        let pr7 = "refs/heads/pr/7";
+        let behind = ref_line(pr7, OLD, " ", "");
+        let has = format!("{HEAD}^{{commit}}");
+        let broken = FakeRunner::new()
+            .expect(&["cat-file", "-e", &has], ok(b""))
+            .expect(&FOR_EACH_REF, ok(&behind))
+            .expect(
+                &["merge-base", "--is-ancestor", OLD, HEAD],
+                fail("fatal: bad object"),
+            );
+        assert!(plan(&broken).unwrap_err().contains("bad object"));
+        let fake = FakeRunner::new()
+            .expect(&["cat-file", "-e", &has], ok(b""))
+            .expect(&FOR_EACH_REF, ok(&ref_line(pr7, "--evil", " ", "")));
+        assert!(plan(&fake).is_err());
+        let fake = FakeRunner::new()
+            .expect(&["cat-file", "-e", &has], ok(b""))
+            .expect(
+                &FOR_EACH_REF,
+                fail("fatal: unknown field name: worktreepath"),
+            );
+        assert!(plan(&fake).unwrap_err().contains("worktreepath"));
     }
 
     #[test]
@@ -459,7 +1050,17 @@ mod tests {
         );
 
         let (range, rows) = pr_files(&runner, &base, &head).unwrap();
-        assert_eq!(range.parent, Some(base));
+        assert_eq!(range.parent, Some(base.clone()));
+        let (commits, truncated) = pr_commits(&runner, &range).unwrap();
+        assert!(!truncated);
+        assert_eq!(
+            commits,
+            [PrCommit {
+                range: range.clone(),
+                subject: "head".into()
+            }]
+        );
+        assert_eq!(range_files(&runner, &commits[0].range).unwrap(), rows);
         assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0].counts,
@@ -468,5 +1069,170 @@ mod tests {
                 removed: 1
             }
         );
+    }
+
+    #[test]
+    fn against_real_git_a_pull_request_branch_is_made_moved_forward_and_never_forced() {
+        use crate::op::{GitOp, run_op};
+        use kika_git::CliRunner;
+        use kika_git::fake::{TempDir, git};
+
+        let tmp = TempDir::new("pr-checkout");
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let run = |args: &[&str]| git(&work, args);
+        let rev = |name: &str| {
+            String::from_utf8(git(&work, &["rev-parse", name]))
+                .unwrap()
+                .trim()
+                .to_string()
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.name", "T"]);
+        run(&["config", "user.email", "t@example.com"]);
+        let commit = |file: &str, text: &str| {
+            std::fs::write(work.join(file), text).unwrap();
+            run(&["add", "-A"]);
+            run(&["commit", "-q", "-m", text]);
+            id(&rev("HEAD"))
+        };
+        let base = commit("a.txt", "base");
+        run(&["checkout", "-q", "-b", "feature"]);
+        let h1 = commit("a.txt", "one");
+        let h2 = commit("a.txt", "two");
+        run(&["checkout", "-q", "main"]);
+        let runner = CliRunner::isolated(&work);
+        let branch = pr_branch(7);
+        let on = || {
+            String::from_utf8(git(&work, &["symbolic-ref", "--short", "HEAD"]))
+                .unwrap()
+                .trim()
+                .to_string()
+        };
+        let op = |head: &CommitId, plan: &CheckoutPlan| GitOp::CheckoutPrBranch {
+            number: 7,
+            branch: branch.clone(),
+            head: head.clone(),
+            old: match &plan.at {
+                BranchAt::Absent => None,
+                BranchAt::Same => Some(head.clone()),
+                BranchAt::FastForward(old) => Some(old.clone()),
+                other => panic!("{other:?}"),
+            },
+            current: plan.current,
+        };
+
+        // Absent: made at the head and checked out.
+        let plan = plan_checkout(&runner, &h1, &branch).unwrap();
+        assert_eq!((plan.at.clone(), plan.head_here), (BranchAt::Absent, true));
+        run_op(&runner, &op(&h1, &plan)).unwrap();
+        assert_eq!(
+            (rev("pr/7"), on()),
+            (h1.as_str().to_string(), "pr/7".into())
+        );
+
+        // A later head, checked out elsewhere: moved forward and switched to.
+        run(&["checkout", "-q", "main"]);
+        let plan = plan_checkout(&runner, &h2, &branch).unwrap();
+        assert_eq!(plan.at, BranchAt::FastForward(h1.clone()));
+        assert!(!plan.current);
+        run_op(&runner, &op(&h2, &plan)).unwrap();
+        assert_eq!(
+            (rev("pr/7"), on()),
+            (h2.as_str().to_string(), "pr/7".into())
+        );
+
+        // Checked out and behind: a fast-forward merge.
+        run(&["reset", "-q", "--hard", h1.as_str()]);
+        let plan = plan_checkout(&runner, &h2, &branch).unwrap();
+        assert_eq!(
+            (plan.at.clone(), plan.current),
+            (BranchAt::FastForward(h1.clone()), true)
+        );
+        run_op(&runner, &op(&h2, &plan)).unwrap();
+        assert_eq!(
+            (rev("pr/7"), on()),
+            (h2.as_str().to_string(), "pr/7".into())
+        );
+        let plan = plan_checkout(&runner, &h2, &branch).unwrap();
+        assert_eq!((plan.at, plan.current), (BranchAt::Same, true));
+
+        // Diverged, as after a force-push: planned as such, left alone.
+        run(&["checkout", "-q", "main"]);
+        let side = commit("b.txt", "side");
+        run(&["branch", "-q", "-f", "pr/7", side.as_str()]);
+        let plan = plan_checkout(&runner, &h2, &branch).unwrap();
+        assert_eq!(plan.at, BranchAt::Diverged);
+        assert_eq!(rev("pr/7"), side.as_str());
+
+        // A stale old id: refused before anything runs, nothing moves.
+        run(&["branch", "-q", "-f", "pr/7", h1.as_str()]);
+        let stale = GitOp::CheckoutPrBranch {
+            number: 7,
+            branch: branch.clone(),
+            head: h2.clone(),
+            old: Some(base.clone()),
+            current: false,
+        };
+        assert!(run_op(&runner, &stale).is_err());
+        assert_eq!(
+            (rev("pr/7"), on()),
+            (h1.as_str().to_string(), "main".into())
+        );
+        let main = rev("main");
+
+        // Planned on pr/7, then main checked out before `y`: no merge
+        // lands on main.
+        run(&["checkout", "-q", "pr/7"]);
+        let plan = plan_checkout(&runner, &h2, &branch).unwrap();
+        assert!(plan.current);
+        let planned = op(&h2, &plan);
+        run(&["checkout", "-q", "main"]);
+        let refused = run_op(&runner, &planned).unwrap_err();
+        assert!(refused.contains("moved since the question"), "{refused}");
+        assert_eq!((rev("main"), on()), (main.clone(), "main".into()));
+        assert_eq!(rev("pr/7"), h1.as_str());
+
+        // Planned from main, then pr/7 checked out before `y`.
+        let plan = plan_checkout(&runner, &h2, &branch).unwrap();
+        assert!(!plan.current);
+        let planned = op(&h2, &plan);
+        run(&["checkout", "-q", "pr/7"]);
+        assert!(run_op(&runner, &planned).is_err());
+        assert_eq!(
+            (rev("pr/7"), on()),
+            (h1.as_str().to_string(), "pr/7".into())
+        );
+
+        // A switch git refuses for local changes leaves pr/7 unmoved.
+        run(&["checkout", "-q", "main"]);
+        let plan = plan_checkout(&runner, &h2, &branch).unwrap();
+        std::fs::write(work.join("a.txt"), "local edit").unwrap();
+        assert!(run_op(&runner, &op(&h2, &plan)).is_err());
+        assert_eq!(
+            (rev("pr/7"), on()),
+            (h1.as_str().to_string(), "main".into())
+        );
+        run(&["checkout", "-q", "--", "a.txt"]);
+
+        // Another worktree's branch is never moved.
+        let other = tmp.path().join("other");
+        let other_path = other.to_string_lossy().into_owned();
+        run(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "pr/8",
+            &other_path,
+            h1.as_str(),
+        ]);
+        let plan = plan_checkout(&runner, &h2, &pr_branch(8)).unwrap();
+        assert_eq!(plan.at, BranchAt::OtherWorktree);
+
+        // An operation in progress is seen.
+        std::fs::write(work.join(".git/BISECT_LOG"), "").unwrap();
+        let plan = plan_checkout(&runner, &h2, &branch).unwrap();
+        assert_eq!(plan.in_progress, [Operation::Bisect]);
     }
 }

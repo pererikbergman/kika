@@ -97,7 +97,8 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         GitOp::Checkout(_)
         | GitOp::CreateBranch { .. }
         | GitOp::CreateBranchAt { .. }
-        | GitOp::CheckoutTracking { .. } => (
+        | GitOp::CheckoutTracking { .. }
+        | GitOp::CheckoutPrBranch { .. } => (
             &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits][..],
             Selection::KeepPath,
         ),
