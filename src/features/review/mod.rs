@@ -8,7 +8,8 @@
 //! conversation of comments and review bodies (`conversation.rs`, drawn
 //! by `conversation_view.rs`), replying to a thread, resolving it and
 //! commenting on the pull request on GitHub (`discussion_write.rs`),
-//! merging it from the detail
+//! opening the line in view on GitHub (`line_link.rs`), merging it
+//! from the detail
 //! (`merge.rs`), checking its head out as the local branch `pr/<number>`
 //! and going to the workspace (`checkout.rs`), the markdown renderer for
 //! its body (`markdown.rs`), the pending review of line comments kept on
@@ -29,7 +30,7 @@
 //! `AppIntent::Review`, and its one `update` arm calls [`update`] here.
 //! `update.rs` holds only that function; it dispatches to the handlers in
 //! `state.rs`, `files.rs`, `commit_view.rs`, `viewed.rs`, `threads.rs`,
-//! `reader.rs`, `conversation.rs`, `discussion_write.rs`, `merge.rs`,
+//! `reader.rs`, `conversation.rs`, `discussion_write.rs`, `line_link.rs`, `merge.rs`,
 //! `checkout.rs`, `pending.rs`, `comment_pick.rs` and `comment_editor.rs`.
 //! The review guards on core arms (`ScrollDiff`, `OpenSearch`,
 //! `DiffEscape`) stay in core.
@@ -43,8 +44,9 @@
 //!   `thread_reader_open`, `composer_open`, `pending_list_open` and
 //!   `comment_pick_open`, which core focus uses, and those in `keys.rs`;
 //! - the handlers in `state.rs`, `files.rs`, `commit_view.rs`, `viewed.rs`,
-//!   `threads.rs`, `merge.rs` and `checkout.rs` that `update` calls,
-//!   including the `review_files_shown` guard;
+//!   `threads.rs`, `line_link.rs`, `merge.rs` and `checkout.rs` that
+//!   `update` calls, including the `review_files_shown` guard and
+//!   `open_line_disabled`;
 //! - `pr_branch`, `verify_pr_branch` and `pr_checkout_commands`
 //!   (`git.rs`), which core's `GitOp::CheckoutPrBranch` is named, checked
 //!   and run by;
@@ -82,6 +84,7 @@ mod files;
 mod git;
 mod intent;
 pub(crate) mod keys;
+mod line_link;
 mod markdown;
 mod merge;
 mod pending;
