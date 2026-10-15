@@ -546,6 +546,16 @@ pull request, then to the queue, then to the workspace.
 - Each change is written as soon as you make it, one write at a time. If
   you quit while a write is still running and you changed something after
   it started, that newest change can be lost.
+- `o` on the files screen opens the top line of the diff on GitHub's page
+  of the pull request, with `browser`: the first numbered row at the top,
+  or the selected thread's line (after `]` or `[`) while its row is in
+  view. The bar then names the side and line opened, such as
+  `Opening R12 on GitHub: src/cache.rs`. The page is
+  `https://<host>/<owner>/<name>/pull/<n>/files#diff-<sha256 of the path><L|R><line>`,
+  or `…/pull/<n>/commits/<id>#diff-…` in a commit's view; `L` is the old
+  side and `R` the new. It asks GitHub nothing: the address is built
+  locally. It is off, saying why, with no `browser`, no numbered line in
+  view, or a file whose name is not UTF-8.
 
 - GitHub is asked only when you enter review mode, open a pull request
   (which reads its viewed marks in up to 10 calls), press `r` or answer
@@ -1912,6 +1922,7 @@ lines changed still read `outdated`.
 | `review_files.next_thread` | `]` | Go to the next unresolved review thread | |
 | `review_files.prev_thread` | `[` | Go to the previous unresolved review thread | |
 | `review_files.thread` | `enter` | Read the selected review thread, or the file's first, with every comment in full | |
+| `review_files.open_line` | `o` | Open the selected thread's line, else the top line, on GitHub's pull request page | locked |
 | `review_files.comment` | `a` | Pick a diff line or range and write a comment on it, kept in the pending review | |
 | `review_files.pending` | `P` | List the pending review's comments, to edit or delete them | |
 | `review_diff.down` | `j`, `down` | Scroll the diff down a line | |

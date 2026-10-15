@@ -50,6 +50,7 @@ pub(crate) fn update(state: &mut AppState, intent: ReviewIntent) -> Vec<Effect> 
         ReviewIntent::ThreadReaderScroll(by) => state.scroll_thread_reader(by),
         ReviewIntent::ThreadReaderStep(delta) => state.step_thread_reader(delta),
         ReviewIntent::CloseThreadReader => state.close_thread_reader(),
+        ReviewIntent::OpenLineOnForge => return state.open_review_line(),
         ReviewIntent::DiscussionLoaded {
             tag,
             number,

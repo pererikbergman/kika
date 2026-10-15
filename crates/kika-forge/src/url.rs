@@ -4,6 +4,7 @@
 //! and each part is checked again here, so a URL is never built from
 //! anything a parser upstream let slip.
 
+use super::anchor::{GhLine, GhSide};
 use super::remote::{matches, parse_remote};
 use super::{ForgeHost, ForgeRepo};
 use kika_git::branches::BranchName;
@@ -51,11 +52,7 @@ fn segment_ok(segment: &str) -> bool {
 /// The page of commit `id`. GitLab keeps its pages under `/-/`.
 pub fn commit_url(kind: ForgeKind, repo: &ForgeRepo, id: &CommitId) -> Option<String> {
     let base = https_base(repo)?;
-    let hex = id.as_str();
-    // `CommitId` is hex already; checked again, as every part here is.
-    if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
+    let hex = commit_hex(id.as_str())?;
     Some(match kind {
         ForgeKind::GitHub => format!("{base}/commit/{hex}"),
         ForgeKind::GitLab => format!("{base}/-/commit/{hex}"),
@@ -65,6 +62,51 @@ pub fn commit_url(kind: ForgeKind, repo: &ForgeRepo, id: &CommitId) -> Option<St
 /// GitHub pull request `number`'s page.
 pub fn pull_url(repo: &ForgeRepo, number: u64) -> Option<String> {
     Some(format!("{}/pull/{number}", https_base(repo)?))
+}
+
+/// Line `line` of `path` on pull request `number`'s page: its files view,
+/// or with `commit`, that commit's view. GitHub names a file's block by
+/// the SHA-256 of its name, and a line by side (`L` old, `R` new) and
+/// number. `None` when a part is not plain or the line is 0.
+pub fn pr_line_url(
+    repo: &ForgeRepo,
+    number: u64,
+    commit: Option<&CommitId>,
+    path: &str,
+    line: GhLine,
+) -> Option<String> {
+    if line.line == 0 {
+        return None;
+    }
+    let pull = pull_url(repo, number)?;
+    let page = match commit {
+        None => format!("{pull}/files"),
+        Some(id) => format!("{pull}/commits/{}", commit_hex(id.as_str())?),
+    };
+    let side = match line.side {
+        GhSide::Left => 'L',
+        GhSide::Right => 'R',
+    };
+    Some(format!(
+        "{page}#diff-{}{side}{}",
+        sha256_hex(path.as_bytes()),
+        line.line
+    ))
+}
+
+/// A commit id, when it is hex: `CommitId` is already, and it is checked
+/// again here, as every part is.
+fn commit_hex(hex: &str) -> Option<&str> {
+    (!hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit())).then_some(hex)
+}
+
+/// SHA-256 of `bytes`, lowercase hex.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// GitLab's merge requests whose source is `branch`, in any state: with
@@ -210,6 +252,71 @@ mod tests {
             assert_eq!(pull_url(&bad, 1), None, "{bad:?}");
             assert_eq!(gitlab_mrs_url(&bad, &"b".into()), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_pr_line_url_points_at_the_files_view_or_the_commit_at_the_side_and_line() {
+        let r = repo("github.com", "acme", "widgets");
+        let new = GhLine {
+            side: GhSide::Right,
+            line: 12,
+        };
+        let old = GhLine {
+            side: GhSide::Left,
+            line: 3,
+        };
+        let hash = "42cb6807ad74b3e201c5a7ca98b911c5fa08380e942be6e4ac5807f8377f87fc";
+        assert_eq!(
+            pr_line_url(&r, 7, None, "src/main.rs", new).as_deref(),
+            Some(format!("https://github.com/acme/widgets/pull/7/files#diff-{hash}R12").as_str())
+        );
+        assert_eq!(
+            pr_line_url(&r, 7, None, "src/main.rs", old).as_deref(),
+            Some(format!("https://github.com/acme/widgets/pull/7/files#diff-{hash}L3").as_str())
+        );
+        let id = CommitId::parse(OID).unwrap();
+        assert_eq!(
+            pr_line_url(&r, 7, Some(&id), "src/main.rs", new).as_deref(),
+            Some(
+                format!("https://github.com/acme/widgets/pull/7/commits/{OID}#diff-{hash}R12")
+                    .as_str()
+            )
+        );
+    }
+
+    #[test]
+    fn a_pr_line_url_is_none_for_a_bad_part_or_line_zero() {
+        let line = GhLine {
+            side: GhSide::Right,
+            line: 1,
+        };
+        for bad in [
+            repo("github.com:8443", "o", "r"),
+            repo("github.com", "o/x", "r"),
+            repo("github.com", "..", "r"),
+        ] {
+            assert_eq!(pr_line_url(&bad, 1, None, "a", line), None, "{bad:?}");
+        }
+        let r = repo("github.com", "o", "r");
+        let zero = GhLine { line: 0, ..line };
+        assert_eq!(pr_line_url(&r, 1, None, "a", zero), None);
+        // `CommitId` cannot hold one, but the id is checked again here.
+        for bad in ["", "g123", "12 34", "ab/cd"] {
+            assert_eq!(commit_hex(bad), None, "{bad:?}");
+        }
+        assert_eq!(commit_hex(OID), Some(OID));
+    }
+
+    #[test]
+    fn sha256_matches_the_standard_vectors() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]

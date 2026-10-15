@@ -653,6 +653,7 @@ pub const REPO_LOCKED: &[&str] = &[
     "review.back",
     "review.files",
     "review_files.viewed",
+    "review_files.open_line",
     "create_pull_request.yes",
     "create_pull_request.no",
     "create_pull_request.quit",
@@ -5282,6 +5283,8 @@ mod tests {
                     | Review(ReviewIntent::OpenFiles)
                     // A viewed mark reaches GitHub.
                     | Review(ReviewIntent::ToggleViewed)
+                    // It starts the browser.
+                    | Review(ReviewIntent::OpenLineOnForge)
                     // A resolve reaches GitHub; a reply or comment is
                     // posted there after its question.
                     | Review(ReviewIntent::ReplyToThread)
@@ -5415,6 +5418,7 @@ mod tests {
                 "review.files",
                 "review.comment_general",
                 "review_files.viewed",
+                "review_files.open_line",
                 "review_thread.reply",
                 "review_thread.resolve",
                 "merge_pr.yes",
@@ -5929,6 +5933,7 @@ mod tests {
         "review_files.next_thread",
         "review_files.prev_thread",
         "review_files.thread",
+        "review_files.open_line",
         "review_diff.down",
         "review_diff.up",
         "review_diff.page_down",

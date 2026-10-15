@@ -46,7 +46,7 @@ src/                       the kika binary, depends on both
 ```
 
 - `kika-git` depends on no Kika crate. Its third-party deps are `ratatui` (only for `Span::width` in `diff.rs`, so emoji widths stay exactly as drawn) and `libc` on unix, both already in the tree.
-- `kika-forge` depends on `kika-git`, `serde` and `serde_json`.
+- `kika-forge` depends on `kika-git`, `serde` and `serde_json` (it later gained `sha2`, and `libc` on unix; see the 2026-10-15 note under Outcome).
 - `kika` depends on both. No crate depends on `kika`, and Cargo cannot let one.
 - No new third-party dependency. `Cargo.lock` gains only the two path packages.
 
@@ -120,3 +120,6 @@ Bad:
 - The test count is 3048, as before: 2485 `kika` unit tests, 13 in `tests/interactive_rebase.rs`, 445 in `kika-git` and 105 in `kika-forge`. 550 tests were renamed: they lost their `git::` or `forge::` prefix. No assertion changed.
 - noupling 0.9.2: the health score went from 11.2 to 99.1, and the Issues from 19 to 12. Gone: `coupling_violation:src/e2e -> src/forge`, `coupling_violation:src/e2e -> src/git`, `coupling_violation:src/features -> src/forge`, `coupling_violation:src/features -> src/git`, `coupling_violation:src/forge -> src/git`, `red_flag:fused_sibling:src/features -> src/git`, `zone_flag:src/forge`, `zone_flag:src/git`. New: `zone_flag:src/features/custom_commands` (does not score).
 - `cargo check --workspace --all-targets --target x86_64-pc-windows-gnu` has no errors and the same four unused-import warnings as before the move. It found the one not-unix `path::os_string` that the macOS build cannot see.
+- 2026-10-15, later dependencies of `kika-forge`, both already in `Cargo.lock`, so nothing new is downloaded:
+  - `libc` 0.2, on unix only (#56): the open flags that keep a pending-review store file from being followed through a link or blocking.
+  - `sha2` 0.10 (#62): GitHub names a file's block on a pull request page `diff-<SHA-256 of the path>`, so the URL that opens a diff line there needs it.
