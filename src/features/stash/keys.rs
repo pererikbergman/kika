@@ -121,7 +121,11 @@ pub(crate) const STASH_APART: &str = "Stash deleted files apart from untracked";
 
 /// Why a staged rename is refused when a file sits at its old path again,
 /// naming that file, and why one that only changes case is refused.
-pub(crate) use super::push::{STASH_RENAME_CASE, stash_rename_taken_reason};
+pub(crate) use super::push::{stash_rename_case_reason, stash_rename_taken_reason};
+
+/// The plain text of the case-only reason, which the tests compare with.
+#[cfg(test)]
+pub(crate) use super::push::STASH_RENAME_CASE;
 
 /// The plain text of the taken-path reason, which the tests compare with.
 #[cfg(test)]
@@ -178,7 +182,7 @@ pub(crate) fn stash_file_disabled(state: &AppState) -> Option<Reason> {
             if entries.is_empty() {
                 Some("No file selected".into())
             } else if case_only {
-                Some(STASH_RENAME_CASE.into())
+                Some(stash_rename_case_reason())
             } else if let Some(path) = renamed_taken {
                 Some(stash_rename_taken_reason(path))
             } else if deleted_taken {

@@ -82,7 +82,8 @@ fn nudge(area: Rect, depth: usize) -> Rect {
 /// italic, not only grey, and says why after its label. A row wider than
 /// the screen ends in `…`, as the bar's notice does: the reason gives way
 /// first, so the label stays whole while it fits. A reason ending in a
-/// path keeps the file name (`fit_reason`).
+/// path keeps the file name, and one with marked advice keeps the advice
+/// (`fit_reason`).
 fn render_menu(state: &AppState, id: MenuId, cursor: Option<usize>, frame: &mut Frame, area: Rect) {
     let title = format!(" {} ", id.title());
     let room = usize::from(area.width.saturating_sub(2));
@@ -643,20 +644,71 @@ mod tests {
                 assert!(shown.starts_with('…'), "{width}: {shown:?}");
             }
         }
-        // Any other reason is cut at its end.
+        // A reason with marked advice keeps the advice: the words before
+        // it give way first.
         let case_only = stash_menu_over(vec![renamed("old.txt", "Old.txt")]);
-        let reason = crate::features::stash::keys::stash_file_disabled(&case_only).unwrap();
-        for width in [80, 40] {
-            let (_, rows) = draw(&case_only, width, 24);
+        let advice = "use Stash all changes… and apply it on this commit";
+        for (width, height) in [(80, 24), (60, 24), (40, 12)] {
+            let (_, rows) = draw(&case_only, width, height);
             let row = menu_row(&rows, " Stash selected files…");
             assert!(row.starts_with(label), "{width}: {rows:#?}");
             let shown = row[label.len()..].trim_end();
-            // Cut, not clipped: the end of the reason gives way to `…`.
-            assert!(shown.ends_with('…'), "{width}: {shown:?}");
-            let kept = shown.trim_end_matches('…');
-            assert!(reason.starts_with(kept), "{width}: {shown:?}");
-            if width == 80 {
-                assert!(kept.starts_with("This rename only changes"), "{shown:?}");
+            match width {
+                80 => assert_eq!(shown, advice, "{rows:#?}"),
+                // Too narrow for the advice whole: its start stays.
+                _ => {
+                    assert!(shown.starts_with("use Stash"), "{width}: {shown:?}");
+                    assert!(shown.ends_with('…'), "{width}: {shown:?}");
+                }
+            }
+        }
+    }
+
+    /// The text inside the box titled `title`, row by row, joined with
+    /// spaces, so wrapped words read as one line.
+    fn popup_text(rows: &[String], title: &str) -> String {
+        let (x, y) = find(rows, title);
+        let left = usize::from(x) - 2;
+        let top: Vec<char> = rows[usize::from(y)].chars().collect();
+        let right = (left + 1..top.len())
+            .find(|&i| top[i] == '┐')
+            .unwrap_or_else(|| panic!("no corner: {rows:#?}"));
+        let inside = rows[usize::from(y) + 1..].iter().map_while(|row| {
+            let row: Vec<char> = row.chars().collect();
+            (row[left] == '│').then(|| {
+                let text: String = row[left + 1..right].iter().collect();
+                text.trim().to_string()
+            })
+        });
+        inside.collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn a_case_rename_stash_refusal_shows_whole_in_the_error_popup() {
+        use crate::features::stash::apply::{STASH_CASE_BASE, STASH_CASE_DIRTY};
+        use crate::op_slot::{failure_next, failure_title};
+        let op = crate::op::GitOp::StashPop(crate::features::stash::git::StashRef {
+            index: 0,
+            oid: kika_git::commit_files::CommitId::parse("5a5a5a").unwrap(),
+        });
+        for (message, key) in [
+            (STASH_CASE_BASE, "apply it on the commit it was made on."),
+            (STASH_CASE_DIRTY, "Commit or stash them first."),
+        ] {
+            for (width, height) in [(80, 24), (40, 12)] {
+                let mut state = workspace(&["a.rs"]);
+                state.popups = vec![Popup::Error(ErrorPopup::new(
+                    failure_title(&op),
+                    message,
+                    failure_next(&op),
+                ))];
+                let (_, rows) = draw(&state, width, height);
+                let text = popup_text(&rows, "Could not pop the stash");
+                assert!(contains(&rows, "Could not pop the stash"), "{rows:#?}");
+                assert!(text.contains(message), "{width}x{height}: {rows:#?}");
+                assert!(text.contains(key), "{width}x{height}: {rows:#?}");
+                assert!(text.contains("The stash was kept."), "{rows:#?}");
+                assert!(contains(&rows, "Esc: close"), "{width}x{height}: {rows:#?}");
             }
         }
     }
