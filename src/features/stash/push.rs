@@ -32,8 +32,19 @@ pub(crate) fn stash_rename_taken_reason(path: &RepoPath) -> Reason {
 
 /// Why a stash of a rename that only changes case is refused: on a
 /// case-insensitive filesystem its old and new paths are one file, so a
-/// per-file stash cannot restore the old side.
-pub const STASH_RENAME_CASE: &str = "This rename only changes case and cannot be stashed by file";
+/// per-file stash cannot restore the old side. A whole-tree stash can:
+/// applied on the same commit it brings its index back (`stash::apply`).
+pub const STASH_RENAME_CASE: &str = "This rename only changes case and cannot be stashed by file; \
+     use Stash all changes… and apply it on this commit";
+
+/// Why a check of the worktree's files could not run.
+pub const STASH_NO_TOP: &str = "Could not find the worktree's top level";
+
+/// [`STASH_RENAME_CASE`] as a menu reason, its advice marked so a narrow
+/// row or the bar keeps "use Stash all changes…".
+pub(crate) fn stash_rename_case_reason() -> Reason {
+    Notice::advised(STASH_RENAME_CASE)
+}
 
 /// Whether `old` and `new` differ only in ASCII case.
 pub(crate) fn case_only(old: &RepoPath, new: &RepoPath) -> bool {
@@ -211,7 +222,7 @@ fn restore_taken(runner: &dyn GitRunner, restore: &[RepoPath]) -> Result<Option<
 /// form counts where the filesystem folds them, as git's byte-wise checks
 /// cannot; the name given back is the one probed, as the filesystem does
 /// not say how it stores it. Anything unreadable counts as taken.
-fn restore_blocked_on_disk(top: &Path, restore: &[RepoPath]) -> Option<RepoPath> {
+pub(super) fn restore_blocked_on_disk(top: &Path, restore: &[RepoPath]) -> Option<RepoPath> {
     let found = |path: &RepoPath| match std::fs::symlink_metadata(top.join(path.as_os_str())) {
         Ok(meta) => Some(Ok(meta.is_dir())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -287,8 +298,7 @@ pub(crate) fn push_with_fixups(
     if !unstage.is_empty() && restore_taken(runner, unstage)?.is_some() {
         return Err(STASH_DELETED_TAKEN.into());
     }
-    let top = kika_git::repo_root::find_toplevel(runner)
-        .ok_or_else(|| "Could not find the worktree's top level".to_string())?;
+    let top = kika_git::repo_root::find_toplevel(runner).ok_or(STASH_NO_TOP)?;
     if let Some(path) = restore_blocked_on_disk(&top, restore) {
         return Err(stash_rename_taken(&path));
     }
@@ -336,7 +346,7 @@ fn listed(paths: &[RepoPath]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::stash::git::tests::{WRITE, env_of, literal_env, set_push};
+    use crate::features::stash::git::tests::{WRITE, env_of, ignores_case, literal_env, set_push};
     use crate::op::run_op;
     use crate::test_support::{argv, cid as oid, file_entry as entry, two_commit_repo};
     use kika_git::fake::{FakeRunner, ok};
@@ -802,12 +812,6 @@ mod tests {
         assert!(blocked("s/old.txt"), "a symlinked directory is not real");
         std::os::unix::fs::symlink("missing", top.join("dangling")).unwrap();
         assert!(blocked("dangling"), "a dangling symlink at the old path");
-    }
-
-    /// Whether git took the repo at `dir` to be on a case-insensitive
-    /// filesystem; the tests that need one skip otherwise.
-    fn ignores_case(dir: &Path) -> bool {
-        kika_git::fake::git(dir, &["config", "--get", "core.ignorecase"]) == b"true\n"
     }
 
     /// A repo whose last commit adds `old`, then stages `old` renamed to

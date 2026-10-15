@@ -1,7 +1,8 @@
-//! Fitting a menu row's disabled reason into the room beside its label.
-//! A reason that ends in a path keeps the file name: the path is cut from
-//! the left and the words before it give way first. Other reasons are cut
-//! from the right, as the bar's notice is.
+//! Fitting a menu row's disabled reason into the room beside its label,
+//! or a notice into the bar. A reason that ends in a path keeps the file
+//! name: the path is cut from the left and the words before it give way
+//! first. A reason with marked advice keeps that the same way: the words
+//! before it are cut first. Other reasons are cut from the right.
 
 use crate::keymap::Reason;
 
@@ -13,11 +14,16 @@ const LEAD_MIN: usize = 8;
 
 /// `reason` in at most `room` cells. Whole when it fits; a reason with a
 /// marked path keeps `…/name` before anything else, then as much of the
-/// words before it as fit, cut from the right; any other reason is cut
+/// words before it as fit, cut from the right; one with marked advice
+/// keeps the advice, cut from the right only when it alone is too wide,
+/// then as much of the words before it as fit; any other reason is cut
 /// from the right.
 pub(crate) fn fit_reason(reason: &Reason, room: usize) -> String {
     if width_of(reason) <= room {
         return reason.to_string();
+    }
+    if let Some((lead, advice)) = reason.advice_split() {
+        return fit_advice(lead, advice, room);
     }
     let Some((lead, path)) = reason.path_split() else {
         return cut_right(reason, room);
@@ -37,6 +43,18 @@ pub(crate) fn fit_reason(reason: &Reason, room: usize) -> String {
         format!("{} {shown_path}", cut_right(lead.trim_end(), lead_room - 1))
     } else {
         cut_left(path, room)
+    }
+}
+
+/// `lead` then `advice` in `room` cells, too few for both whole. The
+/// advice stays whole while it fits; the lead keeps at least `LEAD_MIN`
+/// cells or is dropped.
+fn fit_advice(lead: &str, advice: &str, room: usize) -> String {
+    let lead_room = room.saturating_sub(width_of(advice));
+    if lead_room >= LEAD_MIN {
+        format!("{} {advice}", cut_right(lead.trim_end(), lead_room - 1))
+    } else {
+        cut_right(advice, room)
     }
 }
 
@@ -142,6 +160,34 @@ mod tests {
     }
 
     #[test]
+    fn an_advised_reason_keeps_its_advice_and_cuts_the_words_first() {
+        use crate::features::stash::keys::{STASH_RENAME_CASE, stash_rename_case_reason};
+        let reason = stash_rename_case_reason();
+        let advice = "use Stash all changes… and apply it on this commit";
+        assert_eq!(width_of(advice), 50);
+        assert_eq!(fit_reason(&reason, 200), STASH_RENAME_CASE);
+        assert_eq!(
+            fit_reason(&reason, width_of(STASH_RENAME_CASE)),
+            STASH_RENAME_CASE
+        );
+        assert_eq!(
+            fit_reason(&reason, 70),
+            format!("This rename only c… {advice}")
+        );
+        // Below `LEAD_MIN` cells for the words, the advice has the row.
+        assert_eq!(fit_reason(&reason, 58), format!("This r… {advice}"));
+        assert_eq!(fit_reason(&reason, 57), advice);
+        assert_eq!(fit_reason(&reason, 50), advice);
+        // Only then is the advice itself cut, from the right.
+        assert_eq!(fit_reason(&reason, 22), "use Stash all changes…");
+        assert_eq!(fit_reason(&reason, 1), "…");
+        assert_eq!(fit_reason(&reason, 0), "");
+        // Unmarked, the same text is cut from the right as before.
+        let plain = Notice::fixed(STASH_RENAME_CASE);
+        assert_eq!(fit_reason(&plain, 70), cut_right(&plain, 70));
+    }
+
+    #[test]
     fn a_path_reason_keeps_the_file_name_and_cuts_the_words_first() {
         let reason = marked(PATH);
         assert_eq!(
@@ -183,6 +229,8 @@ mod tests {
             marked("日本/語.rs"),
             marked("a\u{202E}b/c\u{200B}d.rs"),
             Notice::fixed("This rename only changes case and cannot be stashed by file"),
+            Notice::advised("x<U+202E>y; z<U+200B> 日本語 advice"),
+            crate::features::stash::keys::stash_rename_case_reason(),
             Notice::owned("x\u{202E}y\u{200B}z 日本語".to_string()),
         ];
         assert!(reasons[3].contains("a<U+202E>b/c<U+200B>d.rs"));

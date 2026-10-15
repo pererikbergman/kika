@@ -18,6 +18,7 @@ use crate::keymap::{Binding, KeyPattern, KeyScope, available, available_commands
 use crate::layout::{Panel, SidePanel, help_rows, workspace_layout};
 use crate::model::{AppState, Context, Focus};
 use crate::popup_view;
+use crate::reason_fit::fit_reason;
 use crate::remote_run::RemoteRun;
 use kika_git::bisect::BisectState;
 use kika_git::emoji;
@@ -703,10 +704,15 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
         ));
     }
     if let Some(notice) = notice {
-        spans.push(Span::styled(
-            elide_right(&format!(" {notice}"), room),
-            Style::new().fg(Color::Yellow),
-        ));
+        // Marked advice survives a narrow bar (`fit_reason`); anything
+        // else, a path too, is cut from the right.
+        let text = match &state.notice {
+            Some(own) if room > 0 && own.advice_split().is_some() => {
+                format!(" {}", fit_reason(own, room - 1))
+            }
+            _ => elide_right(&format!(" {notice}"), room),
+        };
+        spans.push(Span::styled(text, Style::new().fg(Color::Yellow)));
     } else if let Some(error) = state.op_error() {
         let text = format!(" error: {}", error.lines().next().unwrap_or_default());
         spans.push(Span::styled(

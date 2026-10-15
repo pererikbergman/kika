@@ -630,7 +630,9 @@ pub fn op_steps(op: &GitOp) -> Vec<GitOp> {
 /// [`reports_on_stdout`].
 ///
 /// A stash action first checks its entry is still where it was chosen,
-/// and `--staged` first checks git is new enough.
+/// and `--staged` first checks git is new enough. An apply or pop of a
+/// stash that renames a file by case only restores its index too
+/// (`stash::apply`).
 pub fn run_op(runner: &dyn GitRunner, op: &GitOp) -> Result<(), String> {
     run_op_with(runner, op, &|key| std::env::var_os(key).is_some())
 }
@@ -677,6 +679,9 @@ fn run_op_with(
     }
     if let GitOp::StashRename { stash, message } = op {
         return stash::git::rename_stash(runner, stash, message);
+    }
+    if let GitOp::StashApply(_) | GitOp::StashPop(_) = op {
+        return stash::apply::apply_stash(runner, op);
     }
     if let GitOp::BisectMark { start: true, .. } = op {
         run_bisect_start(runner)?;
@@ -732,15 +737,14 @@ fn run_op_with(
 
 /// Whether git reports `op`'s failure on stdout as well as stderr: hooks
 /// print to stderr, but git says "nothing to commit" and names each
-/// conflict on stdout, and a bisect says there why a mark failed.
+/// conflict on stdout, and a bisect says there why a mark failed. A
+/// stash apply or pop never gets here: `stash::apply` maps its own.
 fn reports_on_stdout(op: &GitOp) -> bool {
     matches!(
         op,
         GitOp::Commit { .. }
             | GitOp::Merge { .. }
             | GitOp::Revert(_)
-            | GitOp::StashApply(_)
-            | GitOp::StashPop(_)
             | GitOp::CherryPick(_)
             | GitOp::BisectMark { .. }
             | GitOp::BisectReset
