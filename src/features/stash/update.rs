@@ -1130,6 +1130,19 @@ mod tests {
     }
 
     #[test]
+    fn a_taken_old_path_reason_marks_the_path_for_a_narrow_row() {
+        let old = "src/\u{202E}x/old.rs";
+        let files = vec![renamed("new.rs", old), untracked(old)];
+        let (state, _) = with_files(files, 24);
+        let reason = keys::stash_file_disabled(&state).unwrap();
+        let path = kika_git::path::RepoPath::from(old);
+        assert_eq!(&*reason, keys::stash_rename_taken(&path));
+        let (lead, shown) = reason.path_split().expect("a marked path");
+        assert_eq!(lead, "A file now sits at the renamed file's old path: ");
+        assert_eq!(shown, path.display());
+    }
+
+    #[test]
     fn a_rename_whose_old_directory_is_now_a_file_is_refused_naming_it() {
         let named = |p: &str| Some(keys::stash_rename_taken(&p.into()).into());
         for taken in ["d", "d/e"] {

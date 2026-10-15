@@ -3,7 +3,11 @@
 //! enters review mode, opens a pull request or refreshes, and only on a
 //! host the global config lists.
 
+use super::checkout::PrCheckout;
+use super::comment_editor::Composer;
+use super::discussion_write::DiscussionWriting;
 use super::files::PrFiles;
+use super::pending::PendingSlot;
 use crate::effect::{Effect, Tag};
 use crate::intent::AppIntent;
 use crate::keymap::Reason;
@@ -11,10 +15,11 @@ use crate::list_filter;
 use crate::model::{AppState, Context};
 use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::{MergePrConfirm, Popup};
+use kika_forge::discussion::PrDiscussion;
 use kika_forge::merge::MergeMethod;
 use kika_forge::remote::{allowed, matches};
 use kika_forge::review::{CheckStatus, PrDetail, PrSummary, QueueKind, Queues, ReviewError};
-use kika_forge::{ForgeHost, ForgeRepo, ForgeStatus};
+use kika_forge::{ForgeHost, ForgeRepo, ForgeStatus, REFRESH_LIMITED};
 use kika_git::commit_files::CommitId;
 use ratatui::text::Line;
 
@@ -35,6 +40,8 @@ pub enum ReviewScreen {
     Detail(u64),
     /// Pull request `number`'s changed files and their diff.
     Files(u64),
+    /// Pull request `number`'s comments and review bodies.
+    Conversation(u64),
 }
 
 /// Why a screen has nothing to show.
@@ -100,6 +107,26 @@ pub struct ReviewState {
     /// Each pull request head fetched this session, so none is fetched
     /// twice. Kept when review mode is left and entered again.
     pub fetched_heads: Vec<(u64, CommitId)>,
+    /// The checkout of the open pull request's head, from `b` until its
+    /// op starts or it is given up.
+    pub checkout: Option<PrCheckout>,
+    /// The open pull request's review threads and conversation, read
+    /// right after its detail.
+    pub discussion: Option<PrDiscussion>,
+    pub discussion_fetch: ReviewFetch,
+    /// The conversation as drawn, while its screen is shown.
+    pub conversation: Option<RenderedBody>,
+    /// The first line of the conversation shown.
+    pub conversation_scroll: usize,
+    /// The open pull request's pending review, from its files screen on.
+    pub pending: Option<PendingSlot>,
+    /// A comment being written, over the files screen or the
+    /// conversation.
+    pub composer: Option<Composer>,
+    /// The one write to the discussion in flight on GitHub, if any.
+    pub writing: Option<DiscussionWriting>,
+    /// The cursor of the pending-comment list, while it is open.
+    pub pending_list: Option<usize>,
 }
 
 /// A description as drawn at `width`.
@@ -127,6 +154,15 @@ impl Default for ReviewState {
             files: None,
             merge_pick: None,
             fetched_heads: Vec::new(),
+            checkout: None,
+            discussion: None,
+            discussion_fetch: ReviewFetch::default(),
+            conversation: None,
+            conversation_scroll: 0,
+            pending: None,
+            composer: None,
+            writing: None,
+            pending_list: None,
         }
     }
 }
@@ -171,6 +207,7 @@ impl ReviewState {
     pub fn loading(&self) -> bool {
         self.queues_fetch.loading
             || self.detail_fetch.loading
+            || self.discussion_fetch.loading
             || self.files.as_ref().is_some_and(PrFiles::loading)
     }
 
@@ -210,11 +247,11 @@ fn row_text(pr: &PrSummary) -> String {
     format!("#{} {} {}", pr.number, pr.title, pr.author)
 }
 
-/// A pull request is open, on its detail or its files.
+/// A pull request is open, on its detail, its files or its conversation.
 fn detail_shown(state: &AppState) -> bool {
     matches!(
         state.review.screen,
-        ReviewScreen::Detail(_) | ReviewScreen::Files(_)
+        ReviewScreen::Detail(_) | ReviewScreen::Files(_) | ReviewScreen::Conversation(_)
     )
 }
 
@@ -242,7 +279,14 @@ pub(crate) fn refresh_review_disabled(state: &AppState) -> Option<Reason> {
     }
     let fetch = match state.review.screen {
         ReviewScreen::Queue => &state.review.queues_fetch,
-        ReviewScreen::Detail(_) | ReviewScreen::Files(_) => &state.review.detail_fetch,
+        ReviewScreen::Conversation(_) => return Some(super::conversation::BACK_TO_REFRESH.into()),
+        ReviewScreen::Detail(_) | ReviewScreen::Files(_) => {
+            // The threads come right after the detail: one refresh at a time.
+            if state.review.discussion_fetch.loading {
+                return Some(LOADING.into());
+            }
+            &state.review.detail_fetch
+        }
     };
     fetch.loading.then_some(LOADING.into())
 }
@@ -250,6 +294,9 @@ pub(crate) fn refresh_review_disabled(state: &AppState) -> Option<Reason> {
 /// Why `o` cannot open a check's page: no pull request open, no browser
 /// configured, or no failing check with a page.
 pub(crate) fn open_check_disabled(state: &AppState) -> Option<Reason> {
+    if let Some(reason) = super::conversation::on_conversation(state) {
+        return Some(reason);
+    }
     if !detail_shown(state) || state.review.detail.is_none() {
         return Some(NO_PR_OPEN.into());
     }
@@ -290,7 +337,9 @@ impl AppState {
     /// repository. Refused when the remote is known to be on none of the
     /// hosts or left out by its allow-list, or its host is rate limited
     /// past now.
-    fn review_target(&self) -> Result<(Vec<ForgeHost>, Option<ForgeRepo>), ReviewProblem> {
+    pub(super) fn review_target(
+        &self,
+    ) -> Result<(Vec<ForgeHost>, Option<ForgeRepo>), ReviewProblem> {
         let hosts = &self.forge.hosts;
         if hosts.is_empty() || self.forge.unmatched {
             return Err(ReviewProblem::NoForgeHost);
@@ -308,7 +357,7 @@ impl AppState {
     }
 
     /// The limits the task checks again by its own clock.
-    fn review_limits(&self) -> Vec<(ForgeHost, i64)> {
+    pub(super) fn review_limits(&self) -> Vec<(ForgeHost, i64)> {
         self.forge
             .hosts
             .iter()
@@ -316,7 +365,7 @@ impl AppState {
             .collect()
     }
 
-    fn review_tag(&mut self) -> Tag {
+    pub(super) fn review_tag(&mut self) -> Tag {
         Tag {
             generation: self.generation,
             seq: self.take_seq(),
@@ -381,19 +430,45 @@ impl AppState {
     fn open_review_detail(&mut self, number: u64) -> Vec<Effect> {
         self.review.screen = ReviewScreen::Detail(number);
         self.review.detail = None;
+        self.review.discussion = None;
+        self.review.discussion_fetch = ReviewFetch::default();
         self.review.body = None;
         self.review.detail_scroll = 0;
         self.load_review_detail(number)
     }
 
+    /// The host and repository a change made on GitHub (a merge, a viewed
+    /// mark) goes to, or why it may not: the repository review mode is on,
+    /// on a configured host whose `[forge.allow]` names it and that is not
+    /// rate limited now.
+    pub(super) fn review_forge_target(&self) -> Result<(ForgeHost, ForgeRepo), Reason> {
+        let repo = self.review_repo().ok_or(NO_FORGE)?;
+        // A repository `[forge.allow]` leaves out is never asked about.
+        let host = allowed(&repo, &self.forge.hosts).ok_or(NO_FORGE)?.clone();
+        self.review_host_allowed(&host)?;
+        Ok((host, repo))
+    }
+
+    /// `host` may be asked now: it is configured and not rate limited.
+    pub(super) fn review_host_allowed(&self, host: &ForgeHost) -> Result<(), Reason> {
+        if !self.forge.hosts.contains(host) {
+            return Err(NO_FORGE.into());
+        }
+        let limited = self.forge.limited.get(host.as_str());
+        if limited.is_some_and(|until| *until > self.now) {
+            return Err(REFRESH_LIMITED.into());
+        }
+        Ok(())
+    }
+
     /// Whether an answer under `tag` is the one `fetch` waits for.
-    fn review_current(&self, tag: Tag, fetch: &ReviewFetch) -> bool {
+    pub(super) fn review_current(&self, tag: Tag, fetch: &ReviewFetch) -> bool {
         tag.generation == self.generation && fetch.seq == Some(tag.seq)
     }
 
     /// Remember what an answer says about the repository and its host's
     /// rate limit, which badge loads share.
-    fn review_answered(&mut self, repo: Option<ForgeRepo>, limited: Option<i64>) {
+    pub(super) fn review_answered(&mut self, repo: Option<ForgeRepo>, limited: Option<i64>) {
         if let Some(repo) = repo {
             if let Some(host) = matches(&repo, &self.forge.hosts) {
                 let host = host.as_str().to_string();
@@ -412,7 +487,11 @@ impl AppState {
 
     /// Keep what a failed answer tells: the repository it found and, on a
     /// rate limit, until when its host is limited.
-    fn review_failed(&mut self, repo: Option<ForgeRepo>, error: ReviewError) -> ReviewProblem {
+    pub(super) fn review_failed(
+        &mut self,
+        repo: Option<ForgeRepo>,
+        error: ReviewError,
+    ) -> ReviewProblem {
         match error {
             ReviewError::Limited { until } => self.review_answered(repo, Some(until)),
             _ => self.review.repo = repo.or(self.review.repo.take()),
@@ -447,23 +526,31 @@ impl AppState {
         number: u64,
         repo: Option<ForgeRepo>,
         result: Result<Option<PrDetail>, ReviewError>,
-    ) {
+    ) -> Vec<Effect> {
         if !self.review_current(tag, &self.review.detail_fetch)
             || self.review.screen != ReviewScreen::Detail(number)
         {
-            return;
+            return vec![];
         }
         self.review.detail_fetch.loading = false;
         match result {
             Ok(found) => {
-                self.review_answered(repo, None);
+                self.review_answered(repo, found.as_ref().and_then(PrDetail::viewed_limit));
                 self.review.detail_fetch.error =
                     found.is_none().then_some(ReviewProblem::Missing(number));
+                let found_one = found.is_some();
                 self.review.detail = found;
                 self.review.body = None;
                 self.render_review_body();
+                if found_one {
+                    return self.load_review_discussion(number);
+                }
+                vec![]
             }
-            Err(error) => self.review.detail_fetch.error = Some(self.review_failed(repo, error)),
+            Err(error) => {
+                self.review.detail_fetch.error = Some(self.review_failed(repo, error));
+                vec![]
+            }
         }
     }
 
@@ -476,29 +563,36 @@ impl AppState {
                     self.review.cursor = at;
                 }
             }
-            ReviewScreen::Detail(_) => {
-                let max = self.review_max_scroll();
-                self.review.detail_scroll = self
-                    .review
-                    .detail_scroll
-                    .saturating_add_signed(delta)
-                    .min(max);
-            }
+            ReviewScreen::Detail(_) => self.scroll_review_detail(delta),
             ReviewScreen::Files(_) => return self.move_review_file(delta),
+            ReviewScreen::Conversation(_) => self.scroll_review_conversation(delta),
         }
         vec![]
     }
 
+    /// Scroll the detail by `delta` lines, kept within its lines.
+    pub(super) fn scroll_review_detail(&mut self, delta: isize) {
+        let max = self.review_max_scroll();
+        self.review.detail_scroll = self
+            .review
+            .detail_scroll
+            .saturating_add_signed(delta)
+            .min(max);
+    }
+
     /// Where the detail is drawn, at the current screen size.
-    fn review_area(&self) -> ratatui::layout::Rect {
+    pub(super) fn review_area(&self) -> ratatui::layout::Rect {
         let screen = ratatui::layout::Rect::new(0, 0, self.size.0, self.size.1);
         let [main, _] = crate::layout::screen_layout(screen);
         super::view::detail_area(main)
     }
 
     /// Render the open description for the panel's width, once: on load
-    /// and when the screen is resized.
+    /// and when the screen is resized. The conversation and an open
+    /// thread are rendered again with it.
     pub(crate) fn render_review_body(&mut self) {
+        self.render_review_conversation();
+        self.render_thread_reader();
         let width = usize::from(self.review_area().width);
         if self.review.body.as_ref().is_some_and(|b| b.width == width) {
             return;
@@ -510,10 +604,16 @@ impl AppState {
     }
 
     /// The furthest the detail scrolls, with its last line at the bottom.
-    fn review_max_scroll(&self) -> usize {
+    pub(super) fn review_max_scroll(&self) -> usize {
         match (&self.review.detail, &self.review.body) {
             (Some(detail), Some(body)) => {
-                super::view::detail_max_scroll(detail, &body.lines, self.review_area())
+                let threads = super::threads_view::thread_summary(&self.review);
+                super::view::detail_max_scroll(
+                    detail,
+                    &body.lines,
+                    threads.as_deref(),
+                    self.review_area(),
+                )
             }
             _ => 0,
         }
@@ -539,41 +639,56 @@ impl AppState {
         }
     }
 
+    /// Back to the workspace, review mode started afresh next time, and
+    /// the workspace loaded or refreshed.
+    pub(super) fn leave_review(&mut self) -> Vec<Effect> {
+        // A pending-review change still waiting on a save goes out first.
+        let mut effects = self.drop_pending_slot();
+        self.context = Context::Workspace;
+        self.review.restart();
+        if self.workspace_started {
+            effects.extend(self.update(AppIntent::RefreshStatus));
+            // The review may have streamed its own diff into the
+            // pane; a commit's or stash's open file gets it back.
+            effects.extend(self.reload_open_file_diff());
+        } else {
+            effects.extend(self.start());
+        }
+        effects
+    }
+
     /// Esc: from a pull request back to the same queue and row; in the
     /// queue, clear the filter, else go back to the workspace.
     pub(crate) fn close_review(&mut self) -> Vec<Effect> {
         match self.review.screen {
             ReviewScreen::Files(_) => self.close_review_files(),
+            ReviewScreen::Conversation(number) => {
+                self.close_review_conversation(number);
+                vec![]
+            }
             ReviewScreen::Detail(_) => {
                 self.review.screen = ReviewScreen::Queue;
                 self.review.detail = None;
                 self.review.body = None;
+                self.review.conversation = None;
+                self.review.conversation_scroll = 0;
                 self.review.detail_fetch = ReviewFetch::default();
+                self.review.discussion = None;
+                self.review.discussion_fetch = ReviewFetch::default();
+                let mut effects = self.drop_pending_slot();
                 // A session started on one pull request loads its queues
                 // only now.
                 if self.review.queues.is_none() && !self.review.queues_fetch.loading {
-                    return self.load_review_queues();
+                    effects.extend(self.load_review_queues());
                 }
-                vec![]
+                effects
             }
             ReviewScreen::Queue if !self.review.filter.is_empty() => {
                 self.review.filter.clear();
                 self.review.reconcile();
                 vec![]
             }
-            ReviewScreen::Queue => {
-                self.context = Context::Workspace;
-                self.review.restart();
-                if self.workspace_started {
-                    let mut effects = self.update(AppIntent::RefreshStatus);
-                    // The review may have streamed its own diff into the
-                    // pane; a commit's or stash's open file gets it back.
-                    effects.extend(self.reload_open_file_diff());
-                    effects
-                } else {
-                    self.start()
-                }
-            }
+            ReviewScreen::Queue => self.leave_review(),
         }
     }
 
@@ -587,6 +702,8 @@ impl AppState {
             ReviewScreen::Detail(number) | ReviewScreen::Files(number) => {
                 self.load_review_detail(number)
             }
+            // Refused above: the conversation shows what the detail read.
+            ReviewScreen::Conversation(_) => vec![],
         }
     }
 
@@ -719,7 +836,17 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn detail_from(answer: &str) -> PrDetail {
-        let runner = kika_forge::github::FakeGh::new().reply(kika_forge::github::answer(answer));
+        paged_detail(&[answer.to_string()])
+    }
+
+    /// Pull request 42 read from the detail answer and later pages of
+    /// files in `pages`, one call each.
+    pub(crate) fn paged_detail(pages: &[String]) -> PrDetail {
+        let runner = pages
+            .iter()
+            .fold(kika_forge::github::FakeGh::new(), |r, page| {
+                r.reply(kika_forge::github::answer(page))
+            });
         let host = github()[0].clone();
         let sink = kika_git::recording::CommandSink::new();
         kika_forge::github::Gh::fixture(&runner, &sink, &host, NOW)
@@ -742,10 +869,15 @@ pub(crate) mod tests {
 
     /// The fixture's detail open, with `checks` in place of its own.
     pub(crate) fn in_detail(checks: Vec<Check>) -> AppState {
-        let mut state = in_queues();
-        let (tag, number) = detail_load(&press(&mut state, KeyCode::Enter));
         let mut detail = fixture_detail();
         detail.checks = checks;
+        opened_on(detail)
+    }
+
+    /// `detail` open, as the answer to the first queue row's load.
+    pub(crate) fn opened_on(detail: PrDetail) -> AppState {
+        let mut state = in_queues();
+        let (tag, number) = detail_load(&press(&mut state, KeyCode::Enter));
         state.update(AppIntent::Review(ReviewIntent::PrDetailLoaded {
             tag,
             number,
@@ -903,6 +1035,54 @@ pub(crate) mod tests {
         }));
         assert!(state.forge.limited.is_empty());
         assert_eq!(state.forge.status, ForgeView::Off);
+    }
+
+    #[test]
+    fn a_rate_limit_met_paging_the_files_is_kept_while_the_detail_shows() {
+        use kika_forge::github::fixtures::GRAPHQL_RATE_LIMITED;
+        use kika_forge::review::ViewedGap;
+        use kika_forge::review::fixtures::detail_with_files;
+
+        let detail = paged_detail(&[
+            detail_with_files(0..100, 250, Some("c1")),
+            GRAPHQL_RATE_LIMITED.to_string(),
+        ]);
+        let until = 1_700_003_600;
+        assert_eq!(detail.viewed_gap, Some(ViewedGap::Limited { until }));
+        let mut state = in_queues();
+        state.forge.limited.clear();
+        let (tag, number) = detail_load(&press(&mut state, KeyCode::Enter));
+        state.update(AppIntent::Review(ReviewIntent::PrDetailLoaded {
+            tag,
+            number,
+            repo: Some(repo()),
+            result: Ok(Some(detail)),
+        }));
+        let shown = state.review.detail.as_ref().unwrap();
+        assert_eq!(shown.viewed.len(), 100);
+        assert_eq!(state.review.detail_fetch.error, None);
+        assert_eq!(state.forge.limited.get("github.com"), Some(&until));
+        // The detail's `r` now waits for the limit instead of asking.
+        assert_eq!(state.update(AppIntent::Review(ReviewIntent::Refresh)), []);
+        assert_eq!(
+            state.review.detail_fetch.error,
+            Some(ReviewProblem::Limited(until))
+        );
+
+        // A detail whose every page was read clears the host's limit.
+        let mut state = in_queues();
+        state.forge.limited.insert("github.com".into(), NOW - 1);
+        let state = {
+            let (tag, number) = detail_load(&press(&mut state, KeyCode::Enter));
+            state.update(AppIntent::Review(ReviewIntent::PrDetailLoaded {
+                tag,
+                number,
+                repo: Some(repo()),
+                result: Ok(Some(fixture_detail())),
+            }));
+            state
+        };
+        assert!(state.forge.limited.is_empty());
     }
 
     #[test]

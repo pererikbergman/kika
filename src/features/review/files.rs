@@ -3,8 +3,13 @@
 //! from the forge's remote, list the files from the merge base, then
 //! stream the selected file's diff into the same Diff pane the workspace
 //! uses. The viewed marks come from GitHub's detail, matched by path.
+//! The screen shows the whole pull request, or one of its commits picked
+//! with `c` (`commit_view.rs`); the marks stay the pull request's, and
+//! the selected file stays selected, by path, when the new view lists it.
 
-use super::git::{CommitsHere, FileCounts, PrFileRow};
+use super::comment_pick::CommentPick;
+use super::git::{CommitsHere, FileCounts, PrCommit, PrFileRow};
+use super::reader::ThreadReader;
 use super::state::{ReviewScreen, ReviewState};
 use crate::diff_pane::DiffStart;
 use crate::effect::{Effect, Tag};
@@ -14,6 +19,7 @@ use crate::model::{AppState, Context};
 use kika_forge::review::ViewedState;
 use kika_git::commit_files::{CommitFile, CommitId, CommitRange};
 use kika_git::diff::DiffRequest;
+use kika_git::path::RepoPath;
 
 pub const STILL_MISSING: &str = "PR head is not available locally after fetch";
 pub const FETCHED_BEFORE: &str =
@@ -53,16 +59,43 @@ pub struct PrFile {
     pub viewed: Option<ViewedState>,
 }
 
+/// A viewed mark GitHub is asked for, kept until it answers. One at a time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewedMark {
+    pub seq: u64,
+    pub path: String,
+    pub viewed: bool,
+}
+
+/// What the files screen shows: the whole pull request, or the commit at
+/// this index of `PrFiles.commits`, oldest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReviewView {
+    #[default]
+    Whole,
+    Commit(usize),
+}
+
 /// The files screen of pull request `number`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrFiles {
     pub number: u64,
     pub head: CommitId,
     pub base: CommitId,
-    /// Merge base to head, once resolved.
+    /// The range shown: merge base to head once resolved, or the picked
+    /// commit against its first parent.
     pub range: Option<CommitRange>,
+    /// Merge base to head, once the whole view's files have come.
+    pub whole: Option<CommitRange>,
+    pub view: ReviewView,
+    /// The pull request's commits, oldest first, and whether the list was
+    /// cut; read on the first `c`.
+    pub commits: Option<(Vec<PrCommit>, bool)>,
     pub rows: Vec<PrFile>,
     pub cursor: usize,
+    /// The file to select once the view being listed comes, picked by
+    /// path; kept through a view that fails or lists nothing.
+    pub keep: Option<RepoPath>,
     pub focus: FilesFocus,
     pub stage: FilesStage,
     /// This screen fetched already, so a commit still missing is an error
@@ -70,6 +103,20 @@ pub struct PrFiles {
     pub fetched: bool,
     /// The stage's load in flight; any other answer is dropped.
     pub seq: Option<u64>,
+    /// The viewed mark in flight on GitHub, if any.
+    pub marking: Option<ViewedMark>,
+    /// The review thread `]`/`[` went to, by index into the discussion's
+    /// threads.
+    pub thread: Option<usize>,
+    /// A thread whose row has not streamed in yet, scrolled to when it does.
+    pub jump: Option<usize>,
+    /// The thread read in full over the screen, while it is open.
+    pub reader: Option<ThreadReader>,
+    /// The diff rows a comment is being picked on, in pick mode.
+    pub pick: Option<CommentPick>,
+    /// The node id of the thread a reply was posted to, so the reader
+    /// opens on it again once the discussion is read again.
+    pub reopen_thread: Option<String>,
 }
 
 impl PrFiles {
@@ -79,12 +126,22 @@ impl PrFiles {
             head,
             base,
             range: None,
+            whole: None,
+            view: ReviewView::Whole,
+            commits: None,
             rows: Vec::new(),
             cursor: 0,
+            keep: None,
             focus: FilesFocus::List,
             stage: FilesStage::Checking,
             fetched: false,
             seq: Some(seq),
+            marking: None,
+            thread: None,
+            jump: None,
+            reader: None,
+            pick: None,
+            reopen_thread: None,
         }
     }
 
@@ -110,6 +167,13 @@ impl PrFiles {
     }
 }
 
+/// The row of the file kept across a switch of view, or the first row
+/// when the new view does not list it.
+fn kept_cursor(rows: &[PrFile], keep: Option<&RepoPath>) -> usize {
+    keep.and_then(|path| rows.iter().position(|r| &r.file.path == path))
+        .unwrap_or(0)
+}
+
 /// `rows` with GitHub's viewed state put on each by exact path. A path
 /// that is not UTF-8, or one GitHub did not list, is unknown.
 fn with_viewed(rows: Vec<PrFileRow>, viewed: &[(String, ViewedState)]) -> Vec<PrFile> {
@@ -128,7 +192,7 @@ fn with_viewed(rows: Vec<PrFileRow>, viewed: &[(String, ViewedState)]) -> Vec<Pr
         .collect()
 }
 
-fn files_screen(state: &AppState) -> Option<&PrFiles> {
+pub(super) fn files_screen(state: &AppState) -> Option<&PrFiles> {
     match state.review.screen {
         ReviewScreen::Files(_) => state.review.files.as_ref(),
         _ => None,
@@ -158,6 +222,9 @@ fn detail_oids(review: &ReviewState) -> Result<(u64, CommitId, CommitId), Reason
 /// Why `f` cannot open the files: no loaded pull request with both
 /// commit ids, no known repository on a forge host, or git is busy.
 pub(crate) fn review_files_disabled(state: &AppState) -> Option<Reason> {
+    if let Some(reason) = super::conversation::on_conversation(state) {
+        return Some(reason);
+    }
     if let Err(reason) = detail_oids(&state.review) {
         return Some(reason);
     }
@@ -201,7 +268,7 @@ impl AppState {
     }
 
     /// The files screen, if this answer is the one it waits for.
-    fn files_for(&mut self, tag: Tag) -> Option<&mut PrFiles> {
+    pub(super) fn files_for(&mut self, tag: Tag) -> Option<&mut PrFiles> {
         if tag.generation != self.generation {
             return None;
         }
@@ -214,7 +281,7 @@ impl AppState {
             .filter(|f| f.number == number && f.seq == Some(tag.seq))
     }
 
-    fn files_tag(&mut self) -> Tag {
+    pub(super) fn files_tag(&mut self) -> Tag {
         Tag {
             generation: self.generation,
             seq: self.take_seq(),
@@ -235,7 +302,9 @@ impl AppState {
         let tag = self.files_tag();
         self.review.screen = ReviewScreen::Files(number);
         self.review.files = Some(PrFiles::begin(number, head, base, tag.seq));
-        self.check_review_commits(tag)
+        let mut effects = self.check_review_commits(tag);
+        effects.extend(self.load_pending_review(number));
+        effects
     }
 
     fn check_review_commits(&mut self, tag: Tag) -> Vec<Effect> {
@@ -323,6 +392,9 @@ impl AppState {
         tag: Tag,
         result: Result<(), String>,
     ) -> Vec<Effect> {
+        if self.checkout_fetch(tag) {
+            return self.pr_checkout_fetched(tag, result);
+        }
         // Every user effect reports back once, stale or not.
         let held = self.holds_op(tag);
         self.release_op(tag);
@@ -363,9 +435,16 @@ impl AppState {
         files.seq = None;
         match result {
             Ok((range, rows)) => {
+                if files.view == ReviewView::Whole {
+                    files.whole = Some(range.clone());
+                }
                 files.range = Some(range);
                 files.rows = with_viewed(rows, &viewed);
-                files.cursor = 0;
+                files.cursor = kept_cursor(&files.rows, files.keep.as_ref());
+                // An empty list selects nothing, so the file is kept for the next view.
+                if !files.rows.is_empty() {
+                    files.keep = None;
+                }
                 files.stage = FilesStage::Ready;
             }
             Err(message) => {
@@ -376,12 +455,15 @@ impl AppState {
         if files.rows.is_empty() {
             return self.close_diff();
         }
-        // Another pull request's file: start at its top.
+        // Another pull request's file, or the same file over another
+        // range: its lines do not carry over, so start at its top.
         self.review_file_diff(DiffStart::Top)
     }
 
-    /// Stream the selected file's diff, merge base to head, from `start`.
-    fn review_file_diff(&mut self, start: DiffStart) -> Vec<Effect> {
+    /// Stream the selected file's diff over the range shown, from `start`.
+    pub(super) fn review_file_diff(&mut self, start: DiffStart) -> Vec<Effect> {
+        // Rows picked on the diff shown are not this one's.
+        self.end_comment_pick();
         let request = self.review.files.as_ref().and_then(|files| {
             let range = files.range.as_ref()?;
             let row = files.selected()?;
@@ -410,6 +492,9 @@ impl AppState {
             return vec![];
         }
         files.cursor = next;
+        files.thread = None;
+        files.jump = None;
+        files.reader = None;
         self.review_file_diff(DiffStart::Keep)
     }
 
@@ -429,6 +514,8 @@ impl AppState {
             return vec![];
         };
         self.review.screen = ReviewScreen::Detail(files.number);
+        self.review.composer = None;
+        self.review.pending_list = None;
         self.close_diff()
     }
 
@@ -454,13 +541,15 @@ impl AppState {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crossterm::event::KeyCode;
 
     use super::*;
     use crate::diff_pane::{DIFF_PREFETCH, DiffPane};
     use crate::features::review::ReviewIntent;
-    use crate::features::review::state::tests::{github, in_detail, press, repo, type_char};
+    use crate::features::review::state::tests::{
+        github, in_detail, opened_on, paged_detail, press, repo, type_char,
+    };
     use crate::intent::AppIntent;
     use crate::keymap::KeyScope;
     use crate::test_support::diff_chunk;
@@ -512,6 +601,11 @@ mod tests {
     }
 
     fn check_tag(effects: &[Effect]) -> Tag {
+        // Opening the screen also reads its pending review.
+        let effects = match effects {
+            [check @ .., Effect::LoadPendingReview { .. }] => check,
+            all => all,
+        };
         match effects {
             [
                 Effect::CheckReviewCommits {
@@ -561,6 +655,57 @@ mod tests {
             result: Ok((range(), rows())),
         }));
         (state, effects)
+    }
+
+    /// A pull request of 150 files whose marks came in two pages, open on
+    /// its files screen with every file listed: the second page answered
+    /// with `second`.
+    pub(crate) fn large_ready(second: String) -> AppState {
+        use kika_forge::review::fixtures::{detail_with_files, page_path};
+        let mut detail = paged_detail(&[detail_with_files(0..100, 150, Some("c1")), second]);
+        // The first queue row, which the detail answers.
+        detail.number = 12;
+        let mut state = opened_on(detail);
+        let tag = check_tag(&type_char(&mut state, 'f'));
+        state.update(AppIntent::Review(ReviewIntent::ObjectsChecked {
+            tag,
+            result: Ok(CommitsHere::All),
+        }));
+        let rows = (0..150)
+            .map(|i| row('M', &page_path(i), lines(1, 0)))
+            .collect();
+        state.update(AppIntent::Review(ReviewIntent::FilesLoaded {
+            tag,
+            result: Ok((range(), rows)),
+        }));
+        state
+    }
+
+    #[test]
+    fn a_file_past_the_first_hundred_shows_the_mark_its_later_page_gave() {
+        use kika_forge::review::fixtures::{files_page, page_state};
+        let state = large_ready(files_page(100..150, None));
+        assert_eq!(state.review.detail.as_ref().unwrap().viewed.len(), 150);
+        let files = state.review.files.as_ref().unwrap();
+        assert_eq!(files.rows.len(), 150);
+        assert_eq!(page_state(120), "VIEWED");
+        assert_eq!(files.rows[120].viewed, Some(ViewedState::Viewed));
+        assert_eq!(files.rows[121].viewed, Some(ViewedState::Dismissed));
+        assert_eq!(files.rows[149].viewed, Some(ViewedState::Unviewed));
+        assert!(files.rows.iter().all(|r| r.viewed.is_some()));
+    }
+
+    #[test]
+    fn a_later_page_rate_limited_leaves_its_files_unknown_and_v_waits() {
+        use kika_forge::REFRESH_LIMITED;
+        use kika_forge::github::fixtures::GRAPHQL_RATE_LIMITED;
+        let mut state = large_ready(GRAPHQL_RATE_LIMITED.to_string());
+        let files = state.review.files.as_ref().unwrap();
+        assert_eq!(files.rows[99].viewed, Some(ViewedState::Viewed));
+        assert_eq!(files.rows[120].viewed, None);
+        state.review.files.as_mut().unwrap().cursor = 120;
+        assert_eq!(type_char(&mut state, 'v'), []);
+        assert_eq!(state.notice.as_deref(), Some(REFRESH_LIMITED));
     }
 
     fn streamed(effects: &[Effect]) -> (&DiffRequest, usize) {

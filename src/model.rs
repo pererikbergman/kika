@@ -23,15 +23,15 @@ use crate::features::commits::rewrite::LeftBehindCheck;
 use crate::features::commits::{self, CommitsIntent, CommitsPanel, CommitsTab};
 use crate::features::conflicts::{self, ConflictView};
 use crate::features::custom_commands::{self, PendingCommand};
-use crate::features::diff;
 use crate::features::diff::renderers::external_diff::map_rows;
 use crate::features::diff::renderers::{ExternalRenderer, RenderedDiff, RendererKind};
+use crate::features::diff::{self, DiffIntent};
 use crate::features::files::{self, IgnoreDraft};
 use crate::features::operation;
 use crate::features::operation::StopWorkCheck;
 use crate::features::pull_requests::{self, PrCreating, PrDraft};
 use crate::features::repos::{self, ParkedRepo};
-use crate::features::review::{self, PrMerging};
+use crate::features::review::{self, PrMerging, ReviewIntent};
 use crate::features::stash::{self, StashDraft, StashList};
 use crate::features::submodules;
 use crate::features::sync;
@@ -431,6 +431,9 @@ impl AppState {
                         }
                         return self.apply_input();
                     }
+                    Resolution::Unbound if focus == KeyScope::ReviewComment => {
+                        return self.update(AppIntent::Review(ReviewIntent::TypeComment(key)));
+                    }
                     // Only a prompt or the editor takes text; elsewhere
                     // unbound keys are dropped. A popup over the editor
                     // keeps the keys from it.
@@ -563,7 +566,15 @@ impl AppState {
             AppIntent::Operation(i) => return operation::update(self, i),
             AppIntent::Repos(i) => return repos::update(self, i),
             AppIntent::Files(i) => return files::update(self, i),
-            AppIntent::Diff(i) => return diff::update(self, i),
+            AppIntent::Diff(i) => {
+                let landed = matches!(i, DiffIntent::Loaded { .. });
+                let mut effects = diff::update(self, i);
+                // A review thread `]`/`[` waits for may have streamed in.
+                if landed {
+                    effects.extend(self.review_jump_landed());
+                }
+                return effects;
+            }
             AppIntent::ConfigLoaded {
                 repo,
                 keymap,
@@ -720,7 +731,12 @@ impl AppState {
             }
             (Context::Workspace, Focus::Blame(_)) => KeyScope::Blame,
             (Context::Workspace, Focus::Conflict(_)) => KeyScope::Conflict,
+            // Over the files screen or the conversation.
+            (Context::Review { .. }, _) if review::composer_open(self) => KeyScope::ReviewComment,
             (Context::Review { .. }, _) => match &self.review.files {
+                Some(_) if review::pending_list_open(self) => KeyScope::ReviewPending,
+                Some(_) if review::thread_reader_open(self) => KeyScope::ReviewThread,
+                Some(_) if review::comment_pick_open(self) => KeyScope::ReviewPick,
                 Some(_) if review::review_diff_focused(self) => KeyScope::ReviewDiff,
                 Some(_) if matches!(self.review.screen, review::ReviewScreen::Files(_)) => {
                     KeyScope::ReviewFiles
@@ -941,7 +957,8 @@ impl AppState {
             | KeyScope::SkipConfirm
             | KeyScope::AutosquashConfirm
             | KeyScope::PatchConfirm
-            | KeyScope::DropRangeConfirm => self.answer_question(scope, Answer::YOnly),
+            | KeyScope::DropRangeConfirm
+            | KeyScope::ReviewCommentConfirm => self.answer_question(scope, Answer::YOnly),
             _ => vec![],
         }
     }
@@ -5575,6 +5592,7 @@ mod tests {
             (pick(PickPurpose::TargetRemote), Some("pull request")),
             (pick(PickPurpose::BaseBranch), Some("pull request")),
             (pick(PickPurpose::MergeMethod), Some("pull request")),
+            (pick(PickPurpose::ReviewCommit), None),
             (prompt(PromptKind::PullRequestTitle), Some("pull request")),
             (
                 Popup::Question(crate::features::pull_requests::create_question(

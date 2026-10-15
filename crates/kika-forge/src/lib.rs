@@ -7,16 +7,21 @@
 //! settings apply and Kika never holds a token.
 
 pub mod allow;
+pub mod anchor;
 pub mod cache;
 pub mod client;
+pub mod discussion;
+pub mod discussion_write;
 pub mod github;
 pub mod gitlab;
 pub mod head;
 pub mod merge;
+pub mod pending;
 pub mod remote;
 pub mod review;
 pub mod task;
 pub mod url;
+pub mod viewed;
 
 use std::collections::HashMap;
 

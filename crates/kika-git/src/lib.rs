@@ -14,6 +14,7 @@ pub mod error;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake;
 pub mod forge_remote;
+mod git_dir_file;
 pub mod head;
 mod joiner;
 pub mod log;

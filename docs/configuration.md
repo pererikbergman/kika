@@ -449,12 +449,109 @@ pull request, then to the queue, then to the workspace.
   fetched at most once a session, so if it is still missing after that,
   Kika says so and leaves it to you. A password or passphrase is asked as
   for a fetch from the workspace.
-- Viewed marks are read for the first 100 files; the rest, and a file
-  whose name is not UTF-8, show `?`. Marking files viewed is not done here.
+- Viewed marks are read with the pull request, 100 files per
+  `gh api graphql --include --hostname <host> --input -` call (the
+  repository, number and page cursor go on its input), for at most 1000
+  files (10 calls). Each call shows in the Command log. Paging stops at a
+  rate limit or a failed page. Files past the cap or past such a stop, and
+  files whose name is not UTF-8, show `?`.
+- `v` on the files screen marks the selected file viewed on GitHub, or
+  not viewed when it is already. It is one
+  `gh api graphql --include --hostname <host> --input -` call, shown in
+  the Command log; the pull request's id and the file's path travel on its
+  input. It is asked only when you press `v`, only on an allowed `github`
+  host, and not while that host is rate limited. GitHub keeps the mark per
+  file for the whole pull request. While GitHub has not answered yet, the
+  file's mark shows a dim `…`. A file whose mark is `?` can still be
+  marked; its `?` turns to the mark once GitHub takes it. A file whose
+  name is not UTF-8 cannot be marked.
+- `c` on the files screen picks what it shows: "Whole pull request", or
+  one of its commits, oldest first, as `<id> <subject>`. A commit's files
+  and diff are against its first parent, so a merge commit shows what it
+  brought in from that side. The selected file stays selected when the
+  new view has it; otherwise the first file is. The commits are read once
+  per files screen with `git log --no-show-signature --no-color --format=%H%x00%P%x00%s -n 251 <merge-base>..<head> --`;
+  only the latest 250 are offered, and the list then ends with a note
+  saying so. The list title shows the view, `whole pull request` or
+  `commit 2/5 <id>`, and its viewed count is of the files listed. Viewed
+  marks stay the pull request's: a commit's files show the same marks,
+  and `v` there marks the file for the whole pull request. It is local git only and asks GitHub nothing.
+- Opening a pull request (or `r`) then reads its review threads, comments
+  and reviews in one more
+  `gh api graphql --include --hostname <host> --input -` call, with the
+  repository and number on its input. The detail says how many threads
+  are unresolved. The files screen shows each thread under the line it is
+  on, old or new side, with its author, time and whether it is resolved;
+  this is in the whole pull request view only, and a commit's view shows
+  the file's threads above its diff as "on the whole pull request".
+  Resolved threads are folded to one line there; `enter` reads them in
+  full (see below). Outdated threads show at the top of the file with
+  the lines they were written on, as do comments on the whole file and
+  threads whose line is not in the diff; that block takes at most half the
+  diff and counts the threads it has no room for. `]` and `[` jump to the
+  next and previous unresolved thread, across the files; they stop at the
+  first and last, and the thread jumped to is drawn first. The diff's
+  title says `threads loading…`, `threads unavailable` (go back with
+  `esc` and press `r` to try again), how many are unresolved, or
+  `thread 2/5` after a jump; a `+` there means GitHub has more threads
+  than were read. At most 100 threads, 50 comments in each, and 200
+  conversation items (100 comments and 100 reviews) are read.
+- `C` on a pull request shows its conversation: the comments on the pull
+  request and the review bodies, oldest first, each with its author, time
+  and what it did (`commented`, `approved`, `requested changes`). `j`/`k`
+  and `pgdn`/`pgup` scroll it (`pgdn`/`pgup` scroll the pull request too),
+  and `esc` goes back to the pull request. It ends with
+  `More on GitHub (showing the first N)` when GitHub has more than were
+  read. `enter` on the files screen opens the selected thread (the one
+  `]`/`[` went to), or the file's first, in a box over the screen with
+  every comment in full, resolved threads included, and the lines an
+  outdated thread was written on. In it `]`/`[` step through all of the
+  file's threads, resolved ones too, `j`/`k`/`pgdn`/`pgup` scroll, and
+  `esc` closes it; `]` on the diff then goes on from the thread read
+  last. Neither one asks GitHub anything: both show what was read with
+  the pull request.
+- `a` on the files screen writes a comment on a line or a range of lines
+  of the diff, old or new side. It starts a pick on the first numbered line
+  in view: `j`/`k` move over the numbered lines (file and `@@` headers are
+  skipped), `v` starts a range at the line picked, `enter` (or `a` again)
+  writes the comment on the line or the range, and `esc` stops. A range
+  stays inside one hunk. An added or unchanged line takes the comment on
+  the new side, a removed line on the old side. The comment is typed in a
+  box over the screen, markdown, as many lines as you like: `enter` is a
+  new line, `tab` types a tab (it does not move the focus), `q` and `?`
+  are typed, `ctrl-s` keeps it and `esc` drops it
+  (asking first when it has text). `a` works in the whole pull request
+  view only, not in a commit's (`c` goes back).
+- A comment is not posted. It goes into the pending review, which only you
+  see until you submit it; under its line the diff shows
+  `✎ pending: <first line>`, and the file list's title counts the pending
+  comments. `P` lists them as `path:L12` or `path:R10-R14` with their first
+  line: `enter` or `e` edits one in the same box, `d` deletes one after a
+  question only `y` answers, and `esc` closes the list. At most 500
+  comments of up to 64 KiB each are kept per pull request.
+- The pending review is kept on disk, so it is still there after Kika
+  quits: one file per pull request and clone in
+  `$XDG_STATE_HOME/kika/reviews`, else
+  `~/Library/Application Support/kika/reviews` (macOS),
+  `~/.local/state/kika/reviews` (Linux) or `%LOCALAPPDATA%\kika\reviews`
+  (Windows). Each file is named by a hash, `<16 hex digits>.json`, and
+  inside it names the host, owner, repository name, pull request number
+  and path it belongs to, then each comment's file, lines, text and the
+  head it was written on. Only you can read it. A file there that Kika did
+  not write (a link, too large, malformed, of another version or for
+  another pull request) is never read or overwritten: comments on that
+  pull request are off, and Kika says why with the file's full path, so
+  you can remove it to start again. Writing comments asks GitHub nothing
+  and starts no other program.
+- Each change is written as soon as you make it, one write at a time. If
+  you quit while a write is still running and you changed something after
+  it started, that newest change can be lost.
 
-- GitHub is asked only when you enter review mode, open a pull request,
-  press `r` or answer `y` to a merge; nothing refreshes by itself, and
-  nothing is cached on disk.
+- GitHub is asked only when you enter review mode, open a pull request
+  (which reads its viewed marks in up to 10 calls), press `r` or answer
+  `y` to a merge, or press `v` on the files screen; opening a pull request
+  or `r` asks for its detail, then its threads. Nothing refreshes by
+  itself, and nothing GitHub sends is cached on disk.
 - Only a `github` host is asked. With none, or with the remote on another
   host, review mode says so and asks nobody; a rate-limited host is not
   asked until its limit resets.
@@ -1663,11 +1760,12 @@ and resetting a bisect drops its marks, so `enter` does not answer it.
 
 ### Skip the stopped commit?
 
-Skipping a rebase, cherry-pick or revert commit loses the conflict resolution
-done since the stop, so `enter` does not answer it. It is only asked when
-there is such work: a conflict resolved in the index, a conflicted file
-edited, or, in a rebase, an unstaged change to a tracked file. If Kika cannot
-tell, it asks. With no work since the stop, `s` skips right away.
+Skipping a rebase, cherry-pick or revert commit loses the work done since
+the stop, so `enter` does not answer it. It is only asked when there is such
+work: a conflict resolved in the index, a conflicted file edited, in a rebase,
+an unstaged change to a tracked file, or, at a rebase `edit` or `break` stop,
+a staged change. If Kika cannot tell, it asks. With no work since the stop,
+`s` skips right away.
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
@@ -1742,6 +1840,29 @@ GitHub and cannot be undone, so `enter` does not answer it.
 | `merge_pr.no` | `n`, `esc` | No, merge nothing | locked |
 | `merge_pr.quit` | `ctrl-c` | Quit Kika | locked |
 
+### Check out this pull request?
+
+`b` on a pull request's detail checks its head out as the local branch
+`pr/<number>` and goes to the workspace. It reads the branch with
+`for-each-ref`'s `%(worktreepath)`, so it needs git 2.23 or newer; an
+older git says why and nothing runs.
+
+The question names the branch `pr/<number>`, what happens to it, and the
+remote a missing head is fetched from first. Nothing is fetched before
+`y`, and `enter` does not answer it. A branch with commits the pull
+request does not have, or one another worktree has checked out, is never
+moved. Right before it runs, the branch is read again: if it, or the
+branch checked out here, changed while the question was open, nothing
+runs. A branch that is behind is switched to first and only then
+fast-forwarded, so a switch git refuses for local changes leaves it
+where it was. Uncommitted changes come along, or git refuses.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `checkout_pr.yes` | `y` | Yes, check out the pull request's branch | locked |
+| `checkout_pr.no` | `n`, `esc` | No, check out nothing | locked |
+| `checkout_pr.quit` | `ctrl-c` | Quit Kika | locked |
+
 ### Pick one (a pull request's target remote or base branch, a failing check, or a merge method)
 
 | Binding id | Default keys | Action | Repo file |
@@ -1764,18 +1885,35 @@ GitHub and cannot be undone, so `enter` does not answer it.
 | `review.filter` | `/` | Filter the queue by number, title or author | |
 | `review.refresh` | `r` | Ask GitHub again for the queues or the open pull request | locked |
 | `review.open_check` | `o` | Open a failing check's page in the browser | locked |
-| `review.back` | `esc` | Back to the pull request from its files, else to the queue; in the queue, clear the filter, else back to the workspace | locked |
+| `review.back` | `esc` | Back to the pull request from its files or conversation, else to the queue; in the queue, clear the filter, else back to the workspace | locked |
 | `review.files` | `f` | Show the pull request's changed files and diff, fetching its commits once if they are not here | locked |
 | `review.merge` | `M` | Merge the open pull request on GitHub, after a question only y answers | locked |
+| `review.checkout` | `b` | Check out the open pull request as branch pr/<number> and go to the workspace, after a question only y answers | locked |
+| `review.conversation` | `C` | Show the pull request's conversation: its comments and review bodies, oldest first | |
+| `review.comment_general` | `a` | Write a comment on the pull request, posted to GitHub after a question only y answers | locked |
+| `review.page_down` | `pgdn` | Scroll the pull request or its conversation down a page | |
+| `review.page_up` | `pgup` | Scroll the pull request or its conversation up a page | |
 
 ### Review files (one pull request's changed files and diff)
 
 The file list has the Review keys too: `j`/`k` pick a file and show its
 diff, `esc` goes back to the pull request.
 
+A review thread marked **addressed** (in green) is unresolved, and GitHub
+says the lines it was written on changed in a later push. It says the
+code moved, not that the comment was answered; resolved threads whose
+lines changed still read `outdated`.
+
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
 | `review_files.focus` | `tab` | Move the keys between the file list and the diff | |
+| `review_files.viewed` | `v` | Mark the selected file viewed on GitHub, or not viewed if it is | locked |
+| `review_files.commit` | `c` | Review the whole pull request or one of its commits | |
+| `review_files.next_thread` | `]` | Go to the next unresolved review thread | |
+| `review_files.prev_thread` | `[` | Go to the previous unresolved review thread | |
+| `review_files.thread` | `enter` | Read the selected review thread, or the file's first, with every comment in full | |
+| `review_files.comment` | `a` | Pick a diff line or range and write a comment on it, kept in the pending review | |
+| `review_files.pending` | `P` | List the pending review's comments, to edit or delete them | |
 | `review_diff.down` | `j`, `down` | Scroll the diff down a line | |
 | `review_diff.up` | `k`, `up` | Scroll the diff up a line | |
 | `review_diff.page_down` | `pgdn` | Scroll the diff down a page | |
@@ -1784,6 +1922,68 @@ diff, `esc` goes back to the pull request.
 | `review_diff.search_next` | `n` | Go to the next match of the search | |
 | `review_diff.search_prev` | `N` | Go to the previous match of the search | |
 | `review_diff.escape` | `esc` | Clear the search, else go back to the file list | |
+
+### Review thread (one review thread read in full over the files screen)
+
+`q` and `?` do nothing here; `esc` closes the thread.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `review_thread.down` | `j`, `down` | Scroll the thread down a line | |
+| `review_thread.up` | `k`, `up` | Scroll the thread up a line | |
+| `review_thread.page_down` | `pgdn` | Scroll the thread down a page | |
+| `review_thread.page_up` | `pgup` | Scroll the thread up a page | |
+| `review_thread.next` | `]` | Read the file's next review thread, resolved ones included | |
+| `review_thread.prev` | `[` | Read the file's previous review thread, resolved ones included | |
+| `review_thread.reply` | `a` | Write a reply to the thread, posted to GitHub after a question only y answers | locked |
+| `review_thread.resolve` | `R` | Resolve the thread on GitHub, or unresolve it if it is resolved | locked |
+| `review_thread.close` | `esc` | Close the thread and go back to the files | |
+| `review_thread.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Pick lines to comment on (`a` on the files screen)
+
+`q` and `?` do nothing here; `esc` stops picking.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `review_pick.down` | `j`, `down` | Move to the next numbered line | |
+| `review_pick.up` | `k`, `up` | Move to the previous numbered line | |
+| `review_pick.range` | `v` | Start a range at this line, or drop it | |
+| `review_pick.confirm` | `enter`, `a` | Write a comment on the line or range picked | |
+| `review_pick.cancel` | `esc` | Stop picking and go back to the files | |
+| `review_pick.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Pending comment (the comment being typed)
+
+Every other key is typed into the comment: `enter` is a new line, and `q`
+and `?` are typed.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `review_comment.save` | `ctrl-s` | Keep a line comment in the pending review, or ask to post a reply or general comment | |
+| `review_comment.cancel` | `esc` | Close the comment, asking first when it has text | |
+| `review_comment.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Pending review (`P` on the files screen)
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `review_pending.down` | `j`, `down` | Select the next pending comment | |
+| `review_pending.up` | `k`, `up` | Select the previous pending comment | |
+| `review_pending.edit` | `enter`, `e` | Edit the selected comment | |
+| `review_pending.delete` | `d` | Delete the selected comment, after a question only y answers | |
+| `review_pending.close` | `esc` | Close the list | |
+| `review_pending.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Delete this comment? / Discard this comment?
+
+The comment is lost, so `enter` does not answer it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `review_comment_confirm.yes` | `y` | Yes: delete or discard the comment, or post it to GitHub | locked |
+| `review_comment_confirm.no` | `n`, `esc` | No, keep the comment | locked |
+| `review_comment_confirm.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Submodule list
 

@@ -2721,6 +2721,7 @@ async fn review_files_fetch_a_missing_head_once_then_list_and_diff_it_locally() 
     use std::sync::Arc;
 
     use crate::features::review::ReviewScreen;
+    use kika_forge::discussion::fixtures::DISCUSSION;
     use kika_forge::github::{FakeGh, answer};
     use kika_forge::review::fixtures::{DETAIL, QUEUES};
 
@@ -2729,20 +2730,45 @@ async fn review_files_fetch_a_missing_head_once_then_list_and_diff_it_locally() 
     let detail = DETAIL
         .replace(&"1".repeat(40), &head)
         .replace(&"2".repeat(40), &base);
-    let gh = Arc::new(FakeGh::new().reply(answer(QUEUES)).reply(answer(&detail)));
+    let discussion = DISCUSSION.replace(&"1".repeat(40), &head);
+    let gh = Arc::new(
+        FakeGh::new()
+            .reply(answer(QUEUES))
+            .reply(answer(&detail))
+            .reply(answer(&discussion)),
+    );
     let mut app = Harness::start_with_forge(&repo, Arc::clone(&gh)).await;
     let refs_before = repo.git(["for-each-ref"]);
 
     app.type_text("G").await;
     app.press(KeyCode::Enter).await;
     app.assert_screen_contains("Add widget caching");
+    // The conversation shows what was read with the pull request.
+    app.type_text("C").await;
+    assert_eq!(app.state().review.screen, ReviewScreen::Conversation(12));
+    app.assert_screen_contains("frank · 2023-11-14 20:00 · commented");
+    app.assert_screen_contains("Looks good overall");
+    app.press(KeyCode::Esc).await;
+    assert_eq!(app.state().review.screen, ReviewScreen::Detail(12));
+    app.assert_screen_contains("Add widget caching");
     app.press(KeyCode::Char('f')).await;
 
     assert_eq!(app.state().review.screen, ReviewScreen::Files(12));
-    app.assert_screen_contains("PR #12 · files (1/1)");
+    app.assert_screen_contains("files (1/1) · whole pull request");
     app.assert_screen_contains("M ✓ src/cache.rs");
     app.assert_screen_contains("+1 −1");
     app.assert_screen_contains("+two");
+    // The review threads, read after the detail: line 3 is not in this
+    // one-line diff, so its thread shows above it.
+    app.assert_screen_contains("line 3 · not in this diff · alice");
+    // `]` to it, then read it whole over the screen, and close it.
+    app.press(KeyCode::Char(']')).await;
+    app.press(KeyCode::Enter).await;
+    app.assert_screen_contains("┌ thread 2/2 ");
+    app.assert_screen_contains("src/cache.rs · line 3 · unresolved · 2 comments");
+    app.press(KeyCode::Esc).await;
+    assert!(app.state().review.files.as_ref().unwrap().reader.is_none());
+    assert_eq!(gh.calls().len(), 3);
     assert!(repo.try_git(["cat-file", "-e", &format!("{head}^{{commit}}")]));
     assert_eq!(repo.git(["for-each-ref"]), refs_before, "a ref was written");
     assert_eq!(app.state().review.fetched_heads.len(), 1);
@@ -2755,13 +2781,14 @@ async fn review_files_fetch_a_missing_head_once_then_list_and_diff_it_locally() 
     app.press(KeyCode::Esc).await;
 
     // Back to the pull request and in again: the head is here now, so
-    // nothing more is fetched, and GitHub was asked only twice.
+    // nothing more is fetched, and GitHub was asked only three times:
+    // queues, detail, threads.
     app.press(KeyCode::Esc).await;
     assert_eq!(app.state().review.screen, ReviewScreen::Detail(12));
     app.press(KeyCode::Char('f')).await;
     app.assert_screen_contains("+two");
     assert_eq!(app.state().review.fetched_heads.len(), 1);
-    assert_eq!(gh.calls().len(), 2);
+    assert_eq!(gh.calls().len(), 3);
 }
 
 #[tokio::test(flavor = "multi_thread")]

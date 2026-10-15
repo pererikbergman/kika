@@ -211,8 +211,8 @@ pub(crate) fn abort_question(operation: Operation) -> Option<ConfirmQuestion> {
 
 /// "Skip the commit the rebase stopped on?", asked when the check found
 /// work since the stop. It names the operation the check ran for, so the
-/// answer skips what the question said. Only `y` answers: the conflict
-/// resolution done since the stop is lost. `head` is the detached `HEAD`
+/// answer skips what the question said. Only `y` answers: the work done
+/// since the stop is lost. `head` is the detached `HEAD`
 /// it is asked from, so a yes runs nothing once that has moved. A merge
 /// has nothing to skip and a bisect skips from its own keys, so neither
 /// has a question.
@@ -227,7 +227,7 @@ pub(crate) fn skip_question(
         title,
         format!(
             "Skip the commit the {name} stopped on? \
-             Conflict resolution done since the stop is lost. (y/n)"
+             Work done since the stop is lost. (y/n)"
         ),
     ))
 }
@@ -246,7 +246,7 @@ pub(crate) fn skip_question_unchecked(
         format!(
             "Skip the commit the {name} stopped on? \
              Kika could not check for work since the stop; \
-             any conflict resolution done since then is lost. (y/n)"
+             any work done since then is lost. (y/n)"
         ),
     ))
 }
@@ -604,7 +604,7 @@ mod tests {
         assert_eq!(
             ask.text,
             "Skip the commit the revert stopped on? \
-             Conflict resolution done since the stop is lost. (y/n)"
+             Work done since the stop is lost. (y/n)"
         );
         assert_eq!(
             (ask.scope, ask.answer, ask.range, ask.head.clone()),
@@ -634,7 +634,7 @@ mod tests {
             unknown.text,
             "Skip the commit the revert stopped on? \
              Kika could not check for work since the stop; \
-             any conflict resolution done since then is lost. (y/n)"
+             any work done since then is lost. (y/n)"
         );
         assert_eq!(
             ConfirmQuestion {

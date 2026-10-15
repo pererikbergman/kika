@@ -361,6 +361,7 @@ impl AppState {
             PickPurpose::BaseBranch => self.choose_base(cursor),
             PickPurpose::CheckDetails => return self.pick_check(cursor),
             PickPurpose::MergeMethod => self.pick_merge_method(cursor),
+            PickPurpose::ReviewCommit => return self.pick_review_commit(cursor),
         }
         vec![]
     }
@@ -556,11 +557,14 @@ impl AppState {
         }
     }
 
-    /// Closing a step of a pull request stops it. The check details
-    /// list belongs to review mode, not to a draft.
+    /// Closing a step of a pull request stops it. The check details and
+    /// review commit lists belong to review mode, not to a draft.
     pub(crate) fn pull_requests_popup_closed(&mut self, closed: &Popup) {
         let step = match closed {
-            Popup::PickList(list) => list.purpose != PickPurpose::CheckDetails,
+            Popup::PickList(list) => !matches!(
+                list.purpose,
+                PickPurpose::CheckDetails | PickPurpose::ReviewCommit
+            ),
             Popup::Prompt { kind, .. } => *kind == PromptKind::PullRequestTitle,
             Popup::Question(q) => q.scope == KeyScope::CreatePullRequest,
             _ => false,
