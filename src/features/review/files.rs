@@ -7,7 +7,9 @@
 //! with `c` (`commit_view.rs`); the marks stay the pull request's, and
 //! the selected file stays selected, by path, when the new view lists it.
 
+use super::comment_pick::CommentPick;
 use super::git::{CommitsHere, FileCounts, PrCommit, PrFileRow};
+use super::reader::ThreadReader;
 use super::state::{ReviewScreen, ReviewState};
 use crate::diff_pane::DiffStart;
 use crate::effect::{Effect, Tag};
@@ -108,6 +110,13 @@ pub struct PrFiles {
     pub thread: Option<usize>,
     /// A thread whose row has not streamed in yet, scrolled to when it does.
     pub jump: Option<usize>,
+    /// The thread read in full over the screen, while it is open.
+    pub reader: Option<ThreadReader>,
+    /// The diff rows a comment is being picked on, in pick mode.
+    pub pick: Option<CommentPick>,
+    /// The node id of the thread a reply was posted to, so the reader
+    /// opens on it again once the discussion is read again.
+    pub reopen_thread: Option<String>,
 }
 
 impl PrFiles {
@@ -130,6 +139,9 @@ impl PrFiles {
             marking: None,
             thread: None,
             jump: None,
+            reader: None,
+            pick: None,
+            reopen_thread: None,
         }
     }
 
@@ -210,6 +222,9 @@ fn detail_oids(review: &ReviewState) -> Result<(u64, CommitId, CommitId), Reason
 /// Why `f` cannot open the files: no loaded pull request with both
 /// commit ids, no known repository on a forge host, or git is busy.
 pub(crate) fn review_files_disabled(state: &AppState) -> Option<Reason> {
+    if let Some(reason) = super::conversation::on_conversation(state) {
+        return Some(reason);
+    }
     if let Err(reason) = detail_oids(&state.review) {
         return Some(reason);
     }
@@ -287,7 +302,9 @@ impl AppState {
         let tag = self.files_tag();
         self.review.screen = ReviewScreen::Files(number);
         self.review.files = Some(PrFiles::begin(number, head, base, tag.seq));
-        self.check_review_commits(tag)
+        let mut effects = self.check_review_commits(tag);
+        effects.extend(self.load_pending_review(number));
+        effects
     }
 
     fn check_review_commits(&mut self, tag: Tag) -> Vec<Effect> {
@@ -375,6 +392,9 @@ impl AppState {
         tag: Tag,
         result: Result<(), String>,
     ) -> Vec<Effect> {
+        if self.checkout_fetch(tag) {
+            return self.pr_checkout_fetched(tag, result);
+        }
         // Every user effect reports back once, stale or not.
         let held = self.holds_op(tag);
         self.release_op(tag);
@@ -442,6 +462,8 @@ impl AppState {
 
     /// Stream the selected file's diff over the range shown, from `start`.
     pub(super) fn review_file_diff(&mut self, start: DiffStart) -> Vec<Effect> {
+        // Rows picked on the diff shown are not this one's.
+        self.end_comment_pick();
         let request = self.review.files.as_ref().and_then(|files| {
             let range = files.range.as_ref()?;
             let row = files.selected()?;
@@ -472,6 +494,7 @@ impl AppState {
         files.cursor = next;
         files.thread = None;
         files.jump = None;
+        files.reader = None;
         self.review_file_diff(DiffStart::Keep)
     }
 
@@ -491,6 +514,8 @@ impl AppState {
             return vec![];
         };
         self.review.screen = ReviewScreen::Detail(files.number);
+        self.review.composer = None;
+        self.review.pending_list = None;
         self.close_diff()
     }
 
@@ -576,6 +601,11 @@ pub(crate) mod tests {
     }
 
     fn check_tag(effects: &[Effect]) -> Tag {
+        // Opening the screen also reads its pending review.
+        let effects = match effects {
+            [check @ .., Effect::LoadPendingReview { .. }] => check,
+            all => all,
+        };
         match effects {
             [
                 Effect::CheckReviewCommits {

@@ -1,9 +1,12 @@
 //! The I/O behind the review effects: reading the queues and a pull
 //! request through `gh`, checking for and fetching its commits, listing
-//! its files and its commits, and merging it. Each answers with exactly
-//! one intent; none blocks the event loop.
+//! its files and its commits, planning a checkout of its head,
+//! merging it, and reading and writing its pending review in the state
+//! directory. Each answers with exactly one intent; none blocks the
+//! event loop.
 
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -12,13 +15,17 @@ use crate::background;
 use crate::effect::{AnswerSlot, Bridge, Tag};
 use crate::features::review::ReviewIntent;
 use crate::intent::AppIntent;
+use kika_forge::discussion_write::DiscussionWrite;
 use kika_forge::merge::MergeMethod;
+use kika_forge::pending::{self, PendingError, PendingKey, PendingReview};
 use kika_forge::review::{self, ReviewError, ReviewLoad};
 use kika_forge::task::ForgeContext;
 use kika_forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
 use kika_git::GitRunner;
+use kika_git::branches::BranchName;
 use kika_git::commit_files::{CommitId, CommitRange};
 use kika_git::remotes::RemoteName;
+use kika_git::safe_text::terminal_safe;
 
 /// Read the review queues; always answered by one `ReviewIntent::QueuesLoaded`.
 pub(crate) fn load_queues(
@@ -162,6 +169,33 @@ pub(crate) fn check_commits(
         // A panic still answers, or the files screen would wait forever.
         background::crashed("git cat-file"),
         move |result| AppIntent::Review(ReviewIntent::ObjectsChecked { tag, result }),
+    );
+}
+
+/// Plan checking out `head` as `branch`, and find the remote a missing
+/// head would be fetched from. Local only: nothing is fetched here.
+/// Always answered by one `ReviewIntent::CheckoutPlanned`.
+pub(crate) fn plan_checkout(
+    runner: Arc<dyn GitRunner>,
+    tx: UnboundedSender<AppIntent>,
+    tag: Tag,
+    head: CommitId,
+    branch: BranchName,
+    hosts: Vec<ForgeHost>,
+    repo: ForgeRepo,
+) {
+    background::run(
+        tx,
+        move || {
+            let mut plan = pr_objects::plan_checkout(runner.as_ref(), &head, &branch)?;
+            if !plan.head_here {
+                plan.remote = review::fetch_remote(runner.as_ref(), &hosts, &repo);
+            }
+            Ok(plan)
+        },
+        // A panic still answers, or the checkout would wait forever.
+        background::crashed("git"),
+        move |result| AppIntent::Review(ReviewIntent::CheckoutPlanned { tag, result }),
     );
 }
 
@@ -316,6 +350,102 @@ pub(crate) fn set_file_viewed(
         // A panic still answers, or the mark would stay in flight.
         |_| Err(CreateError::Status(ForgeStatus::Failed)),
         move |result| answer(path, result),
+    );
+}
+
+/// Write `write` to pull request `number`'s discussion through `gh`;
+/// always answered by one `ReviewIntent::DiscussionWritten`. It is never
+/// tried again: a post that timed out may still have been made.
+pub(crate) fn write_discussion(
+    forge: Option<ForgeContext>,
+    tx: UnboundedSender<AppIntent>,
+    tag: Tag,
+    host: ForgeHost,
+    repo: ForgeRepo,
+    number: u64,
+    write: DiscussionWrite,
+) {
+    let sent_to = host.clone();
+    let answer = move |write: DiscussionWrite, result| {
+        AppIntent::Review(ReviewIntent::DiscussionWritten {
+            tag,
+            host: sent_to.clone(),
+            number,
+            write,
+            result,
+        })
+    };
+    // No forge client: nothing may reach the network. The client itself
+    // refuses a repository `[forge.allow]` leaves out.
+    let Some(forge) = forge else {
+        let _ = tx.send(answer(write, Err(CreateError::Status(ForgeStatus::Failed))));
+        return;
+    };
+    let sent = write.clone();
+    background::run(
+        tx,
+        move || forge.write_discussion(&host, &repo, &sent),
+        // A panic still answers, or the write would stay in flight.
+        |_| Err(CreateError::Status(ForgeStatus::Failed)),
+        move |result| answer(write, result),
+    );
+}
+
+/// Read the pending review stored for `key` in `store`; with no store
+/// there is none. Local files only. Always answered by one
+/// `ReviewIntent::PendingLoaded`.
+pub(crate) fn load_pending(
+    store: Option<PathBuf>,
+    tx: UnboundedSender<AppIntent>,
+    tag: Tag,
+    key: PendingKey,
+) {
+    let file = store.as_ref().map(|dir| dir.join(key.file_name()));
+    background::run(
+        tx,
+        move || match store {
+            Some(dir) => pending::read(&dir, &key),
+            None => Ok(None),
+        },
+        |_| Err(PendingError::Unreadable("reading it crashed")),
+        move |result| AppIntent::Review(ReviewIntent::PendingLoaded { tag, result, file }),
+    );
+}
+
+/// The newest save written to each pending-review file this run, so a
+/// save that lost a race with a later one never puts older comments back.
+static WRITTEN: Mutex<Vec<(PathBuf, u64)>> = Mutex::new(Vec::new());
+
+/// Write `review` for `key` in `store`. Saves of one file run one at a
+/// time, and one older (by `tag.seq`) than a save already written is
+/// skipped. Local files only. Always answered by one
+/// `ReviewIntent::PendingSaved`.
+pub(crate) fn save_pending(
+    store: Option<PathBuf>,
+    tx: UnboundedSender<AppIntent>,
+    tag: Tag,
+    key: PendingKey,
+    review: PendingReview,
+) {
+    background::run(
+        tx,
+        move || {
+            let Some(dir) = store else {
+                return Err("No place to keep the pending review".to_string());
+            };
+            let file = dir.join(key.file_name());
+            let mut written = WRITTEN.lock().unwrap_or_else(|e| e.into_inner());
+            if written.iter().any(|(f, seq)| *f == file && *seq > tag.seq) {
+                return Ok(());
+            }
+            let result = pending::write(&dir, &key, &review)
+                .map_err(|e| terminal_safe(e.to_string().as_bytes()));
+            written.retain(|(f, _)| *f != file);
+            written.push((file, tag.seq));
+            result
+        },
+        background::crashed("Saving the pending review"),
+        move |result| AppIntent::Review(ReviewIntent::PendingSaved { tag, result }),
     );
 }
 
@@ -713,6 +843,81 @@ mod tests {
         Runtime::new(git.clone(), tx)
             .with_forge(client())
             .spawn(mark(left_out.clone()));
+        assert_eq!(rx.recv().await, failed(&left_out));
+        assert_eq!(gh.calls().len(), 1);
+        git.assert_done();
+    }
+
+    #[tokio::test]
+    async fn a_discussion_write_answers_once_and_reaches_gh_only_through_the_client() {
+        use kika_forge::allow::AllowRule;
+        use kika_forge::discussion_write::{DiscussionWrite, Written};
+        use kika_forge::github::{FakeGh, GhCall, answer};
+
+        let git = Arc::new(FakeRunner::new());
+        let gh = Arc::new(FakeGh::new().reply(answer(
+            "HTTP/2.0 200 OK\r\n\r\n{\"data\":{\"addPullRequestReviewThreadReply\":{\"comment\":{\"id\":\"PRRC_1\"}}}}",
+        )));
+        let client = || {
+            Some(ForgeContext {
+                gh: gh.clone(),
+                glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
+                sink: CommandSink::new(),
+                cache_dir: None,
+            })
+        };
+        let reply = DiscussionWrite::Reply {
+            thread: "PRRT_kwDOA1".into(),
+            body: "Done".into(),
+        };
+        let send = |host: ForgeHost| Effect::WriteDiscussion {
+            tag: forge_tag(),
+            host,
+            repo: ForgeRepo {
+                host: "github.com".into(),
+                owner: "acme".into(),
+                name: "widgets".into(),
+            },
+            number: 42,
+            write: reply.clone(),
+        };
+        // The answer names the host the write was sent to.
+        let answered = |host: &ForgeHost, result| {
+            Some(AppIntent::Review(ReviewIntent::DiscussionWritten {
+                tag: forge_tag(),
+                host: host.clone(),
+                number: 42,
+                write: reply.clone(),
+                result,
+            }))
+        };
+        let github = ForgeHost::parse("github.com").unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        Runtime::new(git.clone(), tx)
+            .with_forge(client())
+            .spawn(send(github.clone()));
+        assert_eq!(rx.recv().await, answered(&github, Ok(Written::Posted)));
+        let [call] = gh.calls().try_into().unwrap();
+        let GhCall::Graphql { body } = &call.kind else {
+            panic!("{call:?}");
+        };
+        let sent: serde_json::Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(sent["variables"]["id"], "PRRT_kwDOA1");
+        assert_eq!(sent["variables"]["body"], "Done");
+
+        // Without a forge client, or for a repository `[forge.allow]`
+        // leaves out, nothing is asked.
+        let failed = |host| answered(host, Err(CreateError::Status(ForgeStatus::Failed)));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        Runtime::new(git.clone(), tx).spawn(send(github.clone()));
+        assert_eq!(rx.recv().await, failed(&github));
+        let left_out = ForgeHost::parse("github.com")
+            .unwrap()
+            .with_allow(vec![AllowRule::parse("other").unwrap()]);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        Runtime::new(git.clone(), tx)
+            .with_forge(client())
+            .spawn(send(left_out.clone()));
         assert_eq!(rx.recv().await, failed(&left_out));
         assert_eq!(gh.calls().len(), 1);
         git.assert_done();

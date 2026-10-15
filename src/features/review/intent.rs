@@ -2,9 +2,16 @@
 //! `AppIntent::Review`, and hands them to this feature's `update`
 //! (see `docs/adr/0002-nested-intents.md`).
 
+use std::path::PathBuf;
+
+use super::git::CheckoutPlan;
 use super::{CommitsHere, PrCommit, PrFileRow};
 use crate::effect::Tag;
+use crate::intent::Scroll;
+use crate::keymap::KeyPress;
 use kika_forge::discussion::PrDiscussion;
+use kika_forge::discussion_write::{DiscussionWrite, Written};
+use kika_forge::pending::{PendingError, PendingReview};
 use kika_forge::review::{PrDetail, Queues, ReviewError};
 use kika_forge::{CreateError, ForgeHost, ForgeRepo};
 use kika_git::commit_files::CommitRange;
@@ -112,10 +119,92 @@ pub(crate) enum ReviewIntent {
         repo: Option<ForgeRepo>,
         result: Result<Option<PrDiscussion>, ReviewError>,
     },
+    /// Show the open pull request's conversation: its comments and review
+    /// bodies, as already read.
+    OpenConversation,
+    /// Scroll the pull request or its conversation a page down, or up.
+    PageDown,
+    PageUp,
+    /// Read the selected review thread, or the file's first, in full.
+    OpenThreadReader,
+    /// Scroll the open thread by a line or a page.
+    ThreadReaderScroll(Scroll),
+    /// Show the file's next thread (`1`) or previous one (`-1`).
+    ThreadReaderStep(i32),
+    CloseThreadReader,
     /// The range shown, merge base to head or one commit against its first
     /// parent, and its changed files, or why not.
     FilesLoaded {
         tag: Tag,
         result: Result<(CommitRange, Vec<PrFileRow>), String>,
+    },
+    /// Pick the diff line or lines a pending comment goes on.
+    StartComment,
+    /// Move the pick to the next numbered row (`true`) or the previous.
+    StepCommentPick(bool),
+    /// Anchor a range at the pick, or drop the anchor.
+    ToggleCommentRange,
+    /// Write a comment on the rows picked.
+    ConfirmCommentPick,
+    CancelCommentPick,
+    /// A key the composer's bindings left: typed into the comment.
+    TypeComment(KeyPress),
+    /// Keep the comment in the pending review.
+    SaveComment,
+    /// Close the composer, asking first when it holds text.
+    EscapeComment,
+    /// The yes of "Discard this comment?".
+    DiscardComment,
+    /// Write a reply to the thread the reader shows.
+    ReplyToThread,
+    /// Resolve the thread the reader shows on GitHub, or unresolve it.
+    ToggleThreadResolved,
+    /// Write a general comment on the pull request whose conversation
+    /// shows.
+    StartGeneralComment,
+    /// The yes of "Post this … to GitHub?": post the composer's text.
+    PostComment,
+    /// GitHub answered `write` on pull request `number`, or why not.
+    DiscussionWritten {
+        tag: Tag,
+        /// The host the write went to, where a rate limit is recorded.
+        host: ForgeHost,
+        number: u64,
+        write: DiscussionWrite,
+        result: Result<Written, CreateError>,
+    },
+    /// List the pending comments.
+    OpenPendingList,
+    /// Move the list's cursor by this many rows.
+    MovePendingList(isize),
+    /// Edit the comment under the list's cursor.
+    EditPending,
+    /// Ask before deleting the comment under the list's cursor.
+    AskDeletePending,
+    /// The yes of "Delete this comment?": delete pending comment `id`.
+    DeletePending(u64),
+    ClosePendingList,
+    /// The stored pending review, `None` when there is none, or why it
+    /// was not read; `file` is where it is kept, when there is a store.
+    PendingLoaded {
+        tag: Tag,
+        result: Result<Option<PendingReview>, PendingError>,
+        file: Option<PathBuf>,
+    },
+    /// The pending review was written, or why not.
+    PendingSaved {
+        tag: Tag,
+        result: Result<(), String>,
+    },
+    /// Check out the open pull request's head as `pr/<number>`: plan it
+    /// from local git, then ask.
+    CheckoutPr,
+    /// Do the checkout the open question describes.
+    ConfirmCheckoutPr,
+    /// Where `pr/<number>` stands against the head, or why git could not
+    /// say.
+    CheckoutPlanned {
+        tag: Tag,
+        result: Result<CheckoutPlan, String>,
     },
 }

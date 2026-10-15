@@ -5,7 +5,7 @@
 //! the URL is built locally and handed to the configured browser.
 
 use super::files::{FilesStage, PrFiles, ReviewView, files_screen};
-use super::state::{NO_BROWSER, NO_FORGE};
+use super::state::{NO_BROWSER, NO_FORGE, NOT_READY};
 use crate::effect::Effect;
 use crate::keymap::Reason;
 use crate::model::AppState;
@@ -14,7 +14,6 @@ use kika_forge::anchor::{self, GhLine, GhSide, Placement};
 use kika_forge::url::pr_line_url;
 use kika_git::patch::LineId;
 
-const NOT_READY: &str = "Open the files first";
 const NOT_UTF8: &str = "GitHub cannot be pointed at a file whose name is not UTF-8";
 const NO_LINE: &str = "No diff line in view";
 const NOT_LINKABLE: &str = "This repository's address cannot be linked";

@@ -64,14 +64,14 @@ impl CacheKey {
 
 /// Where per-user caches go, which differs by platform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Platform {
+pub(crate) enum Platform {
     Mac,
     Unix,
     Windows,
 }
 
 impl Platform {
-    const CURRENT: Platform = if cfg!(target_os = "macos") {
+    pub(crate) const CURRENT: Platform = if cfg!(target_os = "macos") {
         Platform::Mac
     } else if cfg!(windows) {
         Platform::Windows
@@ -298,9 +298,7 @@ pub fn ensure_dir(dir: &Path) -> io::Result<()> {
     builder.create(dir)?;
     let meta = fs::symlink_metadata(dir)?;
     if meta.file_type().is_symlink() || !meta.is_dir() {
-        return Err(io::Error::other(
-            "the cache directory is not a plain directory",
-        ));
+        return Err(io::Error::other("the directory is not a plain directory"));
     }
     #[cfg(unix)]
     {
@@ -312,7 +310,7 @@ pub fn ensure_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn is_link(path: &Path) -> bool {
+pub(crate) fn is_link(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
 }
 
@@ -321,7 +319,7 @@ const TEMP_ATTEMPTS: u32 = 16;
 
 /// A new owner-only temp file beside `path`, created exclusively so an
 /// entry already at a name is skipped, never followed or overwritten.
-fn create_temp(path: &Path) -> io::Result<(PathBuf, File)> {
+pub(crate) fn create_temp(path: &Path) -> io::Result<(PathBuf, File)> {
     let file_name = path.file_name().unwrap_or_default();
     let pid = std::process::id();
     let mut last = io::Error::from(io::ErrorKind::AlreadyExists);

@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use super::files::{FilesStage, PrFiles, ReviewView, files_screen};
-use super::state::{ReviewFetch, ReviewProblem, ReviewScreen};
+use super::state::{NOT_READY, ReviewFetch, ReviewProblem, ReviewScreen};
 use crate::diff_pane::{DIFF_PREFETCH, DiffStart};
 use crate::effect::{Effect, Tag};
 use crate::keymap::Reason;
@@ -20,7 +20,6 @@ use kika_git::commit_files::CommitId;
 use kika_git::patch::{LineId, LineSide};
 use kika_git::path::RepoPath;
 
-const NOT_READY: &str = "Open the files first";
 const THREADS_LOADING: &str = "Review threads are still loading";
 const THREADS_FAILED: &str = "Review threads could not be read";
 const NO_THREADS: &str = "No unresolved review threads";
@@ -161,7 +160,7 @@ fn nav_order(files: &PrFiles, scope: &ThreadScope) -> Vec<(usize, usize)> {
 }
 
 /// The files screen, ready, with the discussion read.
-fn ready_threads(state: &AppState) -> Result<(&PrFiles, &PrDiscussion), Reason> {
+pub(super) fn ready_threads(state: &AppState) -> Result<(&PrFiles, &PrDiscussion), Reason> {
     let files = files_screen(state)
         .filter(|f| f.stage == FilesStage::Ready && state.review_files_shown())
         .ok_or(NOT_READY)?;
@@ -255,7 +254,8 @@ impl AppState {
     ) {
         let shown = matches!(
             self.review.screen,
-            ReviewScreen::Detail(n) | ReviewScreen::Files(n) if n == number
+            ReviewScreen::Detail(n) | ReviewScreen::Files(n) | ReviewScreen::Conversation(n)
+                if n == number
         );
         if !shown || !self.review_current(tag, &self.review.discussion_fetch) {
             return;
@@ -272,10 +272,24 @@ impl AppState {
                 self.review.discussion_fetch.error = Some(self.review_failed(repo, error));
             }
         }
-        // Thread indexes were into the discussion that has gone.
-        if let Some(files) = &mut self.review.files {
+        // Thread indexes were into the discussion that has gone. The
+        // reply's thread is taken on a failed read too, so no later read
+        // reopens it.
+        let reopen = self.review.files.as_mut().and_then(|files| {
             files.thread = None;
             files.jump = None;
+            files.reader = None;
+            files.reopen_thread.take()
+        });
+        // A reply was posted from the reader: back on its thread.
+        if let Some(node_id) = reopen {
+            self.reopen_thread_reader(&node_id);
+        }
+        // A comment was posted from the conversation: it is the last item.
+        if matches!(self.review.screen, ReviewScreen::Conversation(_)) {
+            self.review.conversation = None;
+            self.render_review_conversation();
+            self.scroll_review_conversation(isize::MAX);
         }
     }
 
@@ -467,7 +481,7 @@ pub(crate) mod tests {
 
     /// The queue open on pull request 12, its detail loaded, and the
     /// discussion load it asked for.
-    fn detail_then_load() -> (AppState, Tag) {
+    pub(crate) fn detail_then_load() -> (AppState, Tag) {
         let mut state = in_queues();
         let (tag, number) = detail_load(&press(&mut state, KeyCode::Enter));
         let effects = state.update(AppIntent::Review(ReviewIntent::PrDetailLoaded {
@@ -481,7 +495,11 @@ pub(crate) mod tests {
         (state, tag)
     }
 
-    fn answer(state: &mut AppState, tag: Tag, result: Result<Option<PrDiscussion>, ReviewError>) {
+    pub(crate) fn answer(
+        state: &mut AppState,
+        tag: Tag,
+        result: Result<Option<PrDiscussion>, ReviewError>,
+    ) {
         state.update(AppIntent::Review(ReviewIntent::DiscussionLoaded {
             tag,
             number: 12,
@@ -612,7 +630,11 @@ pub(crate) mod tests {
         let (mut state, tag) = detail_then_load();
         answer(&mut state, tag, Ok(Some(discussion)));
         let effects = type_char(&mut state, 'f');
-        let [Effect::CheckReviewCommits { tag, .. }] = effects.as_slice() else {
+        let [
+            Effect::CheckReviewCommits { tag, .. },
+            Effect::LoadPendingReview { .. },
+        ] = effects.as_slice()
+        else {
             panic!("{effects:?}");
         };
         let tag = *tag;
@@ -665,7 +687,7 @@ pub(crate) mod tests {
             .collect()
     }
 
-    fn chunk(state: &mut AppState, lines: Vec<DiffLine>, done: bool) -> Vec<Effect> {
+    pub(crate) fn chunk(state: &mut AppState, lines: Vec<DiffLine>, done: bool) -> Vec<Effect> {
         let tag = Tag {
             generation: state.generation,
             seq: state.diff.seq.unwrap(),

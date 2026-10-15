@@ -237,6 +237,17 @@ pub enum KeyScope {
     ReviewFiles,
     /// Review mode's files screen with the diff focused.
     ReviewDiff,
+    /// One review thread read in full over the files screen.
+    ReviewThread,
+    /// Picking the diff line or lines a pending comment goes on.
+    ReviewPick,
+    /// Typing a pending comment over the files screen.
+    ReviewComment,
+    /// The list of pending comments over the files screen.
+    ReviewPending,
+    /// "Delete this comment?" or "Discard this comment?" on top of the
+    /// popup stack.
+    ReviewCommentConfirm,
     Help,
     /// "Stage everything and commit?"
     CommitConfirm,
@@ -310,6 +321,8 @@ pub enum KeyScope {
     CreatePullRequest,
     /// "Merge this pull request?" on top of the popup stack.
     MergePullRequest,
+    /// "Check out this pull request?" on top of the popup stack.
+    CheckoutPullRequest,
 }
 
 impl KeyScope {
@@ -370,7 +383,13 @@ impl KeyScope {
             | KeyScope::CommandLog
             | KeyScope::PickList
             | KeyScope::CreatePullRequest
-            | KeyScope::MergePullRequest => None,
+            | KeyScope::MergePullRequest
+            | KeyScope::CheckoutPullRequest
+            | KeyScope::ReviewThread
+            | KeyScope::ReviewPick
+            | KeyScope::ReviewComment
+            | KeyScope::ReviewPending
+            | KeyScope::ReviewCommentConfirm => None,
         }
     }
 
@@ -396,6 +415,11 @@ impl KeyScope {
             KeyScope::Review => "Review",
             KeyScope::ReviewFiles => "Pull request files",
             KeyScope::ReviewDiff => "Pull request diff",
+            KeyScope::ReviewThread => "Review thread",
+            KeyScope::ReviewPick => "Pick lines to comment on",
+            KeyScope::ReviewComment => "Pending comment",
+            KeyScope::ReviewPending => "Pending review",
+            KeyScope::ReviewCommentConfirm => "Pending comment question",
             KeyScope::Help => "Help",
             KeyScope::CommitConfirm => "Stage all and commit",
             KeyScope::CommitEditor => "Commit message",
@@ -431,6 +455,7 @@ impl KeyScope {
             KeyScope::PickList => "Pick one",
             KeyScope::CreatePullRequest => "Create pull request",
             KeyScope::MergePullRequest => "Merge pull request",
+            KeyScope::CheckoutPullRequest => "Check out pull request",
         }
     }
 
@@ -438,9 +463,10 @@ impl KeyScope {
     /// keys behave unlike everywhere else.
     pub fn bar_note(self) -> Option<&'static str> {
         match self {
-            KeyScope::CommitEditor | KeyScope::Credential | KeyScope::Input => {
-                Some("q and ? are typed")
-            }
+            KeyScope::CommitEditor
+            | KeyScope::Credential
+            | KeyScope::Input
+            | KeyScope::ReviewComment => Some("q and ? are typed"),
             _ => None,
         }
     }
@@ -635,6 +661,20 @@ pub const REPO_LOCKED: &[&str] = &[
     "merge_pr.yes",
     "merge_pr.no",
     "merge_pr.quit",
+    "review.checkout",
+    "checkout_pr.yes",
+    "checkout_pr.no",
+    "checkout_pr.quit",
+    "review_thread.quit",
+    "review_thread.reply",
+    "review_thread.resolve",
+    "review.comment_general",
+    "review_pick.quit",
+    "review_comment.quit",
+    "review_pending.quit",
+    "review_comment_confirm.yes",
+    "review_comment_confirm.no",
+    "review_comment_confirm.quit",
     "command_log.quit",
     "command_log.escape",
     "commits.paste",
@@ -2428,6 +2468,7 @@ static CHUNKS: &[&[Binding]] = &[
     command_log::keys::COMMAND_LOG_WORKSPACE,
     repos::keys::REPOS_WORKSPACE,
     review::keys::REVIEW_KEYS,
+    review::keys::REVIEW_COMMENT_KEYS,
     blame::keys::BLAME_FILES,
     diff::keys::DIFF_FILES,
     conflicts::keys::CONFLICTS_FILES,
@@ -2477,6 +2518,8 @@ static CHUNKS: &[&[Binding]] = &[
     repos::keys::REPOS_RECENT,
     pull_requests::keys::PULL_REQUESTS_PICK_CREATE,
     review::keys::REVIEW_MERGE_CONFIRM,
+    review::keys::REVIEW_CHECKOUT_CONFIRM,
+    review::keys::REVIEW_COMMENT_CONFIRM,
     CORE_FILTER_SEARCH,
     commits::keys::COMMITS_LOG_FILTER,
     commits::compare::keys::COMPARE_COMMITS,
@@ -2821,7 +2864,7 @@ mod tests {
             Some(AppIntent::Review(ReviewIntent::Refresh))
         );
         assert_eq!(review(plain(' ')), None);
-        assert_eq!(review(plain('a')), None);
+        assert_eq!(review(plain('s')), None);
         assert_eq!(review(plain('q')), Some(AppIntent::Quit));
     }
 
@@ -3926,6 +3969,99 @@ mod tests {
     }
 
     #[test]
+    fn only_y_deletes_or_discards_a_pending_comment_and_its_answers_are_locked() {
+        let state = AppState::new(Context::Workspace);
+        let resolve_in =
+            |scope, key| match resolve(registry(), &Keymap::default(), scope, &state, key) {
+                Resolution::Run(binding) => Some(binding.intent.clone()),
+                Resolution::Unbound => None,
+                other => panic!("{key:?}: {other:?}"),
+            };
+        let none = KeyModifiers::NONE;
+        let ask = KeyScope::ReviewCommentConfirm;
+        assert_eq!(resolve_in(ask, plain('y')), Some(AppIntent::ConfirmYes));
+        // Enter, a key meant for the list underneath, keeps the comment.
+        assert_eq!(resolve_in(ask, key(KeyCode::Enter, none)), None);
+        assert_eq!(resolve_in(ask, plain('q')), None);
+        assert_eq!(resolve_in(ask, plain('Y')), None);
+        assert_eq!(resolve_in(ask, plain('n')), Some(AppIntent::ConfirmNo));
+        assert_eq!(
+            resolve_in(ask, key(KeyCode::Esc, none)),
+            Some(AppIntent::ConfirmNo)
+        );
+        assert_eq!(
+            resolve_in(ask, key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(AppIntent::Quit)
+        );
+        assert_eq!(ask.parent(), None);
+        for id in [
+            "review_comment_confirm.yes",
+            "review_comment_confirm.no",
+            "review_comment_confirm.quit",
+        ] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+        }
+    }
+
+    #[test]
+    fn only_y_answers_the_checkout_question_and_its_keys_are_locked() {
+        let state = AppState::new(Context::Workspace);
+        let resolve_in =
+            |scope, key| match resolve(registry(), &Keymap::default(), scope, &state, key) {
+                Resolution::Run(binding) => Some(binding.intent.clone()),
+                Resolution::Unbound => None,
+                other => panic!("{key:?}: {other:?}"),
+            };
+        let none = KeyModifiers::NONE;
+        let ask = KeyScope::CheckoutPullRequest;
+        assert_eq!(
+            resolve_in(ask, plain('y')),
+            Some(AppIntent::Review(ReviewIntent::ConfirmCheckoutPr))
+        );
+        assert_eq!(resolve_in(ask, key(KeyCode::Enter, none)), None);
+        assert_eq!(resolve_in(ask, plain('q')), None);
+        assert_eq!(resolve_in(ask, plain('Y')), None);
+        assert_eq!(resolve_in(ask, plain('b')), None);
+        assert_eq!(resolve_in(ask, plain('n')), Some(AppIntent::ConfirmNo));
+        assert_eq!(
+            resolve_in(ask, key(KeyCode::Esc, none)),
+            Some(AppIntent::ConfirmNo)
+        );
+        assert_eq!(
+            resolve_in(ask, key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(AppIntent::Quit)
+        );
+        assert_eq!(ask.parent(), None);
+        assert_eq!(ask.title(), "Check out pull request");
+        let checkout = registry()
+            .iter()
+            .find(|b| b.id == "review.checkout")
+            .unwrap();
+        assert_eq!(checkout.scope, KeyScope::Review);
+        assert_eq!(checkout.intent, AppIntent::Review(ReviewIntent::CheckoutPr));
+        assert!(checkout.matches(plain('b')));
+        for id in [
+            "review.checkout",
+            "checkout_pr.yes",
+            "checkout_pr.no",
+            "checkout_pr.quit",
+        ] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+            let expected = format!("{id:?} can only be changed in the global config file");
+            assert_eq!(
+                build(&[(id, &["enter"])], Trust::Repo).unwrap_err(),
+                expected
+            );
+        }
+        // The chunk sits right after the merge question's.
+        let at = |chunk: &[Binding]| CHUNKS.iter().position(|c| std::ptr::eq(*c, chunk));
+        assert_eq!(
+            at(review::keys::REVIEW_CHECKOUT_CONFIRM),
+            at(review::keys::REVIEW_MERGE_CONFIRM).map(|i| i + 1)
+        );
+    }
+
+    #[test]
     fn undo_redo_and_the_travel_answers_are_locked() {
         for id in [
             "workspace.undo",
@@ -4594,6 +4730,11 @@ mod tests {
             KeyScope::Review => "review",
             KeyScope::ReviewFiles => "review_files",
             KeyScope::ReviewDiff => "review_diff",
+            KeyScope::ReviewThread => "review_thread",
+            KeyScope::ReviewPick => "review_pick",
+            KeyScope::ReviewComment => "review_comment",
+            KeyScope::ReviewPending => "review_pending",
+            KeyScope::ReviewCommentConfirm => "review_comment_confirm",
             KeyScope::Help => "help",
             KeyScope::CommitConfirm => "commit_confirm",
             KeyScope::CommitEditor => "commit_editor",
@@ -4629,6 +4770,7 @@ mod tests {
             KeyScope::PickList => "pick_list",
             KeyScope::CreatePullRequest => "create_pull_request",
             KeyScope::MergePullRequest => "merge_pr",
+            KeyScope::CheckoutPullRequest => "checkout_pr",
         }
     }
 
@@ -5134,12 +5276,20 @@ mod tests {
                     // A merge reaches GitHub and cannot be undone.
                     | Review(ReviewIntent::OpenMergePr)
                     | Review(ReviewIntent::ConfirmMergePr)
+                    // A checkout moves HEAD and may fetch the head.
+                    | Review(ReviewIntent::CheckoutPr)
+                    | Review(ReviewIntent::ConfirmCheckoutPr)
                     // It may fetch the pull request's commits.
                     | Review(ReviewIntent::OpenFiles)
                     // A viewed mark reaches GitHub.
                     | Review(ReviewIntent::ToggleViewed)
                     // It starts the browser.
                     | Review(ReviewIntent::OpenLineOnForge)
+                    // A resolve reaches GitHub; a reply or comment is
+                    // posted there after its question.
+                    | Review(ReviewIntent::ReplyToThread)
+                    | Review(ReviewIntent::ToggleThreadResolved)
+                    | Review(ReviewIntent::StartGeneralComment)
                     | PullRequests(PullRequestsIntent::PickSelect)
                     // Esc falls through to quit without it.
                     | Review(ReviewIntent::CloseDetail)
@@ -5263,11 +5413,16 @@ mod tests {
                 "review.refresh",
                 "review.open_check",
                 "review.merge",
+                "review.checkout",
                 "review.back",
                 "review.files",
+                "review.comment_general",
                 "review_files.viewed",
                 "review_files.open_line",
+                "review_thread.reply",
+                "review_thread.resolve",
                 "merge_pr.yes",
+                "checkout_pr.yes",
             ]
         );
         for feature in ["blame", "custom_commands", "operation", "files"] {
@@ -5765,13 +5920,19 @@ mod tests {
         "review.refresh",
         "review.open_check",
         "review.merge",
+        "review.checkout",
         "review.back",
         "review.files",
+        "review.conversation",
+        "review.comment_general",
+        "review.page_down",
+        "review.page_up",
         "review_files.focus",
         "review_files.viewed",
         "review_files.commit",
         "review_files.next_thread",
         "review_files.prev_thread",
+        "review_files.thread",
         "review_files.open_line",
         "review_diff.down",
         "review_diff.up",
@@ -5781,6 +5942,33 @@ mod tests {
         "review_diff.search_next",
         "review_diff.search_prev",
         "review_diff.escape",
+        "review_thread.down",
+        "review_thread.up",
+        "review_thread.page_down",
+        "review_thread.page_up",
+        "review_thread.next",
+        "review_thread.prev",
+        "review_thread.reply",
+        "review_thread.resolve",
+        "review_thread.close",
+        "review_thread.quit",
+        "review_files.comment",
+        "review_files.pending",
+        "review_pick.down",
+        "review_pick.up",
+        "review_pick.range",
+        "review_pick.confirm",
+        "review_pick.cancel",
+        "review_pick.quit",
+        "review_comment.save",
+        "review_comment.cancel",
+        "review_comment.quit",
+        "review_pending.down",
+        "review_pending.up",
+        "review_pending.edit",
+        "review_pending.delete",
+        "review_pending.close",
+        "review_pending.quit",
         "files.blame",
         "files.hunks",
         "files.mergetool",
@@ -5979,6 +6167,12 @@ mod tests {
         "merge_pr.yes",
         "merge_pr.no",
         "merge_pr.quit",
+        "checkout_pr.yes",
+        "checkout_pr.no",
+        "checkout_pr.quit",
+        "review_comment_confirm.yes",
+        "review_comment_confirm.no",
+        "review_comment_confirm.quit",
         "files.filter",
         "files.range",
         "files.escape",

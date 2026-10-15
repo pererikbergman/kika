@@ -3,7 +3,11 @@
 //! enters review mode, opens a pull request or refreshes, and only on a
 //! host the global config lists.
 
+use super::checkout::PrCheckout;
+use super::comment_editor::Composer;
+use super::discussion_write::DiscussionWriting;
 use super::files::PrFiles;
+use super::pending::PendingSlot;
 use crate::effect::{Effect, Tag};
 use crate::intent::AppIntent;
 use crate::keymap::Reason;
@@ -22,6 +26,8 @@ use ratatui::text::Line;
 pub const NO_FORGE: &str =
     "The remote is on no forge host in the global config, or not in [forge.allow]";
 pub(super) const NO_BROWSER: &str = "Set forge.browser in the global config";
+/// A files-screen key pressed before the files are shown and listed.
+pub(super) const NOT_READY: &str = "Open the files first";
 const NO_FAILING_CHECK: &str = "No failing check has a details page";
 const NO_PR_OPEN: &str = "No pull request is open";
 const NO_PR_SELECTED: &str = "No pull request selected";
@@ -36,6 +42,8 @@ pub enum ReviewScreen {
     Detail(u64),
     /// Pull request `number`'s changed files and their diff.
     Files(u64),
+    /// Pull request `number`'s comments and review bodies.
+    Conversation(u64),
 }
 
 /// Why a screen has nothing to show.
@@ -101,10 +109,26 @@ pub struct ReviewState {
     /// Each pull request head fetched this session, so none is fetched
     /// twice. Kept when review mode is left and entered again.
     pub fetched_heads: Vec<(u64, CommitId)>,
+    /// The checkout of the open pull request's head, from `b` until its
+    /// op starts or it is given up.
+    pub checkout: Option<PrCheckout>,
     /// The open pull request's review threads and conversation, read
     /// right after its detail.
     pub discussion: Option<PrDiscussion>,
     pub discussion_fetch: ReviewFetch,
+    /// The conversation as drawn, while its screen is shown.
+    pub conversation: Option<RenderedBody>,
+    /// The first line of the conversation shown.
+    pub conversation_scroll: usize,
+    /// The open pull request's pending review, from its files screen on.
+    pub pending: Option<PendingSlot>,
+    /// A comment being written, over the files screen or the
+    /// conversation.
+    pub composer: Option<Composer>,
+    /// The one write to the discussion in flight on GitHub, if any.
+    pub writing: Option<DiscussionWriting>,
+    /// The cursor of the pending-comment list, while it is open.
+    pub pending_list: Option<usize>,
 }
 
 /// A description as drawn at `width`.
@@ -132,8 +156,15 @@ impl Default for ReviewState {
             files: None,
             merge_pick: None,
             fetched_heads: Vec::new(),
+            checkout: None,
             discussion: None,
             discussion_fetch: ReviewFetch::default(),
+            conversation: None,
+            conversation_scroll: 0,
+            pending: None,
+            composer: None,
+            writing: None,
+            pending_list: None,
         }
     }
 }
@@ -178,6 +209,7 @@ impl ReviewState {
     pub fn loading(&self) -> bool {
         self.queues_fetch.loading
             || self.detail_fetch.loading
+            || self.discussion_fetch.loading
             || self.files.as_ref().is_some_and(PrFiles::loading)
     }
 
@@ -217,11 +249,11 @@ fn row_text(pr: &PrSummary) -> String {
     format!("#{} {} {}", pr.number, pr.title, pr.author)
 }
 
-/// A pull request is open, on its detail or its files.
+/// A pull request is open, on its detail, its files or its conversation.
 fn detail_shown(state: &AppState) -> bool {
     matches!(
         state.review.screen,
-        ReviewScreen::Detail(_) | ReviewScreen::Files(_)
+        ReviewScreen::Detail(_) | ReviewScreen::Files(_) | ReviewScreen::Conversation(_)
     )
 }
 
@@ -249,6 +281,7 @@ pub(crate) fn refresh_review_disabled(state: &AppState) -> Option<Reason> {
     }
     let fetch = match state.review.screen {
         ReviewScreen::Queue => &state.review.queues_fetch,
+        ReviewScreen::Conversation(_) => return Some(super::conversation::BACK_TO_REFRESH.into()),
         ReviewScreen::Detail(_) | ReviewScreen::Files(_) => {
             // The threads come right after the detail: one refresh at a time.
             if state.review.discussion_fetch.loading {
@@ -263,6 +296,9 @@ pub(crate) fn refresh_review_disabled(state: &AppState) -> Option<Reason> {
 /// Why `o` cannot open a check's page: no pull request open, no browser
 /// configured, or no failing check with a page.
 pub(crate) fn open_check_disabled(state: &AppState) -> Option<Reason> {
+    if let Some(reason) = super::conversation::on_conversation(state) {
+        return Some(reason);
+    }
     if !detail_shown(state) || state.review.detail.is_none() {
         return Some(NO_PR_OPEN.into());
     }
@@ -529,29 +565,36 @@ impl AppState {
                     self.review.cursor = at;
                 }
             }
-            ReviewScreen::Detail(_) => {
-                let max = self.review_max_scroll();
-                self.review.detail_scroll = self
-                    .review
-                    .detail_scroll
-                    .saturating_add_signed(delta)
-                    .min(max);
-            }
+            ReviewScreen::Detail(_) => self.scroll_review_detail(delta),
             ReviewScreen::Files(_) => return self.move_review_file(delta),
+            ReviewScreen::Conversation(_) => self.scroll_review_conversation(delta),
         }
         vec![]
     }
 
+    /// Scroll the detail by `delta` lines, kept within its lines.
+    pub(super) fn scroll_review_detail(&mut self, delta: isize) {
+        let max = self.review_max_scroll();
+        self.review.detail_scroll = self
+            .review
+            .detail_scroll
+            .saturating_add_signed(delta)
+            .min(max);
+    }
+
     /// Where the detail is drawn, at the current screen size.
-    fn review_area(&self) -> ratatui::layout::Rect {
+    pub(super) fn review_area(&self) -> ratatui::layout::Rect {
         let screen = ratatui::layout::Rect::new(0, 0, self.size.0, self.size.1);
         let [main, _] = crate::layout::screen_layout(screen);
         super::view::detail_area(main)
     }
 
     /// Render the open description for the panel's width, once: on load
-    /// and when the screen is resized.
+    /// and when the screen is resized. The conversation and an open
+    /// thread are rendered again with it.
     pub(crate) fn render_review_body(&mut self) {
+        self.render_review_conversation();
+        self.render_thread_reader();
         let width = usize::from(self.review_area().width);
         if self.review.body.as_ref().is_some_and(|b| b.width == width) {
             return;
@@ -563,7 +606,7 @@ impl AppState {
     }
 
     /// The furthest the detail scrolls, with its last line at the bottom.
-    fn review_max_scroll(&self) -> usize {
+    pub(super) fn review_max_scroll(&self) -> usize {
         match (&self.review.detail, &self.review.body) {
             (Some(detail), Some(body)) => {
                 let threads = super::threads_view::thread_summary(&self.review);
@@ -598,43 +641,56 @@ impl AppState {
         }
     }
 
+    /// Back to the workspace, review mode started afresh next time, and
+    /// the workspace loaded or refreshed.
+    pub(super) fn leave_review(&mut self) -> Vec<Effect> {
+        // A pending-review change still waiting on a save goes out first.
+        let mut effects = self.drop_pending_slot();
+        self.context = Context::Workspace;
+        self.review.restart();
+        if self.workspace_started {
+            effects.extend(self.update(AppIntent::RefreshStatus));
+            // The review may have streamed its own diff into the
+            // pane; a commit's or stash's open file gets it back.
+            effects.extend(self.reload_open_file_diff());
+        } else {
+            effects.extend(self.start());
+        }
+        effects
+    }
+
     /// Esc: from a pull request back to the same queue and row; in the
     /// queue, clear the filter, else go back to the workspace.
     pub(crate) fn close_review(&mut self) -> Vec<Effect> {
         match self.review.screen {
             ReviewScreen::Files(_) => self.close_review_files(),
+            ReviewScreen::Conversation(number) => {
+                self.close_review_conversation(number);
+                vec![]
+            }
             ReviewScreen::Detail(_) => {
                 self.review.screen = ReviewScreen::Queue;
                 self.review.detail = None;
                 self.review.body = None;
+                self.review.conversation = None;
+                self.review.conversation_scroll = 0;
                 self.review.detail_fetch = ReviewFetch::default();
                 self.review.discussion = None;
                 self.review.discussion_fetch = ReviewFetch::default();
+                let mut effects = self.drop_pending_slot();
                 // A session started on one pull request loads its queues
                 // only now.
                 if self.review.queues.is_none() && !self.review.queues_fetch.loading {
-                    return self.load_review_queues();
+                    effects.extend(self.load_review_queues());
                 }
-                vec![]
+                effects
             }
             ReviewScreen::Queue if !self.review.filter.is_empty() => {
                 self.review.filter.clear();
                 self.review.reconcile();
                 vec![]
             }
-            ReviewScreen::Queue => {
-                self.context = Context::Workspace;
-                self.review.restart();
-                if self.workspace_started {
-                    let mut effects = self.update(AppIntent::RefreshStatus);
-                    // The review may have streamed its own diff into the
-                    // pane; a commit's or stash's open file gets it back.
-                    effects.extend(self.reload_open_file_diff());
-                    effects
-                } else {
-                    self.start()
-                }
-            }
+            ReviewScreen::Queue => self.leave_review(),
         }
     }
 
@@ -648,6 +704,8 @@ impl AppState {
             ReviewScreen::Detail(number) | ReviewScreen::Files(number) => {
                 self.load_review_detail(number)
             }
+            // Refused above: the conversation shows what the detail read.
+            ReviewScreen::Conversation(_) => vec![],
         }
     }
 

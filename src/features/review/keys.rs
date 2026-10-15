@@ -1,11 +1,16 @@
 //! The review-mode key bindings: `G` from the workspace, the queue, detail
-//! and files screens, and the merge question. `CHUNKS` in `keymap.rs`
+//! and files screens, and the merge and checkout questions. `CHUNKS` in `keymap.rs`
 //! places both chunks, so their position there is behaviour.
 
+use super::checkout::pr_checkout_disabled;
 use super::commit_view::review_commit_disabled;
+use super::conversation::{conversation_disabled, page_disabled};
+use super::discussion_write::{general_comment_disabled, thread_write_disabled};
 use super::files::{review_files_disabled, review_search_step_disabled};
 use super::line_link::open_line_disabled;
 use super::merge::merge_disabled;
+use super::pending::{comment_disabled, pending_list_disabled};
+use super::reader::thread_reader_disabled;
 use super::state::{
     open_check_disabled, open_pr_disabled, queue_keys_disabled, refresh_review_disabled,
 };
@@ -16,6 +21,10 @@ use crate::features::review::ReviewIntent;
 use crate::intent::{AppIntent, Scroll};
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, never};
 use crossterm::event::{KeyCode, KeyModifiers};
+
+/// Bar hints left out, rather than dimmed, while their key is refused:
+/// they belong to one screen only.
+pub(crate) const HIDDEN_WHEN_OFF: &[&str] = &["review.conversation", "review.comment_general"];
 
 // Chunk 27: review
 pub(crate) static REVIEW_KEYS: &[Binding] = &[
@@ -126,12 +135,23 @@ pub(crate) static REVIEW_KEYS: &[Binding] = &[
         bar: true,
         disabled: merge_disabled,
     },
+    // It moves HEAD and may fetch, so a repository file may not move it.
+    Binding {
+        id: "review.checkout",
+        keys: &[KeyPattern::exact(KeyCode::Char('b'), NONE)],
+        scope: KeyScope::Review,
+        intent: AppIntent::Review(ReviewIntent::CheckoutPr),
+        description: "Check out the open pull request as branch pr/<number> and go to the workspace, after a question only y answers",
+        label: "checkout",
+        bar: true,
+        disabled: pr_checkout_disabled,
+    },
     Binding {
         id: "review.back",
         keys: &[KeyPattern::any(KeyCode::Esc)],
         scope: KeyScope::Review,
         intent: AppIntent::Review(ReviewIntent::CloseDetail),
-        description: "Back to the pull request from its files, else to the queue; in the queue, clear the filter, else back to the workspace",
+        description: "Back to the pull request from its files or conversation, else to the queue; in the queue, clear the filter, else back to the workspace",
         label: "back",
         bar: true,
         disabled: never,
@@ -145,6 +165,49 @@ pub(crate) static REVIEW_KEYS: &[Binding] = &[
         label: "files",
         bar: true,
         disabled: review_files_disabled,
+    },
+    // Shows what was already read, so a repository file may move it.
+    Binding {
+        id: "review.conversation",
+        keys: &[KeyPattern::any(KeyCode::Char('C'))],
+        scope: KeyScope::Review,
+        intent: AppIntent::Review(ReviewIntent::OpenConversation),
+        description: "Show the pull request's conversation: its comments and review bodies, oldest first",
+        label: "conversation",
+        bar: true,
+        disabled: conversation_disabled,
+    },
+    // Opens the composer for a post to GitHub, so a repository file may
+    // not move it.
+    Binding {
+        id: "review.comment_general",
+        keys: &[KeyPattern::exact(KeyCode::Char('a'), NONE)],
+        scope: KeyScope::Review,
+        intent: AppIntent::Review(ReviewIntent::StartGeneralComment),
+        description: "Write a comment on the pull request, posted to GitHub after a question only y answers",
+        label: "comment",
+        bar: true,
+        disabled: general_comment_disabled,
+    },
+    Binding {
+        id: "review.page_down",
+        keys: &[KeyPattern::any(KeyCode::PageDown)],
+        scope: KeyScope::Review,
+        intent: AppIntent::Review(ReviewIntent::PageDown),
+        description: "Scroll the pull request or its conversation down a page",
+        label: "",
+        bar: false,
+        disabled: page_disabled,
+    },
+    Binding {
+        id: "review.page_up",
+        keys: &[KeyPattern::any(KeyCode::PageUp)],
+        scope: KeyScope::Review,
+        intent: AppIntent::Review(ReviewIntent::PageUp),
+        description: "Scroll the pull request or its conversation up a page",
+        label: "",
+        bar: false,
+        disabled: page_disabled,
     },
     Binding {
         id: "review_files.focus",
@@ -198,6 +261,17 @@ pub(crate) static REVIEW_KEYS: &[Binding] = &[
         label: "prev thread",
         bar: false,
         disabled: thread_nav_disabled,
+    },
+    // Reads a thread already loaded, so a repository file may move it.
+    Binding {
+        id: "review_files.thread",
+        keys: &[KeyPattern::any(KeyCode::Enter)],
+        scope: KeyScope::ReviewFiles,
+        intent: AppIntent::Review(ReviewIntent::OpenThreadReader),
+        description: "Read the selected review thread, or the file's first, with every comment in full",
+        label: "read thread",
+        bar: true,
+        disabled: thread_reader_disabled,
     },
     // Starts the browser, so a repository file may not move it.
     Binding {
@@ -296,6 +370,115 @@ pub(crate) static REVIEW_KEYS: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+    Binding {
+        id: "review_thread.down",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::ReviewThread,
+        intent: AppIntent::Review(ReviewIntent::ThreadReaderScroll(Scroll::LineDown)),
+        description: "Scroll the thread down a line",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review_thread.up",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::ReviewThread,
+        intent: AppIntent::Review(ReviewIntent::ThreadReaderScroll(Scroll::LineUp)),
+        description: "Scroll the thread up a line",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review_thread.page_down",
+        keys: &[KeyPattern::any(KeyCode::PageDown)],
+        scope: KeyScope::ReviewThread,
+        intent: AppIntent::Review(ReviewIntent::ThreadReaderScroll(Scroll::PageDown)),
+        description: "Scroll the thread down a page",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review_thread.page_up",
+        keys: &[KeyPattern::any(KeyCode::PageUp)],
+        scope: KeyScope::ReviewThread,
+        intent: AppIntent::Review(ReviewIntent::ThreadReaderScroll(Scroll::PageUp)),
+        description: "Scroll the thread up a page",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review_thread.next",
+        keys: &[KeyPattern::exact(KeyCode::Char(']'), NONE)],
+        scope: KeyScope::ReviewThread,
+        intent: AppIntent::Review(ReviewIntent::ThreadReaderStep(1)),
+        description: "Read the file's next review thread, resolved ones included",
+        label: "next thread",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_thread.prev",
+        keys: &[KeyPattern::exact(KeyCode::Char('['), NONE)],
+        scope: KeyScope::ReviewThread,
+        intent: AppIntent::Review(ReviewIntent::ThreadReaderStep(-1)),
+        description: "Read the file's previous review thread, resolved ones included",
+        label: "prev thread",
+        bar: false,
+        disabled: never,
+    },
+    // Opens the composer for a post to GitHub, so a repository file may
+    // not move it.
+    Binding {
+        id: "review_thread.reply",
+        keys: &[KeyPattern::exact(KeyCode::Char('a'), NONE)],
+        scope: KeyScope::ReviewThread,
+        intent: AppIntent::Review(ReviewIntent::ReplyToThread),
+        description: "Write a reply to the thread, posted to GitHub after a question only y answers",
+        label: "reply",
+        bar: true,
+        disabled: thread_write_disabled,
+    },
+    // Reaches GitHub, so a repository file may not move it.
+    Binding {
+        id: "review_thread.resolve",
+        keys: &[KeyPattern::any(KeyCode::Char('R'))],
+        scope: KeyScope::ReviewThread,
+        intent: AppIntent::Review(ReviewIntent::ToggleThreadResolved),
+        description: "Resolve the thread on GitHub, or unresolve it if it is resolved",
+        label: "resolve",
+        bar: true,
+        disabled: thread_write_disabled,
+    },
+    Binding {
+        id: "review_thread.close",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::ReviewThread,
+        intent: AppIntent::Review(ReviewIntent::CloseThreadReader),
+        description: "Close the thread and go back to the files",
+        label: "close",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_thread.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::ReviewThread,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
 ];
 
 // Chunk 71b: review
@@ -337,10 +520,330 @@ pub(crate) static REVIEW_MERGE_CONFIRM: &[Binding] = &[
     },
 ];
 
+// Chunk 71c: review
+pub(crate) static REVIEW_CHECKOUT_CONFIRM: &[Binding] = &[
+    // The checkout moves HEAD and may fetch first, so Enter is left
+    // unbound.
+    Binding {
+        id: "checkout_pr.yes",
+        keys: Answer::YOnly.keys(),
+        scope: KeyScope::CheckoutPullRequest,
+        intent: AppIntent::Review(ReviewIntent::ConfirmCheckoutPr),
+        description: "Yes, check out the pull request's branch",
+        label: "check out",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "checkout_pr.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::CheckoutPullRequest,
+        intent: AppIntent::ConfirmNo,
+        description: "No, check out nothing",
+        label: "cancel",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "checkout_pr.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::CheckoutPullRequest,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+];
+
+// Chunk 27b: review comments
+pub(crate) static REVIEW_COMMENT_KEYS: &[Binding] = &[
+    // Local files only, so a repository file may move them.
+    Binding {
+        id: "review_files.comment",
+        keys: &[KeyPattern::exact(KeyCode::Char('a'), NONE)],
+        scope: KeyScope::ReviewFiles,
+        intent: AppIntent::Review(ReviewIntent::StartComment),
+        description: "Pick a diff line or range and write a comment on it, kept in the pending review",
+        label: "comment",
+        bar: true,
+        disabled: comment_disabled,
+    },
+    Binding {
+        id: "review_files.pending",
+        keys: &[KeyPattern::any(KeyCode::Char('P'))],
+        scope: KeyScope::ReviewFiles,
+        intent: AppIntent::Review(ReviewIntent::OpenPendingList),
+        description: "List the pending review's comments, to edit or delete them",
+        label: "pending",
+        bar: true,
+        disabled: pending_list_disabled,
+    },
+    Binding {
+        id: "review_pick.down",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::ReviewPick,
+        intent: AppIntent::Review(ReviewIntent::StepCommentPick(true)),
+        description: "Move to the next numbered line",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review_pick.up",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::ReviewPick,
+        intent: AppIntent::Review(ReviewIntent::StepCommentPick(false)),
+        description: "Move to the previous numbered line",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review_pick.range",
+        keys: &[KeyPattern::exact(KeyCode::Char('v'), NONE)],
+        scope: KeyScope::ReviewPick,
+        intent: AppIntent::Review(ReviewIntent::ToggleCommentRange),
+        description: "Start a range at this line, or drop it",
+        label: "range",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_pick.confirm",
+        keys: &[
+            KeyPattern::any(KeyCode::Enter),
+            KeyPattern::exact(KeyCode::Char('a'), NONE),
+        ],
+        scope: KeyScope::ReviewPick,
+        intent: AppIntent::Review(ReviewIntent::ConfirmCommentPick),
+        description: "Write a comment on the line or range picked",
+        label: "comment",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_pick.cancel",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::ReviewPick,
+        intent: AppIntent::Review(ReviewIntent::CancelCommentPick),
+        description: "Stop picking and go back to the files",
+        label: "cancel",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_pick.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::ReviewPick,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+    // Every other key is typed into the comment.
+    Binding {
+        id: "review_comment.save",
+        keys: &[KeyPattern::exact(KeyCode::Char('s'), KeyModifiers::CONTROL)],
+        scope: KeyScope::ReviewComment,
+        intent: AppIntent::Review(ReviewIntent::SaveComment),
+        description: "Keep a line comment in the pending review, or ask to post a reply or general comment",
+        label: "save",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_comment.cancel",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::ReviewComment,
+        intent: AppIntent::Review(ReviewIntent::EscapeComment),
+        description: "Close the comment, asking first when it has text",
+        label: "cancel",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_comment.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::ReviewComment,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_pending.down",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::ReviewPending,
+        intent: AppIntent::Review(ReviewIntent::MovePendingList(1)),
+        description: "Select the next pending comment",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review_pending.up",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::ReviewPending,
+        intent: AppIntent::Review(ReviewIntent::MovePendingList(-1)),
+        description: "Select the previous pending comment",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review_pending.edit",
+        keys: &[
+            KeyPattern::any(KeyCode::Enter),
+            KeyPattern::exact(KeyCode::Char('e'), NONE),
+        ],
+        scope: KeyScope::ReviewPending,
+        intent: AppIntent::Review(ReviewIntent::EditPending),
+        description: "Edit the selected comment",
+        label: "edit",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_pending.delete",
+        keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
+        scope: KeyScope::ReviewPending,
+        intent: AppIntent::Review(ReviewIntent::AskDeletePending),
+        description: "Delete the selected comment, after a question only y answers",
+        label: "delete",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_pending.close",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::ReviewPending,
+        intent: AppIntent::Review(ReviewIntent::ClosePendingList),
+        description: "Close the list",
+        label: "close",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_pending.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::ReviewPending,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+];
+
+// Chunk 71c: review comments
+pub(crate) static REVIEW_COMMENT_CONFIRM: &[Binding] = &[
+    // The comment is lost, or posted where it cannot be taken back, so
+    // Enter is left unbound.
+    Binding {
+        id: "review_comment_confirm.yes",
+        keys: Answer::YOnly.keys(),
+        scope: KeyScope::ReviewCommentConfirm,
+        intent: AppIntent::ConfirmYes,
+        description: "Yes: delete or discard the comment, or post it to GitHub",
+        label: "yes",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_comment_confirm.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::ReviewCommentConfirm,
+        intent: AppIntent::ConfirmNo,
+        description: "No, keep the comment",
+        label: "no",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_comment_confirm.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::ReviewCommentConfirm,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keymap::REPO_LOCKED;
+    use crate::keymap::{KeyPress, REPO_LOCKED, registry};
+
+    #[test]
+    fn the_reader_and_conversation_keys_sit_in_their_scopes_unlocked_but_quit() {
+        let binding = |id: &str| registry().iter().find(|b| b.id == id).unwrap();
+        let thread = binding("review_files.thread");
+        assert_eq!(thread.scope, KeyScope::ReviewFiles);
+        assert_eq!(thread.keys, [KeyPattern::any(KeyCode::Enter)]);
+        assert!(thread.bar);
+        let conversation = binding("review.conversation");
+        assert_eq!(conversation.scope, KeyScope::Review);
+        assert!(HIDDEN_WHEN_OFF.contains(&"review.conversation"));
+        let mut ids = vec!["review_files.thread", "review.conversation"];
+        ids.extend(["review.page_down", "review.page_up"]);
+        let in_thread: Vec<&str> = REVIEW_KEYS
+            .iter()
+            .filter(|b| b.scope == KeyScope::ReviewThread)
+            .map(|b| b.id)
+            .collect();
+        assert_eq!(
+            in_thread,
+            [
+                "review_thread.down",
+                "review_thread.up",
+                "review_thread.page_down",
+                "review_thread.page_up",
+                "review_thread.next",
+                "review_thread.prev",
+                "review_thread.reply",
+                "review_thread.resolve",
+                "review_thread.close",
+                "review_thread.quit",
+            ]
+        );
+        // Those that reach GitHub are locked, as `v` is.
+        let writes = [
+            "review_thread.quit",
+            "review_thread.reply",
+            "review_thread.resolve",
+        ];
+        ids.extend(in_thread.iter().filter(|id| !writes.contains(id)));
+        for id in ids {
+            assert!(!REPO_LOCKED.contains(&id), "{id}");
+        }
+        // Quitting is locked, as in every popup.
+        assert!(REPO_LOCKED.contains(&"review_thread.quit"));
+        assert_eq!(KeyScope::ReviewThread.parent(), None);
+        assert_eq!(KeyScope::ReviewThread.title(), "Review thread");
+    }
 
     #[test]
     fn the_thread_keys_sit_after_the_commit_key_in_the_files_scope_and_are_not_locked() {
@@ -432,5 +935,144 @@ mod tests {
             .find(|(b, _)| b.id == "review_files.open_line")
             .unwrap();
         assert_eq!(reason.as_deref(), Some(NO_BROWSER));
+    }
+
+    /// The binding `key` reaches from `focus`, enabled or not, by id.
+    fn owner(focus: KeyScope, key: KeyPress) -> Option<&'static str> {
+        focus.chain().find_map(|scope| {
+            registry()
+                .iter()
+                .find(|b| b.scope == scope && b.matches(key))
+                .map(|b| b.id)
+        })
+    }
+
+    fn plain(c: char) -> KeyPress {
+        KeyPress::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn a_and_p_reach_the_files_and_the_diff_and_the_popups_keep_their_keys() {
+        for focus in [KeyScope::ReviewFiles, KeyScope::ReviewDiff] {
+            assert_eq!(owner(focus, plain('a')), Some("review_files.comment"));
+            let shift_p = KeyPress::new(KeyCode::Char('P'), KeyModifiers::SHIFT);
+            assert_eq!(owner(focus, shift_p), Some("review_files.pending"));
+        }
+        for focus in [
+            KeyScope::ReviewPick,
+            KeyScope::ReviewComment,
+            KeyScope::ReviewPending,
+        ] {
+            assert_eq!(focus.parent(), None, "{focus:?}");
+            for c in ['q', '?', ']', 'o'] {
+                assert_eq!(owner(focus, plain(c)), None, "{focus:?} {c}");
+            }
+            let quit = KeyPress::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+            let id = owner(focus, quit).unwrap();
+            assert!(id.ends_with(".quit") && REPO_LOCKED.contains(&id), "{id}");
+        }
+        // In the composer these are typed, and ctrl-e is left for later.
+        let comment = KeyScope::ReviewComment;
+        assert_eq!(comment.bar_note(), Some("q and ? are typed"));
+        let enter = KeyPress::new(KeyCode::Enter, KeyModifiers::NONE);
+        let ctrl_e = KeyPress::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        for key in [enter, plain('q'), plain('?'), plain('a'), ctrl_e] {
+            assert_eq!(owner(comment, key), None, "{key:?}");
+        }
+        let ctrl_s = KeyPress::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert_eq!(owner(comment, ctrl_s), Some("review_comment.save"));
+        assert_eq!(
+            owner(KeyScope::ReviewPick, plain('v')),
+            Some("review_pick.range")
+        );
+        assert_eq!(
+            owner(KeyScope::ReviewPick, enter),
+            Some("review_pick.confirm")
+        );
+        assert_eq!(
+            owner(KeyScope::ReviewPending, plain('d')),
+            Some("review_pending.delete")
+        );
+        assert_eq!(KeyScope::ReviewPick.title(), "Pick lines to comment on");
+        // Local files only: not locked, quitting aside.
+        for id in [
+            "review_files.comment",
+            "review_files.pending",
+            "review_pending.delete",
+        ] {
+            assert!(!REPO_LOCKED.contains(&id), "{id}");
+        }
+    }
+
+    #[test]
+    fn the_help_menu_gives_each_reason_a_is_off() {
+        use crate::features::review::files::ReviewView;
+        use crate::features::review::pending::tests::{commenting, loaded, loading};
+        use crate::keymap::available;
+        use kika_forge::pending::PendingError;
+        let help = |state: &crate::model::AppState| {
+            available(registry(), &state.keymap, KeyScope::ReviewFiles, state)
+                .into_iter()
+                .find(|(b, _)| b.id == "review_files.comment")
+                .and_then(|(_, reason)| reason)
+                .map(|r| r.to_string())
+        };
+        let mut states = Vec::new();
+        let (state, _) = loading();
+        states.push(state);
+        let (mut state, tag) = loading();
+        loaded(
+            &mut state,
+            tag,
+            Err(PendingError::Unreadable("it is too large")),
+        );
+        states.push(state);
+        let mut state = commenting();
+        state.review.files.as_mut().unwrap().view = ReviewView::Commit(0);
+        states.push(state);
+        let mut state = commenting();
+        state.diff.lines.truncate(4);
+        states.push(state);
+        for state in &states {
+            let reason = comment_disabled(state).map(|r| r.to_string());
+            assert!(reason.is_some());
+            assert_eq!(help(state), reason);
+        }
+        assert_eq!(help(&commenting()), None);
+    }
+
+    #[test]
+    fn the_write_keys_reach_their_bindings_and_ctrl_s_still_saves() {
+        assert_eq!(
+            owner(KeyScope::ReviewThread, plain('a')),
+            Some("review_thread.reply")
+        );
+        let shift_r = KeyPress::new(KeyCode::Char('R'), KeyModifiers::SHIFT);
+        assert_eq!(
+            owner(KeyScope::ReviewThread, shift_r),
+            Some("review_thread.resolve")
+        );
+        // On the conversation (the review scope); the files keep their own.
+        assert_eq!(
+            owner(KeyScope::Review, plain('a')),
+            Some("review.comment_general")
+        );
+        assert_eq!(
+            owner(KeyScope::ReviewFiles, plain('a')),
+            Some("review_files.comment")
+        );
+        let ctrl_s = KeyPress::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert_eq!(
+            owner(KeyScope::ReviewComment, ctrl_s),
+            Some("review_comment.save")
+        );
+        assert!(HIDDEN_WHEN_OFF.contains(&"review.comment_general"));
+        for id in [
+            "review_thread.reply",
+            "review_thread.resolve",
+            "review.comment_general",
+        ] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+        }
     }
 }

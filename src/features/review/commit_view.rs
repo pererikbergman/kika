@@ -171,6 +171,7 @@ impl AppState {
             files.seq = Some(tag.seq);
             files.thread = None;
             files.jump = None;
+            files.reader = None;
         }
         let mut effects = self.close_diff();
         effects.push(Effect::LoadReviewRange { tag, range });
@@ -179,7 +180,7 @@ impl AppState {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crossterm::event::KeyCode;
 
     use super::*;
@@ -246,7 +247,11 @@ mod tests {
         // The fixture's detail is for the screen's pull request.
         state.review.detail.as_mut().unwrap().number = 12;
         let effects = type_char(&mut state, 'f');
-        let [Effect::CheckReviewCommits { tag, .. }] = effects.as_slice() else {
+        let [
+            Effect::CheckReviewCommits { tag, .. },
+            Effect::LoadPendingReview { .. },
+        ] = effects.as_slice()
+        else {
             panic!("{effects:?}");
         };
         let tag = *tag;
@@ -335,12 +340,13 @@ mod tests {
     }
 
     /// Nothing in this batch may reach the forge.
-    fn assert_local(effects: &[Effect]) {
+    pub(crate) fn assert_local(effects: &[Effect]) {
         for effect in effects {
             assert!(
                 !matches!(
                     effect,
                     Effect::SetFileViewed { .. }
+                        | Effect::WriteDiscussion { .. }
                         | Effect::MergePullRequest { .. }
                         | Effect::LoadReviewQueues { .. }
                         | Effect::LoadPrDetail { .. }

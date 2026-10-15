@@ -105,6 +105,10 @@ pub struct PrDiscussion {
     /// How many issue comments and reviews GitHub says there are, the
     /// reviews with no body included.
     pub conversation_total: u64,
+    /// GitHub has more issue comments or reviews than were read, so the
+    /// conversation shown is not all of it. Unlike `conversation_total`,
+    /// empty reviews do not set it.
+    pub conversation_capped: bool,
 }
 
 impl Gh<'_> {
@@ -236,6 +240,11 @@ fn read_discussion(body: &[u8]) -> Result<Option<PrDiscussion>, ForgeStatus> {
     let (reviews_total, reviews) = connection::<ReviewBodyNode>(pr.reviews);
     let comments_read = comments.len() as u64;
     let reviews_read = reviews.len() as u64;
+    let half = (MAX_CONVERSATION / 2) as u64;
+    // More than taken: by GitHub's count or by the nodes it sent.
+    let past_cap = |total: Option<u64>, read: u64| total.unwrap_or(read).max(read) > read.min(half);
+    let mut conversation_capped =
+        past_cap(comments_total, comments_read) || past_cap(reviews_total, reviews_read);
     let mut conversation: Vec<ConversationItem> = comments
         .into_iter()
         .take(MAX_CONVERSATION / 2)
@@ -267,6 +276,7 @@ fn read_discussion(body: &[u8]) -> Result<Option<PrDiscussion>, ForgeStatus> {
     // RFC 3339 times in one zone sort as text; the sort is stable, so
     // equal or odd times keep GitHub's order.
     conversation.sort_by(|a, b| a.created.cmp(&b.created));
+    conversation_capped |= conversation.len() > MAX_CONVERSATION;
     conversation.truncate(MAX_CONVERSATION);
     Ok(Some(PrDiscussion {
         head_oid: full_oid(pr.head_ref_oid),
@@ -275,6 +285,7 @@ fn read_discussion(body: &[u8]) -> Result<Option<PrDiscussion>, ForgeStatus> {
         conversation,
         conversation_total: comments_total.unwrap_or(comments_read)
             + reviews_total.unwrap_or(reviews_read),
+        conversation_capped,
     }))
 }
 
@@ -572,6 +583,8 @@ pub(crate) mod tests {
         );
         assert_eq!(d.conversation[1].created, "2023-11-14T22:00:00Z");
         assert_eq!(d.conversation_total, 4);
+        // The empty review counts in the total but cuts nothing.
+        assert!(!d.conversation_capped);
     }
 
     #[test]
@@ -705,6 +718,58 @@ pub(crate) mod tests {
             d.threads[0].comments_total,
             (MAX_THREAD_COMMENTS + 9) as u64
         );
+    }
+
+    /// The fixture with its issue comments, or its reviews, replaced by
+    /// `n` nodes and a `totalCount` of `total`.
+    fn with_conversation(reviews: bool, n: usize, total: usize) -> String {
+        let (start, end) = if reviews {
+            // Up to the braces that close the pull request and above it.
+            (
+                DISCUSSION.rfind("\"reviews\":").unwrap(),
+                DISCUSSION.rfind("}}}}").unwrap(),
+            )
+        } else {
+            (
+                DISCUSSION.rfind("\"comments\":{\"totalCount\":2").unwrap(),
+                DISCUSSION.rfind(",\"reviews\":").unwrap(),
+            )
+        };
+        let nodes: Vec<String> = (0..n)
+            .map(|i| {
+                format!(
+                    "{{\"author\":{{\"login\":\"u{i}\"}},\"body\":\"b{i}\",\"state\":\"COMMENTED\",\
+                     \"createdAt\":\"2023-11-14T20:00:00Z\",\"submittedAt\":\"2023-11-14T20:00:00Z\"}}"
+                )
+            })
+            .collect();
+        let name = if reviews { "reviews" } else { "comments" };
+        format!(
+            "{}\"{name}\":{{\"totalCount\":{total},\"nodes\":[{}]}}{}",
+            &DISCUSSION[..start],
+            nodes.join(","),
+            &DISCUSSION[end..]
+        )
+    }
+
+    #[test]
+    fn the_conversation_says_when_comments_or_reviews_pass_their_caps() {
+        let half = MAX_CONVERSATION / 2;
+        for reviews in [false, true] {
+            // All read: not capped, even at the cap.
+            let d = parsed(&with_conversation(reviews, half, half));
+            assert!(!d.conversation_capped, "reviews {reviews}");
+            // GitHub has more than it sent.
+            let d = parsed(&with_conversation(reviews, half, half + 1));
+            assert!(d.conversation_capped, "reviews {reviews}");
+            assert_eq!(
+                d.conversation.len(),
+                MAX_CONVERSATION / 2 + if reviews { 2 } else { 1 }
+            );
+            // It sent more than are taken.
+            let d = parsed(&with_conversation(reviews, half + 3, half + 3));
+            assert!(d.conversation_capped, "reviews {reviews}");
+        }
     }
 
     #[test]
