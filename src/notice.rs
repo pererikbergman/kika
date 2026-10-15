@@ -21,6 +21,9 @@ pub struct Notice {
     /// Where a path at the end of `text` starts, as a byte offset, so a
     /// narrow row can cut the path from the left and keep the file name.
     path_at: Option<usize>,
+    /// Where the clause saying what to do starts, as a byte offset, so a
+    /// narrow row cuts the words before it first and keeps the advice.
+    advice_at: Option<usize>,
 }
 
 impl Notice {
@@ -29,6 +32,17 @@ impl Notice {
         Self {
             text: Cow::Borrowed(text),
             path_at: None,
+            advice_at: None,
+        }
+    }
+
+    /// A trusted literal of the form `<what>; <what to do>`, with the
+    /// clause after the first `; ` marked as the part to keep. With no
+    /// `; ` it is [`Notice::fixed`].
+    pub fn advised(text: &'static str) -> Self {
+        Self {
+            advice_at: text.find("; ").map(|at| at + 2),
+            ..Self::fixed(text)
         }
     }
 
@@ -39,6 +53,7 @@ impl Notice {
         Self {
             text: Cow::Owned(cap(safe)),
             path_at: None,
+            advice_at: None,
         }
     }
 
@@ -54,6 +69,7 @@ impl Notice {
         Self {
             text: Cow::Owned(cap(safe)),
             path_at: (!cut).then_some(at),
+            advice_at: None,
         }
     }
 
@@ -69,6 +85,12 @@ impl Notice {
     /// The text before the path and the path, when the notice ends in one.
     pub fn path_split(&self) -> Option<(&str, &str)> {
         self.path_at.map(|at| self.text.split_at(at))
+    }
+
+    /// The words before the advice, `; ` included, and the advice, when
+    /// the notice marks one.
+    pub fn advice_split(&self) -> Option<(&str, &str)> {
+        self.advice_at.map(|at| self.text.split_at(at))
     }
 }
 
@@ -188,6 +210,19 @@ mod tests {
             assert_eq!(marked.path_split(), Some((lead, safe.as_str())), "{path:?}");
             assert_eq!(plain.path_split(), None);
         }
+    }
+
+    #[test]
+    fn an_advised_notice_marks_the_clause_after_its_first_semicolon() {
+        let advised = Notice::advised("Not here; do this; then that");
+        assert_eq!(
+            advised.advice_split(),
+            Some(("Not here; ", "do this; then that"))
+        );
+        assert_eq!(advised, Notice::fixed("Not here; do this; then that"));
+        assert_eq!(advised.as_fixed(), Some("Not here; do this; then that"));
+        assert_eq!(Notice::advised("Nothing to do").advice_split(), None);
+        assert_eq!(Notice::fixed("Not here; do this").advice_split(), None);
     }
 
     #[test]

@@ -1189,6 +1189,29 @@ mod tests {
     }
 
     #[test]
+    fn the_case_only_refusal_keeps_its_advice_on_a_narrow_bar() {
+        let advice = "use Stash all changes… and apply it on this commit";
+        let (mut state, _) = with_files(vec![renamed("old.txt", "Old.txt")], 24);
+        stash_menu_item(&mut state, 3);
+        state.popups.clear();
+        for (width, height) in [(80, 24), (60, 24), (40, 12)] {
+            let rows = crate::test_support::screen::draw(&state, width, height);
+            let bar = rows[usize::from(height) - 1].trim();
+            assert!(bar.chars().count() <= usize::from(width), "{rows:#?}");
+            match width {
+                // The words before the advice give way first.
+                80 => assert_eq!(
+                    bar,
+                    format!("This rename only changes ca… {advice}"),
+                    "{rows:#?}"
+                ),
+                60 => assert_eq!(bar, format!("This re… {advice}"), "{rows:#?}"),
+                _ => assert_eq!(bar, "use Stash all changes… and apply it on…", "{rows:#?}"),
+            }
+        }
+    }
+
+    #[test]
     fn the_path_in_the_way_is_named_terminal_safe() {
         let raw = "a\x1b[31m\u{202E}b";
         let files = vec![renamed("new.rs", raw), untracked(raw)];

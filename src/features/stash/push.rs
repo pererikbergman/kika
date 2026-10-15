@@ -40,6 +40,12 @@ pub const STASH_RENAME_CASE: &str = "This rename only changes case and cannot be
 /// Why a check of the worktree's files could not run.
 pub const STASH_NO_TOP: &str = "Could not find the worktree's top level";
 
+/// [`STASH_RENAME_CASE`] as a menu reason, its advice marked so a narrow
+/// row or the bar keeps "use Stash all changes…".
+pub(crate) fn stash_rename_case_reason() -> Reason {
+    Notice::advised(STASH_RENAME_CASE)
+}
+
 /// Whether `old` and `new` differ only in ASCII case.
 pub(crate) fn case_only(old: &RepoPath, new: &RepoPath) -> bool {
     old != new && old.as_bytes().eq_ignore_ascii_case(new.as_bytes())
