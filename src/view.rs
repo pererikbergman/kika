@@ -704,9 +704,12 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
         ));
     }
     if let Some(notice) = notice {
-        // A marked path or advice survives a narrow bar (`fit_reason`).
+        // Marked advice survives a narrow bar (`fit_reason`); anything
+        // else, a path too, is cut from the right.
         let text = match &state.notice {
-            Some(own) if room > 0 => format!(" {}", fit_reason(own, room - 1)),
+            Some(own) if room > 0 && own.advice_split().is_some() => {
+                format!(" {}", fit_reason(own, room - 1))
+            }
             _ => elide_right(&format!(" {notice}"), room),
         };
         spans.push(Span::styled(text, Style::new().fg(Color::Yellow)));
