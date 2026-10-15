@@ -111,7 +111,11 @@ mod tests {
             .standard_env();
 
         let child = runner.spawn(&cmd).unwrap();
-        assert_eq!(cli_child_tree_holds_git(&child.handle), Some(true));
+        // SAFETY: the handle comes from `CliRunner::spawn`, so it is a `CliChild`.
+        assert_eq!(
+            unsafe { cli_child_tree_holds_git(&child.handle) },
+            Some(true)
+        );
 
         child.handle.kill();
         let mut stdout = child.stdout;
