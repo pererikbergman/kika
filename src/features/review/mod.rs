@@ -14,7 +14,8 @@
 //! and going to the workspace (`checkout.rs`), the markdown renderer for
 //! its body (`markdown.rs`), the pending review of line comments kept on
 //! disk (`pending.rs`), picking the lines a comment goes on
-//! (`comment_pick.rs`) and typing it (`comment_editor.rs`) or writing it in
+//! (`comment_pick.rs`), starting a code suggestion on them
+//! (`suggestion.rs`), and typing it (`comment_editor.rs`) or writing it in
 //! the user's editor (`comment_external.rs`), submitting the pending
 //! review to GitHub (`submit.rs`), all drawn by
 //! `pending_view.rs`, and the local git reads behind the files screen and
@@ -24,7 +25,7 @@
 //! `CheckReviewCommits`, `FetchReviewCommits`, `LoadReviewFiles`,
 //! `LoadReviewCommits`, `LoadReviewRange`, `SetFileViewed`,
 //! `WriteDiscussion`, `PlanPrCheckout`, `MergePullRequest`, `LoadPendingReview` and
-//! `SavePendingReview` and `RemoveCommentFile` (`effects.rs`). The credential
+//! `SavePendingReview`, `ReadSuggestionLines` and `RemoveCommentFile` (`effects.rs`). The credential
 //! plumbing that `FetchReviewCommits` shares with sync and the merge
 //! question popup stay in core; the forge client is the `kika_forge` crate.
 //!
@@ -33,8 +34,8 @@
 //! `update.rs` holds only that function; it dispatches to the handlers in
 //! `state.rs`, `files.rs`, `commit_view.rs`, `viewed.rs`, `threads.rs`,
 //! `reader.rs`, `conversation.rs`, `discussion_write.rs`, `line_link.rs`, `merge.rs`,
-//! `checkout.rs`, `pending.rs`, `comment_pick.rs`, `comment_editor.rs` and
-//! `comment_external.rs` and `submit.rs`.
+//! `checkout.rs`, `pending.rs`, `comment_pick.rs`, `suggestion.rs`,
+//! `comment_editor.rs` and `comment_external.rs` and `submit.rs`.
 //! The review guards on core arms (`ScrollDiff`, `OpenSearch`,
 //! `DiffEscape`) stay in core.
 //!
@@ -65,7 +66,7 @@
 //! - `effects::{load_queues, load_detail, load_discussion, check_commits,
 //!   fetch_commits, load_files, load_commits, load_range_files,
 //!   set_file_viewed, write_discussion, plan_checkout, merge, load_pending,
-//!   save_pending, remove_comment_file}`.
+//!   save_pending, read_suggestion_lines, remove_comment_file}`.
 //!
 //! Kept cross-feature reads and calls:
 //! - `merge.rs` reloads the badges after a merge by asking core
@@ -99,6 +100,7 @@ mod reader;
 mod reader_view;
 mod state;
 mod submit;
+mod suggestion;
 mod threads;
 mod threads_view;
 mod update;
@@ -116,7 +118,7 @@ pub(crate) use git::{
 };
 pub(crate) use intent::ReviewIntent;
 pub(crate) use merge::PrMerging;
-pub(crate) use pending::pending_list_open;
+pub(crate) use pending::{CommentTarget, pending_list_open};
 pub(crate) use reader::thread_reader_open;
 pub(crate) use state::{ReviewScreen, ReviewState, queue_keys_disabled};
 pub(crate) use update::update;

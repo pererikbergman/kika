@@ -1,8 +1,8 @@
 //! The I/O behind the review effects: reading the queues and a pull
 //! request through `gh`, checking for and fetching its commits, listing
 //! its files and its commits, planning a checkout of its head,
-//! merging it, and reading and writing its pending review in the state
-//! directory. Each answers with exactly one intent; none blocks the
+//! merging it, reading the lines a code suggestion starts from, and
+//! reading and writing its pending review in the state directory. Each answers with exactly one intent; none blocks the
 //! event loop.
 
 use std::path::PathBuf;
@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::git::{self as pr_objects, CommitsHere};
+use super::pending::CommentTarget;
 use crate::background;
 use crate::effect::{AnswerSlot, Bridge, Tag};
 use crate::features::review::ReviewIntent;
@@ -25,6 +26,7 @@ use kika_forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
 use kika_git::GitRunner;
 use kika_git::branches::BranchName;
 use kika_git::commit_files::{CommitId, CommitRange};
+use kika_git::path::RepoPath;
 use kika_git::remotes::RemoteName;
 use kika_git::safe_text::terminal_safe;
 
@@ -253,6 +255,33 @@ pub(crate) fn load_commits(
         move || pr_objects::pr_commits(runner.as_ref(), &range),
         background::crashed("git log"),
         move |result| AppIntent::Review(ReviewIntent::CommitsLoaded { tag, result }),
+    );
+}
+
+/// Read the lines `target` covers in `path` at `head`, for a code
+/// suggestion; always answered by one `ReviewIntent::SuggestionLinesRead`
+/// carrying the target back.
+pub(crate) fn read_suggestion_lines(
+    runner: Arc<dyn GitRunner>,
+    tx: UnboundedSender<AppIntent>,
+    tag: Tag,
+    target: CommentTarget,
+    head: CommitId,
+    path: RepoPath,
+) {
+    let first = target.start.unwrap_or(target.end).line;
+    let last = target.end.line;
+    background::run(
+        tx,
+        move || pr_objects::read_new_lines(runner.as_ref(), &head, &path, first, last),
+        background::crashed("git cat-file"),
+        move |result| {
+            AppIntent::Review(ReviewIntent::SuggestionLinesRead {
+                tag,
+                target,
+                result,
+            })
+        },
     );
 }
 
