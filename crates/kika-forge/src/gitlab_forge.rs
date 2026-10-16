@@ -1,4 +1,5 @@
-//! The GitLab forge adapter: badges through `glab`, and nothing else yet.
+//! The GitLab forge adapter: badges and the read-only review (queues,
+//! detail and discussion) through `glab`, and nothing else yet.
 
 use crate::cache::Cached;
 use crate::discussion::PrDiscussion;
@@ -18,12 +19,14 @@ pub struct GitLabForge<'a>(pub(crate) Glab<'a>);
 
 impl GitLabForge<'_> {
     /// What GitLab can be asked so far.
-    pub const SUPPORTS: &'static [Capability] = &[Capability::Badges];
+    pub const SUPPORTS: &'static [Capability] = &[Capability::Badges, Capability::Review];
 
     /// How GitLab is named to the user: merge requests, numbered `!N`.
     pub const WORDS: Words = Words {
         cli: "glab",
+        request: "merge request",
         requests: "merge requests",
+        short: "MR",
         sign: '!',
     };
 
@@ -86,20 +89,20 @@ impl Forge for GitLabForge<'_> {
         )))
     }
 
-    fn fetch_queues(&self, _repo: &ForgeRepo) -> Result<Queues, Refusal> {
-        Err(Refusal::Unsupported(Self::lacks(Capability::Review)))
+    fn fetch_queues(&self, repo: &ForgeRepo) -> Result<Queues, Refusal> {
+        self.0.fetch_queues(repo)
     }
 
-    fn fetch_detail(&self, _repo: &ForgeRepo, _number: u64) -> Result<Option<PrDetail>, Refusal> {
-        Err(Refusal::Unsupported(Self::lacks(Capability::Review)))
+    fn fetch_detail(&self, repo: &ForgeRepo, number: u64) -> Result<Option<PrDetail>, Refusal> {
+        self.0.fetch_detail(repo, number)
     }
 
     fn fetch_discussion(
         &self,
-        _repo: &ForgeRepo,
-        _number: u64,
+        repo: &ForgeRepo,
+        number: u64,
     ) -> Result<Option<PrDiscussion>, Refusal> {
-        Err(Refusal::Unsupported(Self::lacks(Capability::Review)))
+        self.0.fetch_discussion(repo, number)
     }
 }
 
@@ -120,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn every_method_but_badges_is_unsupported_without_a_call() {
+    fn every_method_but_badges_and_the_review_reads_is_unsupported_without_a_call() {
         let runner = FakeGlab::new();
         let sink = CommandSink::new();
         let host = ForgeHost::parse("gitlab.example.com")
@@ -138,7 +141,6 @@ mod tests {
             capability,
         };
         let created = |capability| CreateError::Unsupported(lacks(capability));
-        let refused = |capability| Refusal::Unsupported(lacks(capability));
         let head = CommitId::parse(&"a".repeat(40)).unwrap();
         let write = DiscussionWrite::Comment {
             subject: "MR_1".into(),
@@ -166,25 +168,44 @@ mod tests {
             forge.write_discussion(&write).unwrap_err(),
             created(Capability::DiscussionWrite)
         );
-        assert_eq!(
-            forge.fetch_queues(&repo()).unwrap_err(),
-            refused(Capability::Review)
-        );
-        assert_eq!(
-            forge.fetch_detail(&repo(), 7).unwrap_err(),
-            refused(Capability::Review)
-        );
-        assert_eq!(
-            forge.fetch_discussion(&repo(), 7).unwrap_err(),
-            refused(Capability::Review)
-        );
         assert!(runner.calls().is_empty());
         // Each one is a capability the adapter does not list.
         for capability in Capability::ALL {
             assert_eq!(
                 GitLabForge::SUPPORTS.contains(&capability),
-                capability == Capability::Badges
+                matches!(capability, Capability::Badges | Capability::Review)
             );
         }
+    }
+
+    #[test]
+    fn the_review_reads_go_through_glab() {
+        use crate::discussion::PrDiscussion;
+        use crate::github::answer;
+        use crate::gitlab_discussion::fixtures::DISCUSSION;
+        use crate::gitlab_review::fixtures::{DETAIL, QUEUES};
+        use crate::review::QueueKind;
+        let runner = FakeGlab::new()
+            .reply(answer(QUEUES))
+            .reply(answer(DETAIL))
+            .reply(answer(DISCUSSION));
+        let sink = CommandSink::new();
+        let host = ForgeHost::parse("gitlab.example.com")
+            .unwrap()
+            .with_kind(ForgeKind::GitLab);
+        let forge = GitLabForge(Glab {
+            runner: &runner,
+            sink: &sink,
+            host: &host,
+            cwd: "/cache".into(),
+            now: 0,
+        });
+        let queues = forge.fetch_queues(&repo()).unwrap();
+        assert_eq!(queues.get(QueueKind::AllOpen).len(), 4);
+        let detail: PrDetail = forge.fetch_detail(&repo(), 42).unwrap().unwrap();
+        assert_eq!(detail.title, "Add widget caching");
+        let discussion: PrDiscussion = forge.fetch_discussion(&repo(), 42).unwrap().unwrap();
+        assert_eq!(discussion.threads.len(), 6);
+        assert_eq!(runner.calls().len(), 3);
     }
 }
