@@ -58,7 +58,7 @@ pub(crate) fn render_status_panel(
     };
     let block = look.block(title);
     let block = if stale {
-        block.style(Style::new().fg(state.palette.dim))
+        block.style(state.palette.dim_style())
     } else {
         block
     };
