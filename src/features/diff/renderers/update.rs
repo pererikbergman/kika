@@ -2,7 +2,7 @@
 //! running it on the shown diff, taking its rows back and keeping them in
 //! step with the pane's width and the focused view's cursor.
 
-use super::{ExternalRenderer, RenderedDiff, RenderersIntent, StyledRow, external_diff};
+use super::{ExternalRenderer, RenderedDiff, RenderersIntent, StyledRow, ansi, external_diff};
 use crate::diff_pane::focused_hunks;
 use crate::effect::{Effect, Tag};
 use crate::model::{AppState, Focus};
@@ -150,11 +150,17 @@ impl AppState {
         }]
     }
 
-    pub(crate) fn diff_rendered(&mut self, tag: Tag, result: Result<Vec<StyledRow>, String>) {
+    pub(crate) fn diff_rendered(&mut self, tag: Tag, mut result: Result<Vec<StyledRow>, String>) {
         // Every user effect reports back once, stale or not.
         self.user_done(tag);
         if tag.generation != self.generation {
             return;
+        }
+        // `NO_COLOR` covers a pager's or a tool's colours too.
+        if self.no_color
+            && let Ok(rows) = &mut result
+        {
+            ansi::strip_colour(rows);
         }
         if let Some(rendered) = &mut self.rendered
             && rendered.apply(tag.seq, result)
@@ -189,6 +195,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyModifiers};
     use kika_git::FileEntry;
     use kika_git::diff::DiffSide;
+    use ratatui::style::Color;
 
     fn renderer(label: &str) -> ExternalRenderer {
         ExternalRenderer {
@@ -231,6 +238,39 @@ mod tests {
                 text.as_bytes(),
             )),
         }))
+    }
+
+    /// The fg and bg of every run the state keeps from a renderer's
+    /// coloured row, with `no_color` set as given.
+    fn kept_colours(no_color: bool) -> Vec<(Option<Color>, Option<Color>)> {
+        let mut state = with_renderers(three_files(), &["delta"]);
+        state.no_color = no_color;
+        let (tag, _, _) = render_of(&state.update(AppIntent::Diff(DiffIntent::Renderers(
+            RenderersIntent::Cycle,
+        ))));
+        state.update(rendered(tag, "\x1b[1;31mred\x1b[0m \x1b[44mbg\x1b[0m\n"));
+        let kept = state.rendered.as_ref().unwrap();
+        assert_eq!(kept.rows[0].text(), "red bg");
+        kept.rows
+            .iter()
+            .flat_map(|row| row.runs.iter().map(|(s, _)| (s.fg, s.bg)))
+            .collect()
+    }
+
+    #[test]
+    fn under_no_color_a_renderers_rows_are_kept_without_colour() {
+        assert!(
+            kept_colours(true)
+                .iter()
+                .all(|colours| *colours == (None, None))
+        );
+    }
+
+    #[test]
+    fn with_colour_on_a_renderers_colours_are_kept() {
+        let kept = kept_colours(false);
+        assert!(kept.contains(&(Some(Color::Red), None)), "{kept:?}");
+        assert!(kept.contains(&(None, Some(Color::Blue))), "{kept:?}");
     }
 
     #[test]
