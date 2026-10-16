@@ -8,6 +8,7 @@
 use serde::Deserialize;
 use serde_json::json;
 
+use super::forge::Forge;
 use super::github::{Answer, Gh, GhCall, GhOutput, MAX_URL, Refusal, classify, split_include};
 use super::remote::{allowed, matches, parse_remote, segment_ok};
 use super::task::ForgeContext;
@@ -290,6 +291,8 @@ pub enum ReviewError {
         until: i64,
     },
     Status(ForgeStatus),
+    /// The forge kind cannot review yet; nobody was asked.
+    Unsupported(crate::forge::Unsupported),
 }
 
 impl From<Refusal> for ReviewError {
@@ -297,6 +300,7 @@ impl From<Refusal> for ReviewError {
         match refusal {
             Refusal::Limited { until } => ReviewError::Limited { until },
             Refusal::Status(status) => ReviewError::Status(status),
+            Refusal::Unsupported(unsupported) => ReviewError::Unsupported(unsupported),
         }
     }
 }
@@ -905,7 +909,9 @@ impl Gh<'_> {
             match self.call(kind, |answer| read_with(answer, read_files), outcome) {
                 Ok(files) => end = add_viewed(viewed, Some(files)),
                 Err(Refusal::Limited { until }) => return Some(ViewedGap::Limited { until }),
-                Err(Refusal::Status(_)) => return Some(ViewedGap::Failed),
+                Err(Refusal::Status(_) | Refusal::Unsupported(_)) => {
+                    return Some(ViewedGap::Failed);
+                }
             }
         }
     }
@@ -1075,7 +1081,7 @@ pub fn run<T>(
     git: &dyn GitRunner,
     ctx: &ForgeContext,
     load: &ReviewLoad,
-    fetch: impl FnOnce(&Gh, &ForgeRepo) -> Result<T, Refusal>,
+    fetch: impl FnOnce(&dyn Forge, &ForgeRepo) -> Result<T, Refusal>,
 ) -> (Option<ForgeRepo>, Result<T, ReviewError>) {
     // Defence in depth: with no hosts nothing is read or run.
     if load.hosts.is_empty() {
@@ -1088,10 +1094,10 @@ pub fn run<T>(
         return (Some(repo), Err(ReviewError::Limited { until }));
     }
     // `resolve` applied the same allow gate; this is its answer.
-    let Some(gh) = ctx.gh(&host, &repo, load.now) else {
+    let Some(forge) = ctx.forge(&host, &repo, load.now) else {
         return (None, Err(ReviewError::NoForgeHost));
     };
-    let result = fetch(&gh, &repo).map_err(ReviewError::from);
+    let result = fetch(forge.as_ref(), &repo).map_err(ReviewError::from);
     (Some(repo), result)
 }
 

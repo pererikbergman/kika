@@ -18,6 +18,16 @@ pub enum ForgeKind {
     GitLab,
 }
 
+impl ForgeKind {
+    /// The forge's name, for user text.
+    pub fn name(self) -> &'static str {
+        match self {
+            ForgeKind::GitHub => "GitHub",
+            ForgeKind::GitLab => "GitLab",
+        }
+    }
+}
+
 /// `https://<host>/<owner>/<name>`, or `None` when a part is not plain:
 /// the host must be ASCII letters, digits, `-` and dots, and the owner and
 /// name `[A-Za-z0-9._-]`, not dots only.
@@ -118,6 +128,30 @@ pub fn gitlab_mrs_url(repo: &ForgeRepo, branch: &BranchName) -> Option<String> {
         https_base(repo)?,
         percent_encode(&branch.0)
     ))
+}
+
+/// Why a branch has no page to open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoBranchPage {
+    /// The page is the pull request's, and none is known for the branch.
+    NoPull,
+    /// A part of the repository is not plain enough to build a URL from.
+    Unbuildable,
+}
+
+/// The page for `branch`: on GitHub its pull request `pr`, on GitLab its
+/// merge requests, which need no number.
+pub fn branch_page_url(
+    kind: ForgeKind,
+    repo: &ForgeRepo,
+    branch: &BranchName,
+    pr: Option<u64>,
+) -> Result<String, NoBranchPage> {
+    let url = match kind {
+        ForgeKind::GitHub => pull_url(repo, pr.ok_or(NoBranchPage::NoPull)?),
+        ForgeKind::GitLab => gitlab_mrs_url(repo, branch),
+    };
+    url.ok_or(NoBranchPage::Unbuildable)
 }
 
 /// `bytes` with everything but RFC 3986's unreserved characters as `%XX`.
@@ -368,5 +402,34 @@ mod tests {
             ..remote("origin", "")
         };
         assert_eq!(forge_for(&[no_url], &github, &gitlab), None);
+    }
+
+    #[test]
+    fn a_branch_page_is_its_pull_on_github_and_its_merge_requests_on_gitlab() {
+        let hub = repo("github.com", "o", "r");
+        let branch: BranchName = "topic/a b".into();
+        assert_eq!(
+            branch_page_url(ForgeKind::GitHub, &hub, &branch, Some(7)),
+            Ok("https://github.com/o/r/pull/7".into())
+        );
+        assert_eq!(
+            branch_page_url(ForgeKind::GitHub, &hub, &branch, None),
+            Err(NoBranchPage::NoPull)
+        );
+        let lab = repo("gitlab.com", "g", "p");
+        assert_eq!(
+            branch_page_url(ForgeKind::GitLab, &lab, &branch, None),
+            Ok(
+                "https://gitlab.com/g/p/-/merge_requests?scope=all&source_branch=topic%2Fa%20b"
+                    .into()
+            )
+        );
+        let odd = repo("github.com", "..", "r");
+        assert_eq!(
+            branch_page_url(ForgeKind::GitHub, &odd, &branch, Some(7)),
+            Err(NoBranchPage::Unbuildable)
+        );
+        assert_eq!(ForgeKind::GitHub.name(), "GitHub");
+        assert_eq!(ForgeKind::GitLab.name(), "GitLab");
     }
 }

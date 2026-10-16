@@ -316,12 +316,16 @@ pub enum Refusal {
     Limited {
         until: i64,
     },
+    /// The forge kind cannot do this yet; nothing was asked.
+    Unsupported(crate::forge::Unsupported),
 }
 
 /// The `gh` calls of one load: who runs them, where they are logged, the
-/// host they go to and the time rate limits are measured from. Only
-/// [`ForgeContext::gh`](super::task::ForgeContext::gh) builds one, behind
-/// the host's allow gate, so its fields stay inside forge.
+/// host they go to and the time rate limits are measured from. Only the
+/// GitHub forge adapter that
+/// [`ForgeContext::forge`](super::task::ForgeContext::forge) hands out
+/// holds one, behind the host's allow gate, so its fields stay inside
+/// forge.
 pub struct Gh<'a> {
     pub(crate) runner: &'a dyn GhRunner,
     pub(crate) sink: &'a CommandSink,

@@ -16,6 +16,7 @@ use crate::model::{AppState, Context};
 use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::{MergePrConfirm, Popup};
 use kika_forge::discussion::PrDiscussion;
+use kika_forge::forge::Unsupported;
 use kika_forge::merge::MergeMethod;
 use kika_forge::remote::{allowed, matches};
 use kika_forge::review::{CheckStatus, PrDetail, PrSummary, QueueKind, Queues, ReviewError};
@@ -56,6 +57,8 @@ pub enum ReviewProblem {
     Status(ForgeStatus),
     /// GitHub has no pull request with this number.
     Missing(u64),
+    /// The forge kind cannot review yet; nobody was asked.
+    Unsupported(Unsupported),
 }
 
 impl From<ReviewError> for ReviewProblem {
@@ -64,6 +67,7 @@ impl From<ReviewError> for ReviewProblem {
             ReviewError::NoForgeHost => ReviewProblem::NoForgeHost,
             ReviewError::Limited { until } => ReviewProblem::Limited(until),
             ReviewError::Status(status) => ReviewProblem::Status(status),
+            ReviewError::Unsupported(unsupported) => ReviewProblem::Unsupported(unsupported),
         }
     }
 }

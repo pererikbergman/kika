@@ -1,19 +1,20 @@
 //! The one forge client. Every `gh` and `glab` call goes through
-//! [`ForgeContext`]: it checks the repository is on the host, that the
-//! host is the CLI's kind of forge and that the host's `[forge.allow]`
-//! lets it through, runs the CLI in the cache directory and reads the
-//! clock, so no caller can reach the network for a repository the user
-//! never opted in.
+//! [`ForgeContext`]: it checks the repository is on the host and that the
+//! host's `[forge.allow]` lets it through, and only then hands out the
+//! host's forge adapter ([`GitHubForge`](crate::forge::GitHubForge) or
+//! [`GitLabForge`](crate::forge::GitLabForge)) as a [`Forge`]. The adapter
+//! runs its CLI in the cache directory and reads the clock, so no caller
+//! can reach the network for a repository the user never opted in.
 
 use std::path::PathBuf;
 
 use super::cache;
 use super::discussion_write::{DiscussionWrite, Written};
+use super::forge::{self, Forge};
 use super::github::Gh;
 use super::gitlab::Glab;
 use super::merge::MergeMethod;
 use super::task::ForgeContext;
-use super::url::ForgeKind;
 use super::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
 use kika_git::commit_files::CommitId;
 
@@ -34,41 +35,50 @@ impl ForgeContext {
             .unwrap_or_else(std::env::temp_dir)
     }
 
-    /// Whether `repo` may be asked about on `host` as a `kind` forge: it
-    /// is on the host, the host is of that kind, and its allow-list lets
-    /// the repository through.
-    fn opens(host: &ForgeHost, repo: &ForgeRepo, kind: ForgeKind) -> bool {
-        repo.host.eq_ignore_ascii_case(host.as_str()) && host.kind() == kind && host.allows(repo)
+    /// Whether `repo` may be asked about on `host`: it is on the host, and
+    /// the host's allow-list lets the repository through.
+    fn opens(host: &ForgeHost, repo: &ForgeRepo) -> bool {
+        repo.host.eq_ignore_ascii_case(host.as_str()) && host.allows(repo)
     }
 
-    /// A `gh` for `repo` on `host`, or `None` when `repo` is on another
-    /// host, the host is not GitHub, or the host's allow-list leaves it
-    /// out: then nothing may reach the network.
-    pub fn gh<'a>(&'a self, host: &'a ForgeHost, repo: &ForgeRepo, now: i64) -> Option<Gh<'a>> {
-        Self::opens(host, repo, ForgeKind::GitHub).then(|| Gh {
+    /// The forge adapter of `host`'s kind for `repo`, or `None` when
+    /// `repo` is on another host or the host's allow-list leaves it out:
+    /// then nothing may reach the network.
+    pub fn forge<'a>(
+        &'a self,
+        host: &'a ForgeHost,
+        repo: &ForgeRepo,
+        now: i64,
+    ) -> Option<Box<dyn Forge + 'a>> {
+        Self::opens(host, repo).then(|| forge::adapter(self, host, now))
+    }
+
+    /// The `gh` calls for `host`. Only [`forge::adapter`] builds one,
+    /// after [`Self::forge`]'s checks.
+    pub(crate) fn gh<'a>(&'a self, host: &'a ForgeHost, now: i64) -> Gh<'a> {
+        Gh {
             runner: self.gh.as_ref(),
             sink: &self.sink,
             host,
             cwd: self.cwd(),
             now,
-        })
+        }
     }
 
-    /// A `glab` for `repo` on `host`, or `None` when `repo` is on another
-    /// host, the host is not GitLab, or the host's allow-list leaves it
-    /// out: then nothing may reach the network.
-    pub fn glab<'a>(&'a self, host: &'a ForgeHost, repo: &ForgeRepo, now: i64) -> Option<Glab<'a>> {
-        Self::opens(host, repo, ForgeKind::GitLab).then(|| Glab {
+    /// The `glab` calls for `host`. Only [`forge::adapter`] builds one,
+    /// after [`Self::forge`]'s checks.
+    pub(crate) fn glab<'a>(&'a self, host: &'a ForgeHost, now: i64) -> Glab<'a> {
+        Glab {
             runner: self.glab.as_ref(),
             sink: &self.sink,
             host,
             cwd: self.cwd(),
             now,
-        })
+        }
     }
 
-    /// Open a pull request on `repo`; see [`Gh::create_pull`]. A
-    /// repository [`Self::gh`] refuses fails without a call.
+    /// Open a pull request on `repo`; see [`Forge::create_pull`]. A
+    /// repository [`Self::forge`] refuses fails without a call.
     pub fn create_pull(
         &self,
         host: &ForgeHost,
@@ -77,13 +87,13 @@ impl ForgeContext {
         base: &str,
         title: &str,
     ) -> Result<(u64, String), CreateError> {
-        self.gh(host, repo, self.now())
+        self.forge(host, repo, self.now())
             .ok_or(CreateError::Status(ForgeStatus::Failed))?
             .create_pull(repo, head, base, title)
     }
 
-    /// Merge pull request `number`; see [`Gh::merge_pull`]. A repository
-    /// [`Self::gh`] refuses fails without a call.
+    /// Merge pull request `number`; see [`Forge::merge_pull`]. A
+    /// repository [`Self::forge`] refuses fails without a call.
     pub fn merge_pull(
         &self,
         host: &ForgeHost,
@@ -92,13 +102,13 @@ impl ForgeContext {
         method: MergeMethod,
         head_oid: &CommitId,
     ) -> Result<(), CreateError> {
-        self.gh(host, repo, self.now())
+        self.forge(host, repo, self.now())
             .ok_or(CreateError::Status(ForgeStatus::Failed))?
             .merge_pull(repo, number, method, head_oid)
     }
 
-    /// Mark `path` viewed or not; see [`Gh::set_file_viewed`]. A
-    /// repository [`Self::gh`] refuses fails without a call.
+    /// Mark `path` viewed or not; see [`Forge::set_file_viewed`]. A
+    /// repository [`Self::forge`] refuses fails without a call.
     pub fn set_file_viewed(
         &self,
         host: &ForgeHost,
@@ -107,21 +117,21 @@ impl ForgeContext {
         path: &str,
         viewed: bool,
     ) -> Result<(), CreateError> {
-        self.gh(host, repo, self.now())
+        self.forge(host, repo, self.now())
             .ok_or(CreateError::Status(ForgeStatus::Failed))?
             .set_file_viewed(node_id, path, viewed)
     }
 
-    /// Reply to, resolve or unresolve a review thread, or comment on a
-    /// pull request; see [`Gh::write_discussion`]. A repository
-    /// [`Self::gh`] refuses fails without a call.
+    /// Reply to, resolve or unresolve a review thread, comment on a pull
+    /// request or submit a review; see [`Forge::write_discussion`]. A
+    /// repository [`Self::forge`] refuses fails without a call.
     pub fn write_discussion(
         &self,
         host: &ForgeHost,
         repo: &ForgeRepo,
         write: &DiscussionWrite,
     ) -> Result<Written, CreateError> {
-        self.gh(host, repo, self.now())
+        self.forge(host, repo, self.now())
             .ok_or(CreateError::Status(ForgeStatus::Failed))?
             .write_discussion(write)
     }
@@ -133,9 +143,11 @@ mod tests {
 
     use super::*;
     use crate::allow::AllowRule;
+    use crate::forge::{Capability, Unsupported};
     use crate::github::fixtures::CREATE_201;
     use crate::github::{FakeGh, answer};
     use crate::gitlab::FakeGlab;
+    use crate::url::ForgeKind;
     use kika_git::fake::TempDir;
     use kika_git::recording::CommandSink;
 
@@ -165,7 +177,7 @@ mod tests {
             .with_allow(vec![AllowRule::parse("someone-else").unwrap()]);
         let failed = Err(CreateError::Status(ForgeStatus::Failed));
 
-        assert!(ctx.gh(&host, &repo(), 0).is_none());
+        assert!(ctx.forge(&host, &repo(), 0).is_none());
         assert_eq!(
             ctx.create_pull(&host, &repo(), "topic", "main", "Add login")
                 .map(|_| ()),
@@ -186,7 +198,7 @@ mod tests {
         let host = ForgeHost::parse("gitlab.example").unwrap();
         let failed = Err(CreateError::Status(ForgeStatus::Failed));
 
-        assert!(ctx.gh(&host, &repo(), 0).is_none());
+        assert!(ctx.forge(&host, &repo(), 0).is_none());
         assert_eq!(
             ctx.create_pull(&host, &repo(), "topic", "main", "Add login")
                 .map(|_| ()),
@@ -205,7 +217,7 @@ mod tests {
             host: "GitHub.com".into(),
             ..repo()
         };
-        assert!(ctx.gh(&github, &shown, 0).is_some());
+        assert!(ctx.forge(&github, &shown, 0).is_some());
     }
 
     fn gitlab_repo() -> ForgeRepo {
@@ -232,35 +244,50 @@ mod tests {
         let failed = Err(CreateError::Status(ForgeStatus::Failed));
         let lab = gitlab("gitlab.example.com");
 
-        // A GitLab-kind host never reaches `gh`, not even to create or merge.
-        assert!(ctx.gh(&lab, &gitlab_repo(), 0).is_none());
+        let kind = |host: &ForgeHost, repo: &ForgeRepo| ctx.forge(host, repo, 0).map(|f| f.kind());
+
+        // A GitLab-kind host gets the GitLab adapter, which never reaches
+        // `gh`, not even to create or merge.
+        assert_eq!(kind(&lab, &gitlab_repo()), Some(ForgeKind::GitLab));
+        let lacks = |capability| {
+            Err(CreateError::Unsupported(Unsupported {
+                kind: ForgeKind::GitLab,
+                capability,
+            }))
+        };
         assert_eq!(
             ctx.create_pull(&lab, &gitlab_repo(), "topic", "main", "Add login")
                 .map(|_| ()),
-            failed
+            lacks(Capability::CreatePull)
         );
         let head = CommitId::parse(&"a".repeat(40)).unwrap();
         assert_eq!(
             ctx.merge_pull(&lab, &gitlab_repo(), 7, MergeMethod::Merge, &head),
-            failed
+            lacks(Capability::Merge)
         );
-        assert!(ctx.glab(&lab, &gitlab_repo(), 0).is_some());
 
-        // A GitHub-kind host never reaches `glab`.
+        // A GitHub-kind host gets the GitHub adapter, never `glab`.
         let hub = ForgeHost::parse("github.com").unwrap();
-        assert!(ctx.glab(&hub, &repo(), 0).is_none());
-        assert!(ctx.gh(&hub, &repo(), 0).is_some());
+        assert_eq!(kind(&hub, &repo()), Some(ForgeKind::GitHub));
 
         // Another host, or a repository the allow-list leaves out.
-        assert!(ctx.glab(&gitlab("gitlab.com"), &gitlab_repo(), 0).is_none());
+        assert_eq!(kind(&gitlab("gitlab.com"), &gitlab_repo()), None);
         let narrowed = lab.with_allow(vec![AllowRule::parse("someone-else").unwrap()]);
-        assert!(ctx.glab(&narrowed, &gitlab_repo(), 0).is_none());
+        assert_eq!(kind(&narrowed, &gitlab_repo()), None);
+        assert_eq!(
+            ctx.create_pull(&narrowed, &gitlab_repo(), "topic", "main", "Add login")
+                .map(|_| ()),
+            failed
+        );
         // The host is compared without regard to case.
         let shown = ForgeRepo {
             host: "GitLab.Example.com".into(),
             ..gitlab_repo()
         };
-        assert!(ctx.glab(&gitlab("gitlab.example.com"), &shown, 0).is_some());
+        assert_eq!(
+            kind(&gitlab("gitlab.example.com"), &shown),
+            Some(ForgeKind::GitLab)
+        );
 
         assert!(gh.calls().is_empty());
         assert!(glab.calls().is_empty());
@@ -275,10 +302,10 @@ mod tests {
             cache_dir: Some(dir.clone()),
             ..context(Arc::new(FakeGh::new()), None)
         };
-        assert_eq!(ctx.glab(&host, &gitlab_repo(), 5).unwrap().cwd, dir);
+        assert_eq!(ctx.glab(&host, 5).cwd, dir);
         assert!(dir.is_dir());
         let ctx = context(Arc::new(FakeGh::new()), None);
-        let glab = ctx.glab(&host, &gitlab_repo(), 5).unwrap();
+        let glab = ctx.glab(&host, 5);
         assert_eq!((glab.cwd, glab.now), (std::env::temp_dir(), 5));
     }
 

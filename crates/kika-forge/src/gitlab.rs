@@ -132,8 +132,10 @@ impl GlabRunner for CliGlab {
 
 /// The `glab` calls of one load: who runs them, where they are logged,
 /// the host they go to and the time rate limits are measured from. Only
-/// [`ForgeContext::glab`](super::task::ForgeContext::glab) builds one,
-/// behind the host's allow gate, so its fields stay inside forge.
+/// the GitLab forge adapter that
+/// [`ForgeContext::forge`](super::task::ForgeContext::forge) hands out
+/// holds one, behind the host's allow gate, so its fields stay inside
+/// forge.
 pub struct Glab<'a> {
     pub(crate) runner: &'a dyn GlabRunner,
     pub(crate) sink: &'a CommandSink,

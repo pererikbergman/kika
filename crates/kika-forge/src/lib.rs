@@ -5,6 +5,10 @@
 //! GitHub is reached through the `gh` CLI and GitLab through `glab`, never
 //! an HTTP client of Kika's own, so the user's login, proxy and TLS
 //! settings apply and Kika never holds a token.
+//!
+//! Every call goes through the one [`forge::Forge`] interface. Each forge
+//! kind has one forge adapter ([`forge::GitHubForge`] wraps `gh`,
+//! [`forge::GitLabForge`] wraps `glab`), and a forge host's kind picks it.
 
 pub mod allow;
 pub mod anchor;
@@ -12,8 +16,11 @@ pub mod cache;
 pub mod client;
 pub mod discussion;
 pub mod discussion_write;
+pub mod forge;
 pub mod github;
+mod github_forge;
 pub mod gitlab;
+mod gitlab_forge;
 pub mod head;
 pub mod merge;
 pub mod pending;
@@ -173,6 +180,8 @@ pub enum CreateError {
     /// GitHub answered with a refusal, such as a 422, in its own words:
     /// terminal-safe and cut short.
     Refused(String),
+    /// The forge kind cannot do this yet; nothing was asked.
+    Unsupported(forge::Unsupported),
 }
 
 impl CreateError {
@@ -196,6 +205,7 @@ impl CreateError {
             }
             CreateError::Status(ForgeStatus::Failed) => "GitHub gave no usable answer.".into(),
             CreateError::Refused(message) => message.clone(),
+            CreateError::Unsupported(unsupported) => unsupported.message(),
         }
     }
 

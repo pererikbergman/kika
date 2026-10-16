@@ -73,6 +73,7 @@ pub fn problem_text(problem: ReviewProblem) -> (String, Option<&'static str>) {
             None,
         ),
         ReviewProblem::Missing(number) => (format!("No pull request #{number}"), None),
+        ReviewProblem::Unsupported(unsupported) => (unsupported.message(), None),
         ReviewProblem::Status(status) => {
             let (what, next) = match status {
                 ForgeStatus::NoGh => (
@@ -1001,6 +1002,10 @@ mod tests {
             ReviewProblem::NoForgeHost,
             ReviewProblem::Limited(1_700_003_600),
             ReviewProblem::Missing(7),
+            ReviewProblem::Unsupported(kika_forge::forge::Unsupported {
+                kind: kika_forge::url::ForgeKind::GitLab,
+                capability: kika_forge::forge::Capability::Review,
+            }),
             ReviewProblem::Status(ForgeStatus::NoGh),
             ReviewProblem::Status(ForgeStatus::NotLoggedIn),
             ReviewProblem::Status(ForgeStatus::Offline),
