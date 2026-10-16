@@ -1309,7 +1309,9 @@ mod tests {
     use crate::features::blame::CommitView;
     use crate::features::custom_commands::CustomCommandsIntent;
     use crate::hunk_view::HunkView;
-    use crate::test_support::OID;
+    use crate::test_support::{
+        OID, TOP, assert_no_colour, reversed_somewhere, selected_name, with_branches,
+    };
     use crate::theme::Palette;
     use ratatui::style::Color;
 
@@ -3095,6 +3097,55 @@ mod tests {
             diff_line(LineKind::Context, " beta"),
             diff_line(LineKind::Removed, "-gamma one"),
         ]
+    }
+
+    #[test]
+    fn under_no_color_the_files_diff_and_search_draw_no_colour_but_keep_their_marks() {
+        let mut state = preview_searching(alpha_beta_gamma(), "one");
+        state.palette = Palette::NO_COLOR;
+        let buffer = draw_buffer(&state, 100, 12);
+        crate::test_support::assert_no_colour(&buffer);
+        assert!(crate::test_support::reversed_somewhere(&buffer, "a.rs"));
+        let current = style_in(&buffer, "alpha one", 6).add_modifier;
+        assert!(current.contains(Modifier::BOLD | Modifier::UNDERLINED));
+    }
+
+    #[test]
+    #[should_panic(expected = "has fg")]
+    fn the_no_colour_check_catches_a_coloured_screen() {
+        let state = preview_searching(alpha_beta_gamma(), "one");
+        assert_no_colour(&draw_buffer(&state, 100, 12));
+    }
+
+    #[test]
+    fn under_no_color_the_commits_graph_draws_no_colour_and_keeps_the_selection() {
+        use crate::intent::AppIntent;
+        use crate::test_support::{commits_load, commits_loaded, page};
+        let mut state =
+            AppState::new(Context::Workspace).with_location(Some(TOP.into()), TOP.into());
+        let (tag, _, _) = commits_load(&state.update(AppIntent::Start));
+        // `c0` merges `c3` into `c1`, so the graph draws two lanes.
+        let mut log = page(0, 5, true);
+        log.rows[0].parents.push("c3".into());
+        state.update(commits_loaded(tag, 0, log));
+        state.focus = Focus::Commits;
+        state.expanded = SidePanel::Commits;
+        state.palette = Palette::NO_COLOR;
+        let buffer = draw_buffer(&state, 100, 24);
+        let rows = buffer_rows(&buffer);
+        assert!(contains(&rows, "●─╮"), "a second lane: {rows:#?}");
+        assert_no_colour(&buffer);
+        assert!(reversed_somewhere(&buffer, "commit 0"));
+    }
+
+    #[test]
+    fn under_no_color_the_branches_list_draws_no_colour_and_keeps_the_selection() {
+        let mut state = with_branches();
+        state.palette = Palette::NO_COLOR;
+        let selected = selected_name(&state);
+        let buffer = draw_buffer(&state, 80, 24);
+        assert_no_colour(&buffer);
+        assert!(reversed_somewhere(&buffer, &selected));
     }
 
     #[test]

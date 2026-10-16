@@ -34,6 +34,15 @@ pub fn parse(bytes: &[u8]) -> Vec<StyledRow> {
     parse_capped(bytes, MAX_ROWS)
 }
 
+/// Drop every run's foreground and background colour, keeping its
+/// modifiers, so a renderer draws no colour under `NO_COLOR`.
+pub fn strip_colour(rows: &mut [StyledRow]) {
+    for (style, _) in rows.iter_mut().flat_map(|row| row.runs.iter_mut()) {
+        style.fg = None;
+        style.bg = None;
+    }
+}
+
 fn parse_capped(bytes: &[u8], max_rows: usize) -> Vec<StyledRow> {
     let mut parser = Parser::default();
     let mut at = 0;
@@ -244,6 +253,25 @@ mod tests {
 
     fn texts(rows: &[StyledRow]) -> Vec<String> {
         rows.iter().map(StyledRow::text).collect()
+    }
+
+    #[test]
+    fn strip_colour_drops_fg_and_bg_and_keeps_modifiers_and_text() {
+        let mut rows = parse(b"\x1b[1;31mred\x1b[0m \x1b[4;48;5;17mbg\x1b[0m");
+        let before = texts(&rows);
+        assert!(rows[0].runs.iter().any(|(s, _)| s.fg.is_some()));
+        assert!(rows[0].runs.iter().any(|(s, _)| s.bg.is_some()));
+        strip_colour(&mut rows);
+        assert_eq!(texts(&rows), before);
+        for (style, text) in &rows[0].runs {
+            assert_eq!((style.fg, style.bg), (None, None), "{text:?}");
+        }
+        let modifier_of = |needle: &str| {
+            let (style, _) = rows[0].runs.iter().find(|(_, t)| t == needle).unwrap();
+            style.add_modifier
+        };
+        assert_eq!(modifier_of("red"), Modifier::BOLD);
+        assert_eq!(modifier_of("bg"), Modifier::UNDERLINED);
     }
 
     fn no_controls(rows: &[StyledRow]) {

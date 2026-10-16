@@ -233,6 +233,10 @@ pub struct AppState {
     /// changes it, so lines rendered ahead (the thread reader's) stay
     /// right.
     pub palette: Palette,
+    /// Whether `NO_COLOR` turned colour off: set once at startup, with
+    /// `palette`, and fixed for the session; `update` never changes it.
+    /// External renderers' rows lose their colours while it is set.
+    pub no_color: bool,
     /// Background loads that notice changes made outside Kika.
     pub watch: WatchState,
     /// The repositories entered from, outermost first; the current one is
@@ -352,6 +356,7 @@ impl AppState {
             diff_options: DiffOptions::default(),
             emoji_zwj: EmojiZwj::Escape,
             palette: Palette::DEFAULT,
+            no_color: false,
             watch: WatchState::default(),
             repo_stack: Vec::new(),
             renderers: Vec::new(),

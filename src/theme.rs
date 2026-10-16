@@ -193,6 +193,44 @@ impl Palette {
         match_bg: Color::LightYellow,
         current_match_bg: Color::LightRed,
     };
+
+    /// No colour at all, for a non-empty `NO_COLOR` (no-color.org). Every
+    /// role is the terminal's own colour; marks, words and the bold,
+    /// underline and reversed modifiers still carry the meaning.
+    pub(crate) const NO_COLOR: Palette = Palette {
+        text: Color::Reset,
+        dim: Color::Reset,
+        focused: Color::Reset,
+        added: Color::Reset,
+        removed: Color::Reset,
+        modified: Color::Reset,
+        status_renamed: Color::Reset,
+        hunk_header: Color::Reset,
+        warning: Color::Reset,
+        error: Color::Reset,
+        success: Color::Reset,
+        pending: Color::Reset,
+        neutral: Color::Reset,
+        hash: Color::Reset,
+        ref_name: Color::Reset,
+        ref_label: Color::Reset,
+        author: Color::Reset,
+        graph: Color::Reset,
+        mark: Color::Reset,
+        copied_commit: Color::Reset,
+        location: Color::Reset,
+        conflict_ours: Color::Reset,
+        conflict_theirs: Color::Reset,
+        thread_open: Color::Reset,
+        thread_addressed: Color::Reset,
+        pr_open: Color::Reset,
+        pr_draft: Color::Reset,
+        pr_merged: Color::Reset,
+        pr_closed: Color::Reset,
+        match_fg: Color::Reset,
+        match_bg: Color::Reset,
+        current_match_bg: Color::Reset,
+    };
 }
 
 /// `ROLES`, and `Palette::set` and `Palette::get` over them, from one list
@@ -352,6 +390,23 @@ fn rgb(text: &str) -> Option<Color> {
     Some(Color::Rgb(byte(0)?, byte(2)?, byte(4)?))
 }
 
+/// Whether a `NO_COLOR` value turns colour off: any non-empty value does,
+/// and an empty one counts as unset (no-color.org). Takes the value, not
+/// the env, so callers read the env once and tests never touch it.
+pub(crate) fn no_color(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|v| !v.is_empty())
+}
+
+/// The palette a session starts with: `NO_COLOR` wins over the configured
+/// theme and its colour overrides.
+pub(crate) fn startup_palette(configured: Palette, no_color: bool) -> Palette {
+    if no_color {
+        Palette::NO_COLOR
+    } else {
+        configured
+    }
+}
+
 impl Default for Palette {
     fn default() -> Self {
         Self::DEFAULT
@@ -362,6 +417,40 @@ impl Default for Palette {
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn no_color_is_set_only_by_a_non_empty_value() {
+        use std::ffi::OsStr;
+        assert!(!no_color(None));
+        assert!(!no_color(Some(OsStr::new(""))));
+        assert!(no_color(Some(OsStr::new("1"))));
+        // Any non-empty value counts, even one that reads as "off".
+        assert!(no_color(Some(OsStr::new("0"))));
+    }
+
+    #[test]
+    fn the_no_color_palette_sets_every_role_to_the_terminals_own_colour() {
+        for role in ROLES {
+            assert_eq!(Palette::NO_COLOR.get(role), Some(Color::Reset), "{role}");
+        }
+    }
+
+    #[test]
+    fn no_color_wins_over_a_theme_and_its_colour_overrides() {
+        assert_eq!(startup_palette(Palette::LIGHT, true), Palette::NO_COLOR);
+        let mut overridden = Palette::HIGH_CONTRAST;
+        overridden.set("added", Color::Indexed(17)).unwrap();
+        assert_eq!(startup_palette(overridden, true), Palette::NO_COLOR);
+    }
+
+    #[test]
+    fn without_no_color_the_configured_palette_is_kept() {
+        let mut overridden = Palette::LIGHT;
+        overridden.set("added", Color::Indexed(17)).unwrap();
+        for p in [Palette::DEFAULT, Palette::LIGHT, overridden] {
+            assert_eq!(startup_palette(p, false), p);
+        }
+    }
 
     #[test]
     fn the_default_palette_draws_todays_colours() {
