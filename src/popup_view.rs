@@ -5,7 +5,7 @@ use std::path::Path;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
@@ -17,6 +17,7 @@ use crate::model::AppState;
 use crate::pick_list::PickList;
 use crate::popup::{CredentialPrompt, ErrorPopup, LineInput, Popup};
 use crate::reason_fit::fit_reason;
+use crate::theme::Palette;
 use crate::view::{
     COMMIT_WIDTH, centered, clip, elide_left, elide_right, render_question, tail, width_of, wrap,
 };
@@ -41,7 +42,7 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
             Popup::Prompt { kind, input } => {
                 render_prompt(&state.prompt_title(*kind), input, top, frame, area)
             }
-            Popup::Error(error) => render_error(error, frame, area),
+            Popup::Error(error) => render_error(&state.palette, error, frame, area),
             Popup::Question(q) => render_question(&format!(" {} ", q.title), &q.text, frame, area),
             Popup::Submodules(list) => render_submodules(list, top, frame, area),
             Popup::Worktrees(list) => {
@@ -53,10 +54,17 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 let text = format!("{}\n(y/n)", prompt.prompt);
                 render_question(CREDENTIAL_TITLE, &text, frame, area)
             }
-            Popup::Credential(prompt) => render_credential(prompt, top, frame, area),
-            Popup::CommandLog(view) => {
-                command_log::view::render(&state.command_log, view, top, frame, area)
+            Popup::Credential(prompt) => {
+                render_credential(&state.palette, prompt, top, frame, area)
             }
+            Popup::CommandLog(view) => command_log::view::render(
+                &state.palette,
+                &state.command_log,
+                view,
+                top,
+                frame,
+                area,
+            ),
         }
     }
 }
@@ -113,7 +121,7 @@ fn render_menu(state: &AppState, id: MenuId, cursor: Option<usize>, frame: &mut 
             let mut style = Style::new();
             if disabled {
                 style = style
-                    .fg(Color::DarkGray)
+                    .fg(state.palette.dim)
                     .add_modifier(Modifier::DIM | Modifier::ITALIC);
             }
             if Some(i) == cursor {
@@ -378,7 +386,13 @@ const CREDENTIAL_TITLE: &str = " Git is asking ";
 
 /// Git's or ssh's question over a line for the answer. A password or
 /// passphrase is drawn as one `•` per typed char, never as itself.
-fn render_credential(prompt: &CredentialPrompt, top: bool, frame: &mut Frame, area: Rect) {
+fn render_credential(
+    palette: &Palette,
+    prompt: &CredentialPrompt,
+    top: bool,
+    frame: &mut Frame,
+    area: Rect,
+) {
     let width = COMMIT_WIDTH.min(area.width);
     let text_width = usize::from(width.saturating_sub(4)).max(1);
     let rows = wrap(&prompt.prompt, text_width);
@@ -392,7 +406,7 @@ fn render_credential(prompt: &CredentialPrompt, top: bool, frame: &mut Frame, ar
         Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
     let rows: Vec<String> = rows.iter().map(|row| format!(" {row}")).collect();
     frame.render_widget(
-        Paragraph::new(tail(&rows, usize::from(question.height))),
+        Paragraph::new(tail(palette, &rows, usize::from(question.height))),
         question,
     );
     // One column of padding, as the question has.
@@ -413,7 +427,7 @@ fn render_credential(prompt: &CredentialPrompt, top: bool, frame: &mut Frame, ar
 /// What failed in the red border's title, git's words below it, then what
 /// to do next and how to close. Long output shows its tail. On a short
 /// screen the next step gives way first, so git's words always get a row.
-fn render_error(error: &ErrorPopup, frame: &mut Frame, area: Rect) {
+fn render_error(palette: &Palette, error: &ErrorPopup, frame: &mut Frame, area: Rect) {
     let width = COMMIT_WIDTH.min(area.width);
     let text_width = usize::from(width.saturating_sub(2)).max(1);
     let rows = wrap(&error.message, text_width);
@@ -423,7 +437,7 @@ fn render_error(error: &ErrorPopup, frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, popup);
     let block = Block::bordered()
         .title(format!(" {} ", error.title))
-        .border_style(Style::new().fg(Color::Red));
+        .border_style(Style::new().fg(palette.error));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     // The hint takes one row and the message keeps at least one.
@@ -436,8 +450,11 @@ fn render_error(error: &ErrorPopup, frame: &mut Frame, area: Rect) {
         Constraint::Length(1),
     ])
     .areas(inner);
-    frame.render_widget(Paragraph::new(tail(&rows, usize::from(text.height))), text);
-    let yellow = Style::new().fg(Color::Yellow);
+    frame.render_widget(
+        Paragraph::new(tail(palette, &rows, usize::from(text.height))),
+        text,
+    );
+    let yellow = Style::new().fg(palette.warning);
     let next: Vec<Line> = next
         .iter()
         .map(|row| Line::from(Span::styled(row.as_str(), yellow)))
@@ -451,6 +468,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
+    use ratatui::style::Color;
 
     use super::*;
     use crate::confirm_question::quit_question;

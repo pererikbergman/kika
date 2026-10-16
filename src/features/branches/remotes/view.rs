@@ -8,6 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use super::{RemoteLine, RemotesList};
+use crate::theme::Palette;
 use crate::view::{PanelLook, elide_right, no_matches, range_row, scrolled};
 use kika_git::remotes::Remote;
 
@@ -21,7 +22,12 @@ pub const NO_BRANCHES: &str = "No branches yet. Press f to fetch.";
 /// placeholder, or a header row per remote with its branches indented
 /// below, as the filter shows them, the selection and the range reversed
 /// and scrolled into view.
-pub fn list_body(list: &RemotesList, rows: usize, width: usize) -> Paragraph<'static> {
+pub fn list_body(
+    palette: &Palette,
+    list: &RemotesList,
+    rows: usize,
+    width: usize,
+) -> Paragraph<'static> {
     let list = &list.list;
     if let Some(error) = &list.error {
         let mut lines: Vec<Line> = error.lines().map(|l| Line::from(l.to_string())).collect();
@@ -36,7 +42,7 @@ pub fn list_body(list: &RemotesList, rows: usize, width: usize) -> Paragraph<'st
     }
     let shown = list.visible();
     if shown.is_empty() {
-        return Paragraph::new(no_matches());
+        return Paragraph::new(no_matches(palette));
     }
     let range = list.range();
     let selected = Some(list.selected);

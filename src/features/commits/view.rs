@@ -3,7 +3,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
@@ -17,6 +17,7 @@ use super::{CommitsPanel, CommitsTab};
 use crate::diff_mark::DiffMark;
 use crate::model::AppState;
 use crate::rows::{DIFF_MARK, commit_file_line, diff_mark_style};
+use crate::theme::Palette;
 use crate::view::{
     PanelLook, elide_left, elide_right, filter_title, no_matches, range_row, reversed, scrolled,
     width_of,
@@ -144,6 +145,7 @@ pub(crate) fn render_commits_panel(
     let inner = block.inner(area);
     if reflog {
         let lines = reflog_lines(
+            &look.palette,
             &panel.reflog,
             usize::from(inner.height),
             usize::from(inner.width),
@@ -151,7 +153,7 @@ pub(crate) fn render_commits_panel(
         frame.render_widget(Paragraph::new(lines).block(block), area);
         return;
     }
-    let dim = Style::new().fg(Color::DarkGray);
+    let dim = Style::new().fg(look.palette.dim);
     let paragraph = if panel.list.rows.is_empty() {
         match &panel.list.error {
             _ if !panel.list.loaded => Paragraph::new("Loading…"),
@@ -224,9 +226,11 @@ fn render_commit_files(
         }
         None if list.rows.is_empty() => Paragraph::new(Line::styled(
             "No files changed",
-            Style::new().fg(Color::DarkGray),
+            Style::new().fg(look.palette.dim),
         )),
-        None if shown.as_ref().is_some_and(Vec::is_empty) => Paragraph::new(no_matches()),
+        None if shown.as_ref().is_some_and(Vec::is_empty) => {
+            Paragraph::new(no_matches(&look.palette))
+        }
         None => {
             let shown = shown.unwrap_or_else(|| (0..list.rows.len()).collect());
             Paragraph::new(
@@ -235,8 +239,8 @@ fn render_commit_files(
                     .map(|&i| {
                         let file = &list.rows[i];
                         let line = match picks {
-                            Some(patch) => picked_file_line(patch, file, width),
-                            None => commit_file_line(file, width),
+                            Some(patch) => picked_file_line(&look.palette, patch, file, width),
+                            None => commit_file_line(&look.palette, file, width),
                         };
                         if i == list.selected {
                             reversed(line, width)
@@ -253,19 +257,26 @@ fn render_commit_files(
 
 /// What the custom patch holds, in the file list and the hunk view. The
 /// symbol carries the meaning; the colour only adds to it.
-pub(crate) const PATCH_MARK: Style = Style::new().fg(Color::Magenta);
+pub(crate) const fn patch_mark(palette: &Palette) -> Style {
+    Style::new().fg(palette.mark)
+}
 
 /// A commit file's row behind a mark of what the custom patch holds of
 /// it: `●` the whole file, `◐` some lines, a blank nothing.
-fn picked_file_line(patch: &CustomPatch, file: &CommitFile, width: usize) -> Line<'static> {
+fn picked_file_line(
+    palette: &Palette,
+    patch: &CustomPatch,
+    file: &CommitFile,
+    width: usize,
+) -> Line<'static> {
     let mark = match patch.file_state(&file.path) {
         Some(FilePick::Whole) => "●",
         Some(FilePick::Lines(_)) => "◐",
         None => " ",
     };
-    let mut line = commit_file_line(file, width.saturating_sub(2));
+    let mut line = commit_file_line(palette, file, width.saturating_sub(2));
     line.spans
-        .insert(0, Span::styled(format!("{mark} "), PATCH_MARK));
+        .insert(0, Span::styled(format!("{mark} "), patch_mark(palette)));
     line
 }
 
@@ -278,13 +289,16 @@ fn window(panel: &CommitsPanel, marks: &Marks, area: Rect) -> Vec<Line<'static>>
     let note = if panel.more_in_flight {
         Some(Line::styled(
             "Loading more…",
-            Style::new().fg(Color::DarkGray),
+            Style::new().fg(marks.palette.dim),
         ))
     } else {
         panel.list.error.as_deref().map(|error| {
             let first = error.lines().next().unwrap_or_default();
             let text = format!("! {first} (press r to retry)");
-            Line::styled(elide_right(&text, width), Style::new().fg(Color::Red))
+            Line::styled(
+                elide_right(&text, width),
+                Style::new().fg(marks.palette.error),
+            )
         })
     };
     let room = if note.is_some() && height > 1 {
@@ -292,7 +306,7 @@ fn window(panel: &CommitsPanel, marks: &Marks, area: Rect) -> Vec<Line<'static>>
     } else {
         height
     };
-    let head = todo_lines(panel, width);
+    let head = todo_lines(marks.palette, panel, width);
     let shown = panel.list.visible();
     let at = shown
         .iter()
@@ -329,15 +343,15 @@ fn window(panel: &CommitsPanel, marks: &Marks, area: Rect) -> Vec<Line<'static>>
 /// The todo list as rows: a dim heading, then one row per step with the
 /// last to run at the top, so it reads like the history it will make.
 /// Empty when no rebase is stopped.
-fn todo_lines(panel: &CommitsPanel, width: usize) -> Vec<Line<'static>> {
+fn todo_lines(palette: &Palette, panel: &CommitsPanel, width: usize) -> Vec<Line<'static>> {
     let Some(todo) = &panel.todo else {
         return Vec::new();
     };
-    let dim = Style::new().fg(Color::DarkGray);
+    let dim = Style::new().fg(palette.dim);
     let mut rows: Vec<Line<'static>> = if todo.editable.is_ok() {
         todo.entries
             .iter()
-            .map(|entry| todo_line(entry, width))
+            .map(|entry| todo_line(palette, entry, width))
             .collect()
     } else {
         todo.raw_lines()
@@ -367,19 +381,19 @@ fn todo_lines(panel: &CommitsPanel, width: usize) -> Vec<Line<'static>> {
 }
 
 /// `<action> <hash> <subject>`, or a dim `break` or `→ <branch>`.
-fn todo_line(entry: &TodoEntry, width: usize) -> Line<'static> {
-    let dim = Style::new().fg(Color::DarkGray);
+fn todo_line(palette: &Palette, entry: &TodoEntry, width: usize) -> Line<'static> {
+    let dim = Style::new().fg(palette.dim);
     match entry {
         TodoEntry::Commit { action, oid, rest } => {
             let colour = match action {
-                TodoAction::Pick => Color::Reset,
-                TodoAction::Drop => Color::Red,
-                _ => Color::Yellow,
+                TodoAction::Pick => palette.text,
+                TodoAction::Drop => palette.error,
+                _ => palette.warning,
             };
             let short: String = oid.chars().take(7).collect();
             let mut spans = vec![
                 Span::styled(format!("{:<6} ", action.word()), Style::new().fg(colour)),
-                Span::styled(format!("{short} "), Style::new().fg(Color::Cyan)),
+                Span::styled(format!("{short} "), Style::new().fg(palette.hash)),
             ];
             let used: usize = spans.iter().map(|s| width_of(&s.content)).sum();
             let subject = elide_right(&terminal_safe(rest), width.saturating_sub(used));
@@ -477,10 +491,13 @@ fn commit_line(
     width: usize,
 ) -> Line<'static> {
     let row = &panel.list.rows[index];
+    let palette = marks.palette;
     let marker = match panel.marker(&row.oid) {
         Marker::Unpushed => Span::styled(
             "↑",
-            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(palette.warning)
+                .add_modifier(Modifier::BOLD),
         ),
         Marker::Merged => Span::styled("✓", Style::new().add_modifier(Modifier::DIM)),
         Marker::Pushed | Marker::Unknown => Span::raw(" "),
@@ -489,7 +506,7 @@ fn commit_line(
     if columns.lanes > 0 {
         spans.push(Span::styled(
             graph_text(graph, columns.lanes),
-            Style::new().fg(Color::Magenta),
+            Style::new().fg(palette.graph),
         ));
     }
     spans.extend([marker, Span::raw(" ")]);
@@ -498,7 +515,7 @@ fn commit_line(
         spans.push(if is_copied {
             Span::styled(
                 "+ ",
-                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::new().fg(palette.copied).add_modifier(Modifier::BOLD),
             )
         } else {
             Span::raw("  ")
@@ -506,7 +523,7 @@ fn commit_line(
     }
     if columns.diff_mark {
         spans.push(if marks.diff == Some(row.oid.as_str()) {
-            Span::styled(DIFF_MARK, diff_mark_style())
+            Span::styled(DIFF_MARK, diff_mark_style(palette))
         } else {
             Span::raw("  ")
         });
@@ -514,21 +531,21 @@ fn commit_line(
     spans.extend([
         Span::styled(
             pad(&row.short_oid, columns.hash),
-            Style::new().fg(Color::Cyan),
+            Style::new().fg(palette.hash),
         ),
         Span::raw(" "),
     ]);
     if columns.date {
         spans.push(Span::styled(
             format!("{:>3} ", relative_date(row.time, panel.loaded_at)),
-            Style::new().fg(Color::DarkGray),
+            Style::new().fg(palette.dim),
         ));
     }
     if columns.author > 0 {
         let author = elide_right(&row.author, columns.author);
         spans.push(Span::styled(
             format!("{} ", pad(&author, columns.author)),
-            Style::new().fg(Color::Green),
+            Style::new().fg(palette.author),
         ));
     }
     let used: usize = spans.iter().map(|s| width_of(&s.content)).sum();
@@ -542,6 +559,8 @@ fn commit_line(
 /// What marks a commit row besides its own state: the copied set and the
 /// commit marked for diffing.
 struct Marks<'a> {
+    /// The colours rows draw with.
+    palette: &'a Palette,
     copied: &'a CopiedCommits,
     /// The marked commit's full id, when the mark is a commit.
     diff: Option<&'a str>,
@@ -554,6 +573,7 @@ impl<'a> Marks<'a> {
             _ => None,
         };
         Self {
+            palette: &state.palette,
             copied: &state.copied,
             diff,
         }
@@ -716,6 +736,7 @@ fn query_title(
 
 #[cfg(test)]
 mod tests {
+    use ratatui::style::Color;
     use std::collections::HashSet;
 
     use ratatui::Terminal;

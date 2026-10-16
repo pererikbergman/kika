@@ -2,13 +2,14 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use super::git::StashEntry;
 use super::list::{StashFilesList, StashList};
 use crate::rows::commit_file_line;
+use crate::theme::Palette;
 use crate::view::{
     PanelLook, elide_right, list_title, no_matches, range_row, reversed, scrolled, width_of,
 };
@@ -45,14 +46,15 @@ pub(crate) fn render_stash_panel(
     let paragraph = match &stash.list.error {
         Some(error) => error_paragraph(error, Some("Press r to retry")),
         None if stash.list.rows.is_empty() && !stash.list.loaded => Paragraph::new("Loading…"),
-        None if stash.list.rows.is_empty() => {
-            Paragraph::new(Line::styled("No stashes", Style::new().fg(Color::DarkGray)))
-        }
-        None if !expanded => Paragraph::new(entry_line(&stash.list.rows[0], width)),
+        None if stash.list.rows.is_empty() => Paragraph::new(Line::styled(
+            "No stashes",
+            Style::new().fg(look.palette.dim),
+        )),
+        None if !expanded => Paragraph::new(entry_line(&look.palette, &stash.list.rows[0], width)),
         None => {
             let shown = stash.list.visible();
             if shown.is_empty() {
-                Paragraph::new(no_matches())
+                Paragraph::new(no_matches(&look.palette))
             } else {
                 let range = stash.list.range();
                 let selected = Some(stash.list.selected);
@@ -60,7 +62,7 @@ pub(crate) fn render_stash_panel(
                     scrolled(&shown, selected, height.max(1))
                         .iter()
                         .map(|&i| {
-                            let line = entry_line(&stash.list.rows[i], width);
+                            let line = entry_line(&look.palette, &stash.list.rows[i], width);
                             range_row(line, i, selected, &range, width)
                         })
                         .collect::<Vec<_>>(),
@@ -72,11 +74,11 @@ pub(crate) fn render_stash_panel(
 }
 
 /// `stash@{N}  <subject>`, as the filter matches it, the subject cut to `width`.
-fn entry_line(entry: &StashEntry, width: usize) -> Line<'static> {
+fn entry_line(palette: &Palette, entry: &StashEntry, width: usize) -> Line<'static> {
     let name = entry.stash_ref().arg();
     let room = width.saturating_sub(width_of(&name) + 2);
     Line::from(vec![
-        Span::styled(name, Style::new().fg(Color::Yellow)),
+        Span::styled(name, Style::new().fg(palette.ref_name)),
         Span::raw("  "),
         Span::raw(elide_right(&entry.subject, room)),
     ])
@@ -105,7 +107,7 @@ fn render_stash_files(open: &StashFilesList, look: &PanelLook, frame: &mut Frame
         Some(error) => error_paragraph(error, None),
         None if list.rows.is_empty() => Paragraph::new(Line::styled(
             "No files in this stash",
-            Style::new().fg(Color::DarkGray),
+            Style::new().fg(look.palette.dim),
         )),
         None => {
             let start = (list.selected + 1).saturating_sub(height.max(1));
@@ -113,7 +115,7 @@ fn render_stash_files(open: &StashFilesList, look: &PanelLook, frame: &mut Frame
             Paragraph::new(
                 (start..end)
                     .map(|i| {
-                        let line = commit_file_line(&list.rows[i].file, width);
+                        let line = commit_file_line(&look.palette, &list.rows[i].file, width);
                         if i == list.selected {
                             reversed(line, width)
                         } else {

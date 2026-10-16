@@ -2,11 +2,12 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::model::AppState;
+use crate::theme::Palette;
 use crate::view::{PanelLook, elide_left, filter_title, no_matches, range_row, width_of};
 use kika_git::FileEntry;
 use kika_git::status::EntryKind;
@@ -51,11 +52,12 @@ pub(crate) fn render_files_panel(
     } else if state.files.rows.is_empty() {
         Paragraph::new("No changes")
     } else if shown.is_empty() {
-        Paragraph::new(no_matches())
+        Paragraph::new(no_matches(&look.palette))
     } else if !expanded {
         Paragraph::new(count)
     } else {
         Paragraph::new(file_lines(
+            &look.palette,
             &state.files.rows,
             &shown,
             // Rows are listed here, so the cursor is on one.
@@ -71,6 +73,7 @@ pub(crate) fn render_files_panel(
 /// It and the files in `range` are drawn reversed. When files below the
 /// window are cut, the last row says how many, so the cut is never silent.
 fn file_lines(
+    palette: &Palette,
     files: &[FileEntry],
     shown: &[usize],
     selected: Option<usize>,
@@ -79,7 +82,15 @@ fn file_lines(
 ) -> Vec<Line<'static>> {
     let rows = usize::from(area.height);
     let width = usize::from(area.width);
-    let line = |&i: &usize| range_row(file_line(&files[i], width), i, selected, range, width);
+    let line = |&i: &usize| {
+        range_row(
+            file_line(palette, &files[i], width),
+            i,
+            selected,
+            range,
+            width,
+        )
+    };
     if shown.len() <= rows {
         return shown.iter().map(line).collect();
     }
@@ -106,7 +117,7 @@ fn file_lines(
 /// columns. Paths lose their start first, since the file name is at the end;
 /// for renames the new path keeps as much room as it can. A conflict reads
 /// `! XY path` in red bold, so it stands out without colour too.
-fn file_line(entry: &FileEntry, width: usize) -> Line<'static> {
+fn file_line(palette: &Palette, entry: &FileEntry, width: usize) -> Line<'static> {
     let conflicted = entry.kind == EntryKind::Conflicted;
     let letters = if conflicted {
         format!("! {}", entry.status_letters())
@@ -133,7 +144,7 @@ fn file_line(entry: &FileEntry, width: usize) -> Line<'static> {
     if conflicted {
         Line::styled(
             text,
-            Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::new().fg(palette.error).add_modifier(Modifier::BOLD),
         )
     } else {
         Line::from(text)

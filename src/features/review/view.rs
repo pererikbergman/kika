@@ -18,6 +18,7 @@ use super::threads_view::thread_diff_body;
 use crate::diff_pane_view::{diff_pane_body, diff_position, found_note};
 use crate::model::AppState;
 use crate::rows::{clock, drawn_path, status_colour};
+use crate::theme::Palette;
 use crate::view::{self, elide_right};
 use kika_forge::anchor::row_numbers;
 use kika_forge::merge::{MergeBlock, merge_options};
@@ -44,8 +45,8 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let lines = match review.screen {
-        ReviewScreen::Queue => queue_lines(review, inner),
-        ReviewScreen::Detail(number) => detail_screen(review, number, inner),
+        ReviewScreen::Queue => queue_lines(&state.palette, review, inner),
+        ReviewScreen::Detail(number) => detail_screen(&state.palette, review, number, inner),
         ReviewScreen::Files(_) => match &review.files {
             Some(files) => return files_screen(state, files, frame, inner),
             None => Vec::new(),
@@ -54,7 +55,7 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
             let lines = super::conversation_view::conversation_view(review, inner);
             frame.render_widget(Paragraph::new(lines), inner);
             // A general comment is typed over it.
-            super::pending_view::render_pending(review, frame, inner);
+            super::pending_view::render_pending(&state.palette, review, frame, inner);
             return;
         }
     };
@@ -105,9 +106,9 @@ pub fn problem_text(problem: ReviewProblem) -> (String, Option<&'static str>) {
 
 /// The problem in red and its next step below it, each wrapped to
 /// `width` so neither is cut off.
-fn problem_lines(problem: ReviewProblem, width: usize) -> Vec<Line<'static>> {
+fn problem_lines(palette: &Palette, problem: ReviewProblem, width: usize) -> Vec<Line<'static>> {
     let (what, next) = problem_text(problem);
-    let mut lines = markdown::wrap_text(&what, Style::new().fg(Color::Red), width);
+    let mut lines = markdown::wrap_text(&what, Style::new().fg(palette.error), width);
     if let Some(next) = next {
         lines.extend(markdown::wrap_text(next, Style::new(), width));
     }
@@ -115,7 +116,7 @@ fn problem_lines(problem: ReviewProblem, width: usize) -> Vec<Line<'static>> {
 }
 
 /// The tab line, then the rows the filter keeps, scrolled to the cursor.
-fn queue_lines(review: &ReviewState, inner: Rect) -> Vec<Line<'static>> {
+fn queue_lines(palette: &Palette, review: &ReviewState, inner: Rect) -> Vec<Line<'static>> {
     let mut tabs: Vec<Span<'static>> = Vec::new();
     for (i, kind) in QueueKind::ALL.into_iter().enumerate() {
         if i > 0 {
@@ -144,7 +145,7 @@ fn queue_lines(review: &ReviewState, inner: Rect) -> Vec<Line<'static>> {
     }
     let mut lines = vec![Line::from(tabs)];
     if let Some(problem) = review.queues_fetch.error {
-        lines.extend(problem_lines(problem, usize::from(inner.width)));
+        lines.extend(problem_lines(palette, problem, usize::from(inner.width)));
         return lines;
     }
     if review.queues_fetch.loading && review.queues.is_none() {
@@ -221,9 +222,14 @@ fn width_of(text: &str) -> usize {
 }
 
 /// The detail screen: loading, a problem, or the pull request scrolled.
-fn detail_screen(review: &ReviewState, number: u64, inner: Rect) -> Vec<Line<'static>> {
+fn detail_screen(
+    palette: &Palette,
+    review: &ReviewState,
+    number: u64,
+    inner: Rect,
+) -> Vec<Line<'static>> {
     if let Some(problem) = review.detail_fetch.error {
-        return problem_lines(problem, usize::from(inner.width));
+        return problem_lines(palette, problem, usize::from(inner.width));
     }
     match &review.detail {
         Some(detail) => {
@@ -239,7 +245,7 @@ fn detail_screen(review: &ReviewState, number: u64, inner: Rect) -> Vec<Line<'st
                 }
             };
             let threads = super::threads_view::thread_summary(review);
-            let lines = detail_lines(detail, body, threads.as_deref(), width);
+            let lines = detail_lines(palette, detail, body, threads.as_deref(), width);
             let max = lines.len().saturating_sub(usize::from(inner.height));
             lines
                 .into_iter()
@@ -275,10 +281,13 @@ fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rec
         .and_then(|slot| slot.review())
         .map_or(0, |review| review.comments.len());
     let title = files_title(files, pending, usize::from(list.width));
-    let block = view::panel_block(title, files.focus == FilesFocus::List);
+    let block = view::panel_block(&state.palette, title, files.focus == FilesFocus::List);
     let list_inner = block.inner(list);
     frame.render_widget(block, list);
-    frame.render_widget(Paragraph::new(file_lines(files, list_inner)), list_inner);
+    frame.render_widget(
+        Paragraph::new(file_lines(&state.palette, files, list_inner)),
+        list_inner,
+    );
 
     let stream = &state.diff;
     // Without it, threads still loading or not read look like none.
@@ -298,7 +307,7 @@ fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rec
         .map(|row| row.file.path.display())
         .unwrap_or_default();
     let title = diff_title(path, &tail, usize::from(diff.width));
-    let block = view::panel_block(title, files.focus == FilesFocus::Diff);
+    let block = view::panel_block(&state.palette, title, files.focus == FilesFocus::Diff);
     let diff_inner = block.inner(diff);
     let commenting = has_comment_marks(state, files);
     let no_threads;
@@ -326,6 +335,7 @@ fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rec
                 }
                 let marks = comment_marks(state, files, &numbers);
                 thread_diff_body(
+                    &state.palette,
                     stream,
                     &numbers,
                     &threads,
@@ -335,7 +345,7 @@ fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rec
                     diff_inner,
                 )
             }
-            _ => diff_pane_body(&state.diff, diff_inner),
+            _ => diff_pane_body(&state.palette, &state.diff, diff_inner),
         },
         FilesStage::Failed(_) => Paragraph::new(Line::styled("No diff to show", dim())),
         _ => Paragraph::new(Line::styled(
@@ -346,9 +356,9 @@ fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rec
     frame.render_widget(body.block(block), diff);
     if let Some(reader) = &files.reader {
         let discussion = state.review.discussion.as_ref();
-        super::reader_view::render_reader(files, discussion, reader, frame, inner);
+        super::reader_view::render_reader(&state.palette, files, discussion, reader, frame, inner);
     }
-    super::pending_view::render_pending(&state.review, frame, inner);
+    super::pending_view::render_pending(&state.palette, &state.review, frame, inner);
 }
 
 /// What the list shows, long and short: `whole pull request` or
@@ -412,14 +422,14 @@ fn diff_title(path: &str, tail: &str, width: usize) -> String {
 }
 
 /// The list's rows, scrolled so the cursor shows, or what it waits for.
-fn file_lines(files: &PrFiles, inner: Rect) -> Vec<Line<'static>> {
+fn file_lines(palette: &Palette, files: &PrFiles, inner: Rect) -> Vec<Line<'static>> {
     let width = usize::from(inner.width);
     let waiting = match &files.stage {
         FilesStage::Checking | FilesStage::Listing => Some("Loading files…"),
         FilesStage::Fetching => Some("Fetching PR head…"),
         FilesStage::Failed(message) => {
             // Git's words were made safe when they were read.
-            return markdown::wrap_text(message, Style::new().fg(Color::Red), width);
+            return markdown::wrap_text(message, Style::new().fg(palette.error), width);
         }
         FilesStage::Ready if files.rows.is_empty() => Some("No files changed"),
         FilesStage::Ready => None,
@@ -441,7 +451,7 @@ fn file_lines(files: &PrFiles, inner: Rect) -> Vec<Line<'static>> {
                 .marking
                 .as_ref()
                 .is_some_and(|m| row.file.path.as_bytes() == m.path.as_bytes());
-            file_row(row, i == files.cursor, pending, width)
+            file_row(palette, row, i == files.cursor, pending, width)
         })
         .collect()
 }
@@ -453,19 +463,25 @@ const MIN_PATH: usize = 6;
 /// four columns of status and mark): the path loses its start to fit, and
 /// on a list too narrow for both the counts give way to it. While its
 /// viewed mark is `pending` on GitHub, the mark is a dim `…`.
-fn file_row(row: &PrFile, cursor: bool, pending: bool, width: usize) -> Line<'static> {
-    let colour = status_colour(row.file.status);
+fn file_row(
+    palette: &Palette,
+    row: &PrFile,
+    cursor: bool,
+    pending: bool,
+    width: usize,
+) -> Line<'static> {
+    let colour = status_colour(palette, row.file.status);
     let (mark, mark_style) = match row.viewed {
         _ if pending => ("…", dim()),
-        Some(ViewedState::Viewed) => ("✓", Style::new().fg(Color::Green)),
-        Some(ViewedState::Dismissed) => ("~", Style::new().fg(Color::Yellow)),
+        Some(ViewedState::Viewed) => ("✓", Style::new().fg(palette.success)),
+        Some(ViewedState::Dismissed) => ("~", Style::new().fg(palette.warning)),
         Some(ViewedState::Unviewed) => (" ", Style::new()),
         None => ("?", dim()),
     };
     let counts: Vec<Span<'static>> = match row.counts {
         FileCounts::Lines { added, removed } => vec![
-            Span::styled(format!("  +{added}"), Style::new().fg(Color::Green)),
-            Span::styled(format!(" −{removed}"), Style::new().fg(Color::Red)),
+            Span::styled(format!("  +{added}"), Style::new().fg(palette.added)),
+            Span::styled(format!(" −{removed}"), Style::new().fg(palette.removed)),
         ],
         FileCounts::Binary => vec![Span::styled("  bin", dim())],
         FileCounts::Unknown => Vec::new(),
@@ -511,9 +527,16 @@ pub fn detail_max_scroll(
     threads: Option<&str>,
     inner: Rect,
 ) -> usize {
-    detail_lines(detail, body, threads, usize::from(inner.width))
-        .len()
-        .saturating_sub(usize::from(inner.height))
+    // Colours do not change how many lines there are.
+    detail_lines(
+        &Palette::DEFAULT,
+        detail,
+        body,
+        threads,
+        usize::from(inner.width),
+    )
+    .len()
+    .saturating_sub(usize::from(inner.height))
 }
 
 fn bold() -> Style {
@@ -528,6 +551,7 @@ fn dim() -> Style {
 /// a small screen still shows them, then labels, reviewers, the review
 /// `threads` line and `body`, the description already rendered.
 pub fn detail_lines(
+    palette: &Palette,
     detail: &PrDetail,
     body: &[Line<'static>],
     threads: Option<&str>,
@@ -543,28 +567,28 @@ pub fn detail_lines(
         ),
     ]));
     let state = match (detail.state, detail.draft) {
-        (PrState::Merged, _) => ("merged", Color::Magenta),
-        (PrState::Closed, _) => ("closed", Color::Red),
-        (_, true) => ("draft", Color::DarkGray),
-        _ => ("open", Color::Green),
+        (PrState::Merged, _) => ("merged", palette.pr_merged),
+        (PrState::Closed, _) => ("closed", palette.pr_closed),
+        (_, true) => ("draft", palette.pr_draft),
+        _ => ("open", palette.pr_open),
     };
     let (word, color) = match detail.mergeable {
-        Mergeability::Mergeable => ("mergeable", Color::Green),
-        Mergeability::Conflicting => ("conflicts", Color::Red),
-        Mergeability::Unknown => ("unknown", Color::DarkGray),
+        Mergeability::Mergeable => ("mergeable", palette.success),
+        Mergeability::Conflicting => ("conflicts", palette.error),
+        Mergeability::Unknown => ("unknown", palette.neutral),
     };
     lines.push(Line::from(vec![
         Span::styled(state.0, Style::new().fg(state.1)),
         Span::styled(" · ", dim()),
         Span::styled(word, Style::new().fg(color)),
     ]));
-    lines.extend(merge_line(detail, width));
+    lines.extend(merge_line(palette, detail, width));
     let branches = format!("{} ← {}", detail.base, detail.head);
     lines.extend(markdown::wrap_text(&branches, Style::new(), width));
     if !detail.checks.is_empty() {
         lines.push(Line::styled("Checks", bold()));
         for check in &detail.checks {
-            let (glyph, word, color) = check_look(check.status);
+            let (glyph, word, color) = check_look(palette, check.status);
             let glyph = format!("{glyph} ");
             let word = format!("  {word}");
             // The status word always shows; the name gives way.
@@ -600,7 +624,7 @@ pub fn detail_lines(
 }
 
 /// How the pull request may be merged, or why it may not, in fixed words.
-fn merge_line(detail: &PrDetail, width: usize) -> Vec<Line<'static>> {
+fn merge_line(palette: &Palette, detail: &PrDetail, width: usize) -> Vec<Line<'static>> {
     let (text, style) = match merge_options(detail) {
         Ok(methods) => {
             let labels: Vec<&str> = methods.iter().map(|m| m.label()).collect();
@@ -613,7 +637,7 @@ fn merge_line(detail: &PrDetail, width: usize) -> Vec<Line<'static>> {
         ),
         Err(block) => (
             format!("Cannot merge: {}", block.message()),
-            Style::new().fg(Color::Red),
+            Style::new().fg(palette.error),
         ),
     };
     markdown::wrap_text(&text, style, width)
@@ -665,13 +689,13 @@ fn verdict_word(verdict: ReviewVerdict) -> &'static str {
     }
 }
 
-fn check_look(status: CheckStatus) -> (&'static str, &'static str, Color) {
+fn check_look(palette: &Palette, status: CheckStatus) -> (&'static str, &'static str, Color) {
     match status {
-        CheckStatus::Success => ("✓", "passed", Color::Green),
-        CheckStatus::Failure => ("✗", "failed", Color::Red),
-        CheckStatus::Pending => ("●", "pending", Color::Yellow),
-        CheckStatus::Neutral => ("○", "neutral", Color::DarkGray),
-        CheckStatus::Skipped => ("–", "skipped", Color::DarkGray),
+        CheckStatus::Success => ("✓", "passed", palette.success),
+        CheckStatus::Failure => ("✗", "failed", palette.error),
+        CheckStatus::Pending => ("●", "pending", palette.pending),
+        CheckStatus::Neutral => ("○", "neutral", palette.neutral),
+        CheckStatus::Skipped => ("–", "skipped", palette.neutral),
     }
 }
 
@@ -974,7 +998,7 @@ mod tests {
         let mut detail = fixture_detail();
         detail.title = "A title that is far too long for a narrow screen".into();
         detail.head = "feature/a-branch-name-that-goes-on".into();
-        let lines = detail_lines(&detail, &[], None, 28);
+        let lines = detail_lines(&Palette::DEFAULT, &detail, &[], None, 28);
         let text: Vec<String> = lines
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
@@ -1016,7 +1040,7 @@ mod tests {
         for problem in problems {
             let (what, next) = problem_text(problem);
             for width in [20, 40, 60] {
-                let lines = problem_lines(problem, width);
+                let lines = problem_lines(&Palette::DEFAULT, problem, width);
                 let text: String = lines
                     .iter()
                     .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
@@ -1213,8 +1237,8 @@ mod tests {
         };
         let current = style_of("-old cache");
         let other = style_of("+new cache");
-        assert_eq!(current.bg, crate::diff_pane_view::CURRENT_MATCH.bg);
-        assert_eq!(other.bg, crate::diff_pane_view::MATCH.bg);
+        assert_eq!(current.bg, Some(Palette::DEFAULT.current_match_bg));
+        assert_eq!(other.bg, Some(Palette::DEFAULT.match_bg));
     }
 
     #[test]
@@ -1329,18 +1353,18 @@ mod tests {
         for width in [60, 30, 21, 17] {
             for row in [&wide, &rename] {
                 for cursor in [false, true] {
-                    let line = file_row(row, cursor, false, width);
+                    let line = file_row(&Palette::DEFAULT, row, cursor, false, width);
                     assert_eq!(row_width(&line), width, "{:?}", row_text(&line));
                 }
             }
         }
-        let text = row_text(&file_row(&rename, false, false, 60));
+        let text = row_text(&file_row(&Palette::DEFAULT, &rename, false, false, 60));
         assert!(
             text.contains("src/older/name.rs → src/old/name.rs"),
             "{text:?}"
         );
         // Cut from the start, keeping the file name and the counts.
-        let text = row_text(&file_row(&wide, false, false, 30));
+        let text = row_text(&file_row(&Palette::DEFAULT, &wide, false, false, 30));
         assert!(
             text.contains('…') && text.contains("数据文件.rs"),
             "{text:?}"
@@ -1359,11 +1383,11 @@ mod tests {
             },
             Some(ViewedState::Viewed),
         );
-        let text = row_text(&file_row(&row, false, false, 12));
+        let text = row_text(&file_row(&Palette::DEFAULT, &row, false, false, 12));
         assert_eq!(width_of(&text), 12, "{text:?}");
         assert!(!text.contains('+'), "{text:?}");
         assert!(text.starts_with("M ✓ …"), "{text:?}");
-        let text = row_text(&file_row(&row, false, false, 30));
+        let text = row_text(&file_row(&Palette::DEFAULT, &row, false, false, 30));
         assert!(text.ends_with("+120 −45"), "{text:?}");
     }
 

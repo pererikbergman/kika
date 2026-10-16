@@ -75,8 +75,8 @@
 //!   `HunkPane`, which core calls with custom_patch's picks as an
 //!   overlay; `diff_position`, because review draws it too;
 //!   `styled_diff_line`, because blame does; and `diff_pane_body`,
-//!   `found_note`, `marks_of`, `marked_spans`, `clipped_marked`, `MATCH`
-//!   and `CURRENT_MATCH`, which review, blame and search use;
+//!   `found_note`, `marks_of`, `marked_spans`, `clipped_marked`, `search_match`
+//!   and `current_match`, which review, blame and search use;
 //! - the hunk cursor, `DiffPane::hunks`, read through core
 //!   `hunk_view()`/`hunk_view_mut()` and set by `focus_hunk_view()`
 //!   (`diff_pane.rs`), the only way into `Focus::Diff`;

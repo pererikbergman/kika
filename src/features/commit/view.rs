@@ -4,14 +4,15 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::CommitEditor;
 use super::editor::Field;
 use crate::model::CommitFlow;
-use crate::view::{COMMIT_WIDTH, FOCUSED, centered, clip, render_question, tail, width_of, wrap};
+use crate::theme::Palette;
+use crate::view::{COMMIT_WIDTH, centered, clip, render_question, tail, width_of, wrap};
 
 /// The footer of a running commit: where Ctrl+C goes, which depends on
 /// whether git has the terminal.
@@ -20,7 +21,13 @@ const ON_TERMINAL_FOOTER: &str = " git has the terminal · ctrl-c stops git ";
 
 /// The commit popup for the current step, over `area`. `on_terminal` says
 /// a running commit was handed the terminal.
-pub(crate) fn render_commit(commit: &CommitFlow, on_terminal: bool, frame: &mut Frame, area: Rect) {
+pub(crate) fn render_commit(
+    palette: &Palette,
+    commit: &CommitFlow,
+    on_terminal: bool,
+    frame: &mut Frame,
+    area: Rect,
+) {
     match commit {
         CommitFlow::Closed => {}
         CommitFlow::ConfirmStageAll => render_question(
@@ -41,16 +48,16 @@ pub(crate) fn render_commit(commit: &CommitFlow, on_terminal: bool, frame: &mut 
             frame,
             area,
         ),
-        CommitFlow::Editing(editor) => render_commit_editor(editor, None, frame, area),
+        CommitFlow::Editing(editor) => render_commit_editor(palette, editor, None, frame, area),
         CommitFlow::Running(editor) => {
             let footer = if on_terminal {
                 ON_TERMINAL_FOOTER
             } else {
                 DETACHED_FOOTER
             };
-            render_commit_editor(editor, Some(footer), frame, area)
+            render_commit_editor(palette, editor, Some(footer), frame, area)
         }
-        CommitFlow::Failed { output, .. } => render_commit_failed(output, frame, area),
+        CommitFlow::Failed { output, .. } => render_commit_failed(palette, output, frame, area),
     }
 }
 
@@ -59,6 +66,7 @@ pub(crate) fn render_commit(commit: &CommitFlow, on_terminal: bool, frame: &mut 
 /// `running` commit shows that footer instead. When there is no room for
 /// both boxes, only the focused one is drawn.
 fn render_commit_editor(
+    palette: &Palette,
     editor: &CommitEditor,
     running: Option<&str>,
     frame: &mut Frame,
@@ -77,7 +85,9 @@ fn render_commit_editor(
     };
     // Skipping hooks skips the user's own checks, so it is never quiet.
     let block = if editor.no_verify {
-        block.title(Line::styled(" hooks skipped ", Style::new().fg(Color::Yellow)).right_aligned())
+        block.title(
+            Line::styled(" hooks skipped ", Style::new().fg(palette.warning)).right_aligned(),
+        )
     } else {
         block
     };
@@ -86,11 +96,13 @@ fn render_commit_editor(
 
     let focus = editing.then_some(editor.field);
     let subject = TextBox {
+        palette,
         title: "Subject",
         lines: std::slice::from_ref(&editor.subject),
         cursor: (focus == Some(Field::Subject)).then_some((0, editor.col)),
     };
     let body = TextBox {
+        palette,
         title: "Body",
         lines: &editor.body,
         cursor: (focus == Some(Field::Body)).then_some((editor.row, editor.col)),
@@ -114,6 +126,7 @@ fn render_commit_editor(
 /// marked, and scrolled so the cursor is in view. Without one it shows its
 /// start. Text cut off at either side is marked with `…`.
 struct TextBox<'a> {
+    palette: &'a Palette,
     title: &'a str,
     lines: &'a [String],
     cursor: Option<(usize, usize)>,
@@ -126,7 +139,7 @@ impl TextBox<'_> {
             Some(_) => Block::bordered()
                 .title(format!(" ▸ {} ", self.title))
                 .title_style(Style::new().add_modifier(Modifier::BOLD))
-                .border_style(Style::new().fg(FOCUSED)),
+                .border_style(Style::new().fg(self.palette.focused)),
             None => Block::bordered().title(format!(" {} ", self.title)),
         };
         let inner = block.inner(area);
@@ -160,7 +173,7 @@ impl TextBox<'_> {
 /// The output of a failed commit, wrapped. When it does not fit, the end is
 /// shown, since that is where hooks usually say what went wrong, and the
 /// first row says how much is cut. The way back is always on the last row.
-fn render_commit_failed(output: &str, frame: &mut Frame, area: Rect) {
+fn render_commit_failed(palette: &Palette, output: &str, frame: &mut Frame, area: Rect) {
     let width = COMMIT_WIDTH.min(area.width);
     let rows = wrap(output, usize::from(width.saturating_sub(2)).max(1));
     let height = u16::try_from(rows.len() + 3).unwrap_or(u16::MAX);
@@ -170,9 +183,12 @@ fn render_commit_failed(output: &str, frame: &mut Frame, area: Rect) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     let [text, hint] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
-    frame.render_widget(Paragraph::new(tail(&rows, usize::from(text.height))), text);
     frame.render_widget(
-        Line::styled("Esc: back to the message", Style::new().fg(Color::Yellow)),
+        Paragraph::new(tail(palette, &rows, usize::from(text.height))),
+        text,
+    );
+    frame.render_widget(
+        Line::styled("Esc: back to the message", Style::new().fg(palette.warning)),
         hint,
     );
 }
@@ -236,8 +252,14 @@ mod tests {
         // The cursor sits after the subject, and its box is highlighted.
         let cursor = terminal.get_cursor_position().unwrap();
         assert_eq!((cursor.x, cursor.y), (x + 13, y));
-        assert_eq!(buffer[(x - 1, y)].style().fg, Some(FOCUSED));
-        assert_ne!(buffer[(line1.0 - 1, line1.1)].style().fg, Some(FOCUSED));
+        assert_eq!(
+            buffer[(x - 1, y)].style().fg,
+            Some(Palette::DEFAULT.focused)
+        );
+        assert_ne!(
+            buffer[(line1.0 - 1, line1.1)].style().fg,
+            Some(Palette::DEFAULT.focused)
+        );
         assert!(
             rows[23].starts_with(
                 " q and ? are typed  ctrl-s commit  Tab subject/body  esc cancel  ctrl-c stop"
@@ -263,7 +285,10 @@ mod tests {
         let cursor = terminal.get_cursor_position().unwrap();
         // Two wide glyphs before the cursor: four columns.
         assert_eq!((cursor.x, cursor.y), (x + 4, y));
-        assert_eq!(buffer[(x - 1, y)].style().fg, Some(FOCUSED));
+        assert_eq!(
+            buffer[(x - 1, y)].style().fg,
+            Some(Palette::DEFAULT.focused)
+        );
     }
 
     #[test]

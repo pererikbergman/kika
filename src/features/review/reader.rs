@@ -14,6 +14,7 @@ use super::threads_view::{context_line, dim, header_style, short_time, span_labe
 use crate::intent::Scroll;
 use crate::keymap::Reason;
 use crate::model::AppState;
+use crate::theme::Palette;
 use kika_forge::anchor::Placement;
 use kika_forge::discussion::PrDiscussion;
 use kika_git::safe_text::sanitize;
@@ -96,7 +97,13 @@ pub(super) fn thread_label(files: &PrFiles, discussion: &PrDiscussion, t: usize)
 /// Every line of thread `t` of the file at `path`, at `width`: a header,
 /// the lines it was written on when it is not on a line here, then each
 /// comment in full, and how many more GitHub has.
-pub fn reader_lines(scope: &ThreadScope, t: usize, path: &str, width: usize) -> Vec<Line<'static>> {
+pub fn reader_lines(
+    palette: &Palette,
+    scope: &ThreadScope,
+    t: usize,
+    path: &str,
+    width: usize,
+) -> Vec<Line<'static>> {
     let Some(thread) = scope.discussion.threads.get(t) else {
         return Vec::new();
     };
@@ -112,10 +119,15 @@ pub fn reader_lines(scope: &ThreadScope, t: usize, path: &str, width: usize) -> 
         "unresolved"
     };
     let header = format!("{path} · {} · {state} · {count}", where_label(scope, t));
-    let look = header_style(thread, scope.placement(t));
+    let look = header_style(palette, thread, scope.placement(t));
     let mut lines = markdown::wrap_text(&header, look.add_modifier(Modifier::BOLD), width);
     if !matches!(scope.placement(t), Some(Placement::Line { .. })) {
-        lines.extend(thread.context.iter().map(|c| context_line(c, width)));
+        lines.extend(
+            thread
+                .context
+                .iter()
+                .map(|c| context_line(palette, c, width)),
+        );
     }
     lines.push(Line::default());
     for comment in &thread.comments {
@@ -192,7 +204,13 @@ impl AppState {
             .map(|row| row.file.path.display())
             .unwrap_or_default();
         let lines = match reader.shown() {
-            Some(t) => reader_lines(&ThreadScope::of(files, discussion), t, path, width),
+            Some(t) => reader_lines(
+                &self.palette,
+                &ThreadScope::of(files, discussion),
+                t,
+                path,
+                width,
+            ),
             None => Vec::new(),
         };
         let max = self.reader_max_scroll(lines.len());

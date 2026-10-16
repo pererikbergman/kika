@@ -51,6 +51,7 @@ use crate::popup::{DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind};
 use crate::prompts::runs_attached;
 use crate::refresh::Selection;
 use crate::remote_run::RemoteRun;
+use crate::theme::Palette;
 use crate::watch::{WatchEvent, WatchState};
 use kika_forge::{ForgeHost, ForgeState};
 use kika_git::FileEntry;
@@ -228,6 +229,10 @@ pub struct AppState {
     /// How diff body rows draw emoji ZWJ sequences: resolved once at
     /// startup for the running terminal, and fixed for the session.
     pub emoji_zwj: EmojiZwj,
+    /// The colours views draw with. Fixed for the session: `update` never
+    /// changes it, so lines rendered ahead (the thread reader's) stay
+    /// right.
+    pub palette: Palette,
     /// Background loads that notice changes made outside Kika.
     pub watch: WatchState,
     /// The repositories entered from, outermost first; the current one is
@@ -346,6 +351,7 @@ impl AppState {
             popups: Vec::new(),
             diff_options: DiffOptions::default(),
             emoji_zwj: EmojiZwj::Escape,
+            palette: Palette::DEFAULT,
             watch: WatchState::default(),
             repo_stack: Vec::new(),
             renderers: Vec::new(),
