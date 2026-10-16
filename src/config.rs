@@ -492,12 +492,17 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
 fn theme(table: &ThemeTable) -> Result<Palette, String> {
     let name = table.name.as_deref().unwrap_or("default");
     let mut palette = theme::builtin(name).ok_or_else(|| {
-        let quoted = theme::THEMES.map(|n| format!("{n:?}"));
-        let (last, rest) = quoted.split_last().expect("there are built-in themes");
-        format!(
-            "theme.name: {name:?} is not a built-in theme; use {} or {last}",
-            rest.join(", ")
-        )
+        let last = theme::THEMES.len() - 1;
+        let list: String = theme::THEMES
+            .iter()
+            .enumerate()
+            .map(|(i, n)| match i {
+                0 => format!("{n:?}"),
+                i if i == last => format!(" or {n:?}"),
+                _ => format!(", {n:?}"),
+            })
+            .collect();
+        format!("theme.name: {name:?} is not a built-in theme; use {list}")
     })?;
     for (role, value) in &table.colors {
         let unknown = || {
@@ -1903,6 +1908,10 @@ output = "none"
         want.focused = Color::Indexed(255);
         want.dim = Color::Rgb(0x3a, 0x3a, 0x3a);
         assert_eq!(got, want);
+        let got = palette("[theme]\nname = \"light\"\n[theme.colors]\ntext = \"reset\"\n").unwrap();
+        let mut want = Palette::LIGHT;
+        want.text = Color::Reset;
+        assert_eq!(got, want);
         let got = palette("[theme.colors]\nerror = 0\n").unwrap();
         assert_eq!(got.error, Color::Indexed(0));
 
@@ -1947,11 +1956,12 @@ output = "none"
                 err(&format!("[theme.colors]\n{old} = \"red\"\n")).contains("is not a colour role")
             );
         }
-        let hint = r##"is not a colour; use a colour name such as "green" or "light_red", a number 0-255, or "#rrggbb""##;
+        let hint = r##"is not a colour; use a colour name such as "green" or "light_red", "reset", a number 0-255, or "#rrggbb""##;
         for (value, shown) in [
             (r#""grene""#, r#""grene""#),
             (r#""Green""#, r#""Green""#),
-            (r#""reset""#, r#""reset""#),
+            (r#""Reset""#, r#""Reset""#),
+            (r#""none""#, r#""none""#),
             ("256", "256"),
             ("-1", "-1"),
             (r##""#fff""##, r##""#fff""##),

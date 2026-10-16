@@ -704,22 +704,25 @@ A colour in `[theme.colors]` is one of:
   | `light_cyan` | 14 |
   | `white` | 15 |
 
+- `reset`, the terminal's own colour for that role. On `light` this is how
+  to get your terminal's default text colour back: `text = "reset"`;
 - a 256-colour index from `0` to `255`, as a number (`17`) or a string
   (`"17"`);
 - a true colour as `"#rrggbb"`, six hex digits in either case
   (`"#3a3a3a"`, `"#AbCdEf"`).
 
 Anything else is an error, and the whole file is ignored: another spelling
-such as `"Green"` or `"darkgray"`, `"reset"`, a short `"#fff"`, a number
+such as `"Green"`, `"darkgray"` or `"Reset"`, a short `"#fff"`, a number
 above 255, or a value that is not a number or string. So is a `name` that
 is not a built-in theme, a role that does not exist, or an unknown key in
 `[theme]`. The error names the key and says what to write instead.
 
-The roles, and their colour in each built-in theme:
+The roles, and their colour in each built-in theme. A bare number is a
+256-colour index, and `reset` is the terminal's own colour:
 
 | Role | Meaning | `default` | `light` | `high-contrast` |
 |---|---|---|---|---|
-| `text` | Plain text that still takes a colour slot: a plain status letter, the rebase `pick` action | terminal default | `black` | `white` |
+| `text` | Plain text that still takes a colour slot: a plain status letter, the rebase `pick` action | `reset` | `black` | `white` |
 | `dim` | Unfocused borders, hints, empty states, dates and disabled rows | `dark_gray` | `240` | `gray` |
 | `focused` | The focused panel's border and the Diff pane's cursor gutter | `cyan` | `25` | `light_cyan` |
 | `added` | Added lines and counts, and the status `A` | `green` | `28` | `light_green` |

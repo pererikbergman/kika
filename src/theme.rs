@@ -305,11 +305,13 @@ const NAMES: [(&str, Color); 16] = [
     ("white", Color::White),
 ];
 
-/// `value` as a colour: one of the 16 names, an index 0-255 (a number or
-/// its decimal string), or `#rrggbb`. The error says what to write.
+/// `value` as a colour: one of the 16 names, `reset` for the terminal's
+/// own colour, an index 0-255 (a number or its decimal string), or
+/// `#rrggbb`. The error says what to write.
 pub(crate) fn parse_colour(value: &ColourValue) -> Result<Color, String> {
     let colour = match value {
         ColourValue::Index(n) => index(*n),
+        ColourValue::Text(text) if text == "reset" => Some(Color::Reset),
         ColourValue::Text(text) => named(text).or_else(|| decimal(text)).or_else(|| rgb(text)),
         ColourValue::Other(_) => None,
     };
@@ -320,7 +322,7 @@ pub(crate) fn parse_colour(value: &ColourValue) -> Result<Color, String> {
             ColourValue::Other(other) => other.to_string(),
         };
         format!(
-            "{shown} is not a colour; use a colour name such as \"green\" or \"light_red\", a number 0-255, or \"#rrggbb\""
+            "{shown} is not a colour; use a colour name such as \"green\" or \"light_red\", \"reset\", a number 0-255, or \"#rrggbb\""
         )
     })
 }
@@ -582,6 +584,7 @@ mod tests {
             Ok(Color::Indexed(255))
         );
         assert_eq!(parse_colour(&text("17")), Ok(Color::Indexed(17)));
+        assert_eq!(parse_colour(&text("reset")), Ok(Color::Reset));
         assert_eq!(
             parse_colour(&text("#3a3a3a")),
             Ok(Color::Rgb(0x3a, 0x3a, 0x3a))
@@ -594,11 +597,14 @@ mod tests {
 
     #[test]
     fn any_other_spelling_is_refused_with_what_to_use() {
-        let hint = r##"is not a colour; use a colour name such as "green" or "light_red", a number 0-255, or "#rrggbb""##;
+        let hint = r##"is not a colour; use a colour name such as "green" or "light_red", "reset", a number 0-255, or "#rrggbb""##;
         let refused = [
             (text("grene"), r#""grene""#),
             (text("Green"), r#""Green""#),
-            (text("reset"), r#""reset""#),
+            (text("Reset"), r#""Reset""#),
+            (text("RESET"), r#""RESET""#),
+            (text("default"), r#""default""#),
+            (text("none"), r#""none""#),
             (text("darkgray"), r#""darkgray""#),
             (text("256"), r#""256""#),
             (text("-1"), r#""-1""#),

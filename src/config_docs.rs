@@ -327,10 +327,8 @@ fn theme_mismatches(page: &str) -> Vec<String> {
         }
         for ((cell, palette), name) in colours.iter().zip(&palettes).zip(THEMES) {
             let want = palette.get(role).expect("a role");
-            let got = match cell.trim_matches('`') {
-                "terminal default" => Ok(ratatui::style::Color::Reset),
-                text => theme::parse_colour(&ColourValue::Text(text.into())),
-            };
+            let text = cell.trim_matches('`');
+            let got = theme::parse_colour(&ColourValue::Text(text.into()));
             if got != Ok(want) {
                 problems.push(format!(
                     "`{role}` in `{name}` is {want:?} but the page says {cell}"
