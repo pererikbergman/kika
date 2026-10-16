@@ -397,7 +397,7 @@ impl AppState {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crossterm::event::KeyCode;
 
     use super::*;
@@ -421,7 +421,7 @@ mod tests {
     }
 
     /// The reader open on cache.rs's unresolved thread 0 (`PRRT_kwDOA1`).
-    fn reading() -> AppState {
+    pub(crate) fn reading() -> AppState {
         let mut state = two_files();
         type_char(&mut state, ']');
         press(&mut state, KeyCode::Enter);
@@ -430,7 +430,7 @@ mod tests {
     }
 
     /// The conversation of pull request 12, its detail's number matching.
-    fn conversing() -> AppState {
+    pub(crate) fn conversing() -> AppState {
         let mut state = detail_with(fixture_discussion());
         state.review.detail.as_mut().unwrap().number = 12;
         state.update(AppIntent::Review(ReviewIntent::OpenConversation));

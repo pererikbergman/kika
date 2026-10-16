@@ -17,6 +17,9 @@ use crate::features::commits::custom_patch;
 use crate::features::custom_commands::CustomCommandsIntent;
 use crate::features::custom_commands::{CommandFailure, OutputMode};
 use crate::features::diff::DiffIntent;
+use crate::features::review::{
+    CommentEditError, ComposerStamp, EditedComment, ReviewIntent, edited_comment,
+};
 use crate::intent::AppIntent;
 use crate::op::{GitOp, op_command, run_op};
 use crate::sequence_editor::editor_value;
@@ -37,6 +40,13 @@ pub enum HandOff {
     /// Let the user write the commit message in their editor, starting
     /// from `initial`, the popup's text.
     EditCommitMessage { initial: String },
+    /// Let the user write a review comment in their editor, starting from
+    /// `initial`, the composer's text. `stamp` says which composer asked,
+    /// so the answer is only applied to that one.
+    EditReviewComment {
+        initial: String,
+        stamp: ComposerStamp,
+    },
     /// Run a commit that may ask something on the terminal: a signing
     /// passphrase or a hook's question. Answered like a detached run.
     Commit { tag: Tag, op: GitOp },
@@ -146,6 +156,12 @@ pub fn execute_as(
         HandOff::EditCommitMessage { initial } => AppIntent::Commit(CommitIntent::MessageEdited {
             result: edit_commit_message(&initial, runner, workdir),
         }),
+        HandOff::EditReviewComment { initial, stamp } => {
+            AppIntent::Review(ReviewIntent::CommentEdited {
+                result: edit_review_comment(&initial, runner, workdir),
+                stamp,
+            })
+        }
         HandOff::RunCommand { title, argv } => {
             AppIntent::CustomCommands(CustomCommandsIntent::Finished {
                 title,
@@ -460,6 +476,35 @@ fn edit_commit_message(
     edited_message(&edited)
 }
 
+/// Only the comment goes in the file, with no help lines, so markdown `#`
+/// lines are the user's own and come back as they are. After the editor
+/// closes the file is kept: `update` decides whether the text was used and
+/// asks for its removal, so nothing typed is lost when it was not.
+fn edit_review_comment(
+    initial: &str,
+    runner: &dyn GitRunner,
+    workdir: &Path,
+) -> Result<EditedComment, CommentEditError> {
+    let editor = editor(runner).map_err(CommentEditError::Launch)?;
+    let (temp, mut file) = TempFile::create("kika-comment", "md")
+        .map_err(|e| CommentEditError::Launch(io_error("Could not create the comment file", &e)))?;
+    let mut contents = initial.to_string();
+    if !contents.is_empty() && !contents.ends_with('\n') {
+        contents.push('\n');
+    }
+    file.write_all(contents.as_bytes())
+        .map_err(|e| CommentEditError::Launch(io_error("Could not write the comment file", &e)))?;
+    // Closed before the editor opens it.
+    drop(file);
+    launch(&editor, &temp.path, None, workdir).map_err(CommentEditError::Launch)?;
+    let file = temp.keep();
+    let read = fs::read(&file.path).map_err(|e| io_error("Could not read the comment file", &e));
+    match read.and_then(|bytes| edited_comment(&bytes)) {
+        Ok(text) => Ok(EditedComment { text, file }),
+        Err(why) => Err(CommentEditError::Unreadable { why, file }),
+    }
+}
+
 /// The message to commit after an edit: the lines not starting with `#`,
 /// without blank lines before them or whitespace after them. `None` when
 /// nothing is left, which is how the user aborts. Git keeps `#` lines
@@ -516,7 +561,24 @@ struct TempFile {
     dir: PathBuf,
 }
 
+/// A temp file whose directory is no longer removed on drop: someone
+/// still needs it. Removing it is up to whoever holds this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeptFile {
+    pub dir: PathBuf,
+    pub path: PathBuf,
+}
+
 impl TempFile {
+    /// Disarm the cleanup and hand the file over.
+    fn keep(mut self) -> KeptFile {
+        // An empty `dir` is what `Drop` leaves alone.
+        KeptFile {
+            dir: std::mem::take(&mut self.dir),
+            path: std::mem::take(&mut self.path),
+        }
+    }
+
     /// A new file only this user can read, named `<prefix>-<pid>-<n>.<extension>`
     /// so editors pick the right mode, inside a new mode-0700 directory
     /// `<prefix>-<pid>-<n>`, and unlike any other file, open for writing.
@@ -575,7 +637,9 @@ impl Drop for TempFile {
     fn drop(&mut self) {
         // Also clears swap and backup files the editor left beside the file.
         // Symlinks inside are removed, not followed.
-        let _ = fs::remove_dir_all(&self.dir);
+        if !self.dir.as_os_str().is_empty() {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
     }
 }
 
@@ -1184,6 +1248,161 @@ mod tests {
             }
             other => panic!("expected a failed edit, got {other:?}"),
         }
+    }
+
+    /// Run the review comment hand-off from `initial` with a scripted
+    /// editor that records the file's path, mode, directory mode and
+    /// contents, then runs `body`.
+    #[cfg(unix)]
+    fn edit_comment_with(dir: &Path, initial: &str, body: &str) -> AppIntent {
+        let editor = editor_script(
+            dir,
+            &format!(
+                "echo \"$1\" > seen\nls -l \"$1\" > mode\nls -ld \"$(dirname \"$1\")\" > dir_mode\n\
+                 cp \"$1\" before\n{body}"
+            ),
+        );
+        let runner = FakeRunner::new().expect(&["var", "GIT_EDITOR"], ok(editor.as_bytes()));
+        let job = HandOff::EditReviewComment {
+            initial: initial.into(),
+            stamp: comment_stamp(),
+        };
+        let intent = execute(job, &runner, dir);
+        runner.assert_done();
+        intent
+    }
+
+    fn comment_stamp() -> ComposerStamp {
+        ComposerStamp {
+            generation: 3,
+            kind: crate::features::review::ComposerKind::General {
+                number: 12,
+                subject: "PR_1".into(),
+            },
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_review_comment_is_written_in_a_private_md_file_that_is_kept_and_named() {
+        let tmp = kika_git::fake::TempDir::new("handoff-comment");
+        let dir = tmp.path();
+        let intent = edit_comment_with(
+            dir,
+            "# Draft\nline two",
+            "printf '# Title\\r\\nbody\\n\\n\\n' > \"$1\"",
+        );
+
+        let AppIntent::Review(ReviewIntent::CommentEdited {
+            stamp,
+            result: Ok(edited),
+        }) = intent
+        else {
+            panic!("expected an edited comment, got {intent:?}");
+        };
+        assert_eq!(stamp, comment_stamp());
+        assert_eq!(edited.text, "# Title\nbody");
+        // Only the comment went in: no help lines, `#` lines as typed.
+        let before = fs::read_to_string(dir.join("before")).unwrap();
+        assert_eq!(before, "# Draft\nline two\n");
+        let mode = fs::read_to_string(dir.join("mode")).unwrap();
+        assert!(mode.starts_with("-rw-------"), "{mode}");
+        let dir_mode = fs::read_to_string(dir.join("dir_mode")).unwrap();
+        assert!(dir_mode.starts_with("drwx------"), "{dir_mode}");
+        let seen = fs::read_to_string(dir.join("seen")).unwrap();
+        let temp = PathBuf::from(seen.trim_end());
+        let name = temp.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("kika-comment-") && name.ends_with(".md"),
+            "{name}"
+        );
+        // Kept until `update` asks for its removal.
+        assert_eq!(edited.file.path, temp);
+        assert_eq!(Some(edited.file.dir.as_path()), temp.parent());
+        assert_eq!(
+            edited.file.dir.parent(),
+            Some(std::env::temp_dir().as_path())
+        );
+        assert!(temp.exists(), "{temp:?} is gone");
+        fs::remove_dir_all(&edited.file.dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_empty_comment_goes_in_as_an_empty_file() {
+        let tmp = kika_git::fake::TempDir::new("handoff-comment-empty");
+        let dir = tmp.path();
+        let intent = edit_comment_with(dir, "", ":");
+        let AppIntent::Review(ReviewIntent::CommentEdited {
+            result: Ok(edited), ..
+        }) = intent
+        else {
+            panic!("{intent:?}");
+        };
+        assert_eq!(edited.text, "");
+        assert_eq!(fs::read(dir.join("before")).unwrap(), b"");
+        fs::remove_dir_all(&edited.file.dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_editor_gives_a_launch_error_and_leaves_no_comment_file() {
+        let tmp = kika_git::fake::TempDir::new("handoff-comment-fail");
+        let dir = tmp.path();
+        let intent = edit_comment_with(dir, "draft", "exit 3");
+        match intent {
+            AppIntent::Review(ReviewIntent::CommentEdited {
+                result: Err(CommentEditError::Launch(e)),
+                ..
+            }) => assert!(e.starts_with("The editor exited with"), "{e}"),
+            other => panic!("expected a launch error, got {other:?}"),
+        }
+        let seen = fs::read_to_string(dir.join("seen")).unwrap();
+        let temp = Path::new(seen.trim_end());
+        assert!(!temp.parent().unwrap().exists(), "{seen}: left behind");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_comment_file_left_unreadable_is_kept_and_named() {
+        let tmp = kika_git::fake::TempDir::new("handoff-comment-bad");
+        let dir = tmp.path();
+        let intent = edit_comment_with(dir, "draft", "printf 'bad \\377' > \"$1\"");
+        let AppIntent::Review(ReviewIntent::CommentEdited {
+            result: Err(CommentEditError::Unreadable { why, file }),
+            ..
+        }) = intent
+        else {
+            panic!("{intent:?}");
+        };
+        assert!(why.contains("UTF-8"), "{why}");
+        assert_eq!(fs::read(&file.path).unwrap(), b"bad \xff");
+        fs::remove_dir_all(&file.dir).unwrap();
+    }
+
+    #[test]
+    fn a_failing_git_var_is_a_launch_error_for_a_comment() {
+        let runner = FakeRunner::new().expect(&["var", "GIT_EDITOR"], fail("fatal: no\n"));
+        let job = HandOff::EditReviewComment {
+            initial: "x".into(),
+            stamp: comment_stamp(),
+        };
+        assert_eq!(
+            execute(job, &runner, Path::new("/nowhere")),
+            AppIntent::Review(ReviewIntent::CommentEdited {
+                stamp: comment_stamp(),
+                result: Err(CommentEditError::Launch("fatal: no".into())),
+            })
+        );
+    }
+
+    #[test]
+    fn a_kept_temp_file_outlives_its_handle() {
+        let (temp, _file) = TempFile::create("kika-test-keep", "md").unwrap();
+        let kept = temp.keep();
+        assert!(kept.path.exists());
+        assert_eq!(kept.path.parent(), Some(kept.dir.as_path()));
+        fs::remove_dir_all(&kept.dir).unwrap();
     }
 
     #[cfg(unix)]

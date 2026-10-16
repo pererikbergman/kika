@@ -14,7 +14,8 @@
 //! and going to the workspace (`checkout.rs`), the markdown renderer for
 //! its body (`markdown.rs`), the pending review of line comments kept on
 //! disk (`pending.rs`), picking the lines a comment goes on
-//! (`comment_pick.rs`) and typing it (`comment_editor.rs`), all drawn by
+//! (`comment_pick.rs`) and typing it (`comment_editor.rs`) or writing it in
+//! the user's editor (`comment_external.rs`), all drawn by
 //! `pending_view.rs`, and the local git reads behind the files screen and
 //! the checkout (`git.rs`). The feature
 //! also owns its key bindings (`keys.rs`), its screen (`view.rs`) and the
@@ -22,7 +23,7 @@
 //! `CheckReviewCommits`, `FetchReviewCommits`, `LoadReviewFiles`,
 //! `LoadReviewCommits`, `LoadReviewRange`, `SetFileViewed`,
 //! `WriteDiscussion`, `PlanPrCheckout`, `MergePullRequest`, `LoadPendingReview` and
-//! `SavePendingReview` (`effects.rs`). The credential
+//! `SavePendingReview` and `RemoveCommentFile` (`effects.rs`). The credential
 //! plumbing that `FetchReviewCommits` shares with sync and the merge
 //! question popup stay in core; the forge client is the `kika_forge` crate.
 //!
@@ -31,7 +32,8 @@
 //! `update.rs` holds only that function; it dispatches to the handlers in
 //! `state.rs`, `files.rs`, `commit_view.rs`, `viewed.rs`, `threads.rs`,
 //! `reader.rs`, `conversation.rs`, `discussion_write.rs`, `line_link.rs`, `merge.rs`,
-//! `checkout.rs`, `pending.rs`, `comment_pick.rs` and `comment_editor.rs`.
+//! `checkout.rs`, `pending.rs`, `comment_pick.rs`, `comment_editor.rs` and
+//! `comment_external.rs`.
 //! The review guards on core arms (`ScrollDiff`, `OpenSearch`,
 //! `DiffEscape`) stay in core.
 //!
@@ -39,7 +41,9 @@
 //! - the intent enum [`ReviewIntent`] and the free function [`update`];
 //! - the types [`ReviewState`], [`ReviewScreen`] and [`PrMerging`], which
 //!   `AppState` holds, and [`CommitsHere`], [`PrCommit`] and [`PrFileRow`],
-//!   which intents carry;
+//!   which intents carry, and [`ComposerStamp`], [`EditedComment`],
+//!   [`CommentEditError`] and [`edited_comment`], which core's editor
+//!   hand-off uses;
 //! - the guards `queue_keys_disabled`, `review_diff_focused`,
 //!   `thread_reader_open`, `composer_open`, `pending_list_open` and
 //!   `comment_pick_open`, which core focus uses, and those in `keys.rs`;
@@ -60,7 +64,7 @@
 //! - `effects::{load_queues, load_detail, load_discussion, check_commits,
 //!   fetch_commits, load_files, load_commits, load_range_files,
 //!   set_file_viewed, write_discussion, plan_checkout, merge, load_pending,
-//!   save_pending}`.
+//!   save_pending, remove_comment_file}`.
 //!
 //! Kept cross-feature reads and calls:
 //! - `merge.rs` reloads the badges after a merge by asking core
@@ -74,6 +78,7 @@
 
 mod checkout;
 mod comment_editor;
+mod comment_external;
 mod comment_pick;
 mod commit_view;
 mod conversation;
@@ -98,7 +103,10 @@ mod update;
 pub(crate) mod view;
 mod viewed;
 
+#[cfg(test)]
+pub(crate) use comment_editor::ComposerKind;
 pub(crate) use comment_editor::composer_open;
+pub(crate) use comment_external::{CommentEditError, ComposerStamp, EditedComment, edited_comment};
 pub(crate) use comment_pick::comment_pick_open;
 pub(crate) use files::review_diff_focused;
 pub(crate) use git::{
