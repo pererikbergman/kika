@@ -443,6 +443,26 @@ mod tests {
     }
 
     #[test]
+    fn a_project_in_nested_groups_has_its_own_file_and_reads_back() {
+        let tmp = TempDir::new("forge-cache");
+        let on = |owner: &str, name: &str| {
+            let repo = ForgeRepo {
+                host: "gitlab.example.com".into(),
+                owner: owner.into(),
+                name: name.into(),
+            };
+            CacheKey::new(&repo, Path::new("/a")).unwrap()
+        };
+        let nested = on("acme/sub", "x");
+        for other in [on("acme", "x"), on("acme", "sub"), on("acme/sub", "y")] {
+            assert_ne!(nested.file_name(), other.file_name(), "{other:?}");
+        }
+        write(tmp.path(), &nested, &cached()).unwrap();
+        assert_eq!(read(tmp.path(), &nested), Some(cached()));
+        assert_eq!(read(tmp.path(), &on("acme", "x")), None);
+    }
+
+    #[test]
     fn a_stored_key_that_differs_is_a_miss() {
         let tmp = TempDir::new("forge-cache");
         write(tmp.path(), &key("/a"), &cached()).unwrap();

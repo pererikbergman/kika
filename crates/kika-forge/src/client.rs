@@ -16,6 +16,7 @@ use super::forge::{self, Forge};
 use super::github::Gh;
 use super::gitlab::Glab;
 use super::merge::MergeMethod;
+use super::remote;
 use super::task::ForgeContext;
 use super::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
 use kika_git::commit_files::CommitId;
@@ -57,10 +58,12 @@ impl ForgeContext {
             .unwrap_or_else(std::env::temp_dir)
     }
 
-    /// Whether `repo` may be asked about on `host`: it is on the host, and
-    /// the host's allow-list lets the repository through.
+    /// Whether `repo` may be asked about on `host`: it is on the host (a
+    /// GitHub one only for an `owner/repo` path), and the host's
+    /// allow-list lets the repository through. The same gate as
+    /// [`remote::allowed`], so no caller can skip it.
     fn opens(host: &ForgeHost, repo: &ForgeRepo) -> bool {
-        repo.host.eq_ignore_ascii_case(host.as_str()) && host.allows(repo)
+        remote::allowed(repo, std::slice::from_ref(host)).is_some()
     }
 
     /// The forge adapter of `host`'s kind for `repo`, or why not: `repo`
@@ -231,6 +234,31 @@ mod tests {
     }
 
     #[test]
+    fn a_nested_owner_never_reaches_gh_on_a_github_host() {
+        let runner = Arc::new(FakeGh::new());
+        let ctx = context(runner.clone(), None);
+        let nested = ForgeRepo {
+            owner: "acme/sub".into(),
+            name: "x".into(),
+            ..repo()
+        };
+        let open = ForgeHost::parse("github.com").unwrap();
+        let rule = open
+            .clone()
+            .with_allow(vec![AllowRule::parse("acme/sub").unwrap()]);
+        for host in [open, rule] {
+            assert!(
+                matches!(ctx.forge(&host, &nested, 0), Err(Shut::Outside)),
+                "{host:?}"
+            );
+        }
+        assert!(runner.calls().is_empty());
+        // A GitLab host lets the same path through.
+        let lab = ForgeHost::parse_gitlab("github.com").unwrap();
+        assert!(ForgeContext::opens(&lab, &nested));
+    }
+
+    #[test]
     fn a_repository_on_another_host_never_reaches_gh() {
         let runner = Arc::new(FakeGh::new());
         let ctx = context(runner.clone(), None);
@@ -268,6 +296,45 @@ mod tests {
 
     fn gitlab(name: &str) -> ForgeHost {
         ForgeHost::parse(name).unwrap().with_kind(ForgeKind::GitLab)
+    }
+
+    #[test]
+    fn a_gitlab_allow_entry_opens_its_whole_namespace_at_the_gate() {
+        let glab = Arc::new(FakeGlab::new());
+        let ctx = ForgeContext {
+            glab: glab.clone(),
+            ..context(Arc::new(FakeGh::new()), None)
+        };
+        let on = |owner: &str, name: &str| ForgeRepo {
+            host: "gitlab.example.com".into(),
+            owner: owner.into(),
+            name: name.into(),
+        };
+        let rule = |entry: &str| {
+            gitlab("gitlab.example.com").with_allow(vec![AllowRule::parse_nested(entry).unwrap()])
+        };
+        let cases = [
+            ("acme", "acme", "x", true),
+            ("acme", "acme/sub", "x", true),
+            ("acme", "acme/a/b/c", "x", true),
+            ("acme", "acmecorp", "x", false),
+            ("acme/sub", "acme", "sub", true),
+            ("acme/sub", "acme/sub", "x", true),
+            ("acme/sub", "acme/sub/deep", "y", true),
+            ("acme/sub", "acme/other", "x", false),
+            ("acme/sub", "acme", "x", false),
+        ];
+        for (entry, owner, name, open) in cases {
+            let host = rule(entry);
+            let gate = ctx.forge(&host, &on(owner, name), 0);
+            let shown = format!("{entry} for {owner}/{name}");
+            if open {
+                assert!(gate.is_ok(), "{shown}");
+            } else {
+                assert!(matches!(gate, Err(Shut::Outside)), "{shown}");
+            }
+        }
+        assert!(glab.calls().is_empty());
     }
 
     #[test]
