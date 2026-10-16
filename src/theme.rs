@@ -397,6 +397,13 @@ pub(crate) fn no_color(value: Option<&std::ffi::OsStr>) -> bool {
     value.is_some_and(|v| !v.is_empty())
 }
 
+/// Whether a role draws in the terminal's own colour, so it marks nothing
+/// by colour and a view must mark it some other way. `const`, since `==` on
+/// `Color` is not.
+pub(crate) const fn is_reset(colour: Color) -> bool {
+    matches!(colour, Color::Reset)
+}
+
 /// The palette a session starts with: `NO_COLOR` wins over the configured
 /// theme and its colour overrides.
 pub(crate) fn startup_palette(configured: Palette, no_color: bool) -> Palette {
