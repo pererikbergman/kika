@@ -3,6 +3,7 @@
 //! places both chunks, so their position there is behaviour.
 
 use super::checkout::pr_checkout_disabled;
+use super::comment_external::external_editor_disabled;
 use super::commit_view::review_commit_disabled;
 use super::conversation::{conversation_disabled, page_disabled};
 use super::discussion_write::{general_comment_disabled, thread_write_disabled};
@@ -663,6 +664,16 @@ pub(crate) static REVIEW_COMMENT_KEYS: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "review_comment.edit_externally",
+        keys: &[KeyPattern::exact(KeyCode::Char('e'), KeyModifiers::CONTROL)],
+        scope: KeyScope::ReviewComment,
+        intent: AppIntent::Review(ReviewIntent::EditCommentExternally),
+        description: "Write the comment in your editor; closing it saves, as ctrl-s does",
+        label: "editor",
+        bar: true,
+        disabled: external_editor_disabled,
+    },
+    Binding {
         id: "review_comment.cancel",
         keys: &[KeyPattern::any(KeyCode::Esc)],
         scope: KeyScope::ReviewComment,
@@ -971,14 +982,18 @@ mod tests {
             let id = owner(focus, quit).unwrap();
             assert!(id.ends_with(".quit") && REPO_LOCKED.contains(&id), "{id}");
         }
-        // In the composer these are typed, and ctrl-e is left for later.
+        // In the composer these are typed, and ctrl-e opens the editor.
         let comment = KeyScope::ReviewComment;
         assert_eq!(comment.bar_note(), Some("q and ? are typed"));
         let enter = KeyPress::new(KeyCode::Enter, KeyModifiers::NONE);
-        let ctrl_e = KeyPress::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
-        for key in [enter, plain('q'), plain('?'), plain('a'), ctrl_e] {
+        for key in [enter, plain('q'), plain('?'), plain('a'), plain('e')] {
             assert_eq!(owner(comment, key), None, "{key:?}");
         }
+        let ctrl_e = KeyPress::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        assert_eq!(
+            owner(comment, ctrl_e),
+            Some("review_comment.edit_externally")
+        );
         let ctrl_s = KeyPress::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
         assert_eq!(owner(comment, ctrl_s), Some("review_comment.save"));
         assert_eq!(
@@ -1002,6 +1017,25 @@ mod tests {
         ] {
             assert!(!REPO_LOCKED.contains(&id), "{id}");
         }
+    }
+
+    #[test]
+    fn ctrl_e_opens_the_editor_in_every_composer_and_is_locked() {
+        let ctrl_e = KeyPress::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        let binding = registry()
+            .iter()
+            .find(|b| b.id == "review_comment.edit_externally")
+            .unwrap();
+        // Matched by scope, which every composer kind shares.
+        assert_eq!(binding.scope, KeyScope::ReviewComment);
+        assert!(binding.matches(ctrl_e));
+        assert_eq!(
+            binding.intent,
+            AppIntent::Review(ReviewIntent::EditCommentExternally)
+        );
+        assert_eq!((binding.label, binding.bar), ("editor", true));
+        // It runs a program the user picked, so a repo file may not move it.
+        assert!(REPO_LOCKED.contains(&binding.id));
     }
 
     #[test]

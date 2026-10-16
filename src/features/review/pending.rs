@@ -652,8 +652,8 @@ pub(crate) mod tests {
         assert_eq!(press(&mut state, KeyCode::Enter), []);
         assert_eq!(state.key_focus(), KeyScope::ReviewComment);
         type_text(&mut state, "h");
-        // Control characters, and ctrl-e, type nothing.
-        assert_eq!(ctrl(&mut state, 'e'), []);
+        // Control characters, and ctrl keys, type nothing.
+        assert_eq!(ctrl(&mut state, 'x'), []);
         assert_eq!(press(&mut state, KeyCode::Char('\u{1b}')), []);
         type_text(&mut state, "i");
         let effects = ctrl(&mut state, 's');

@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 
+use super::comment_external::{CommentEditError, ComposerStamp, EditedComment};
 use super::git::CheckoutPlan;
 use super::{CommitsHere, PrCommit, PrFileRow};
 use crate::effect::Tag;
@@ -153,6 +154,14 @@ pub(crate) enum ReviewIntent {
     SaveComment,
     /// Close the composer, asking first when it holds text.
     EscapeComment,
+    /// Write the comment in the user's editor; closing it saves.
+    EditCommentExternally,
+    /// The editor opened for the composer `stamp` names closed: the text
+    /// it left, or why there is none.
+    CommentEdited {
+        stamp: ComposerStamp,
+        result: Result<EditedComment, CommentEditError>,
+    },
     /// The yes of "Discard this comment?".
     DiscardComment,
     /// Write a reply to the thread the reader shows.
