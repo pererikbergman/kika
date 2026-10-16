@@ -664,6 +664,45 @@ mod tests {
         assert!(state.review.composer.is_some());
     }
 
+    #[test]
+    fn ctrl_e_on_a_summary_comes_back_to_the_submit_question_and_never_sends() {
+        use crate::features::review::comment_external::EditedComment;
+        use crate::handoff::{HandOff, KeptFile};
+        let mut state = reviewing();
+        pick(&mut state, 1);
+        type_text(&mut state, "draft");
+        let effects = ctrl(&mut state, 'e');
+        let [Effect::HandOff(HandOff::EditReviewComment { initial, stamp })] = effects.as_slice()
+        else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(initial, "draft");
+        let dir = std::path::PathBuf::from("/tmp/kika-comment-1-submit");
+        let file = KeptFile {
+            path: dir.join("kika-comment-1-submit.md"),
+            dir,
+        };
+        let effects = state.update(AppIntent::Review(ReviewIntent::CommentEdited {
+            stamp: stamp.clone(),
+            result: Ok(EditedComment {
+                text: "Needs tests".into(),
+                file: file.clone(),
+            }),
+        }));
+        // Only the file is removed: nothing goes to GitHub until `y`.
+        assert_eq!(effects, [Effect::RemoveCommentFile(file)]);
+        assert_eq!(state.review.writing, None);
+        assert_eq!(
+            question_text(&state).as_deref(),
+            Some("Submit review (Request changes) on #12 with 2 comments to GitHub? (y/n)")
+        );
+        let (_, _, write) = sent(&type_char(&mut state, 'y'));
+        let DiscussionWrite::SubmitReview { body, threads, .. } = write else {
+            panic!("{write:?}");
+        };
+        assert_eq!((body.as_str(), threads), ("Needs tests", drafts()));
+    }
+
     fn draw(state: &AppState) -> Vec<String> {
         let (width, height) = state.size;
         let mut terminal =

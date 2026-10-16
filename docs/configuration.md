@@ -1970,9 +1970,14 @@ lines changed still read `outdated`.
 Every other key is typed into the comment: `enter` is a new line, and `q`
 and `?` are typed.
 
+`ctrl-e` opens the comment in the editor git uses (`GIT_EDITOR`,
+`core.editor`, `VISUAL`, `EDITOR`, then git's default), and closing it
+counts as `ctrl-s`.
+
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
 | `review_comment.save` | `ctrl-s` | Keep a line comment in the pending review, or ask to post a reply or general comment | |
+| `review_comment.edit_externally` | `ctrl-e` | Write the comment in your editor; closing it saves, as ctrl-s does | locked |
 | `review_comment.cancel` | `esc` | Close the comment, asking first when it has text | |
 | `review_comment.quit` | `ctrl-c` | Quit Kika | locked |
 

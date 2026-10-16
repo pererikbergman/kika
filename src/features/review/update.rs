@@ -82,6 +82,10 @@ pub(crate) fn update(state: &mut AppState, intent: ReviewIntent) -> Vec<Effect> 
         ReviewIntent::TypeComment(key) => state.type_comment(key),
         ReviewIntent::SaveComment => return state.save_comment(),
         ReviewIntent::EscapeComment => state.escape_comment(),
+        ReviewIntent::EditCommentExternally => return state.edit_comment_externally(),
+        ReviewIntent::CommentEdited { stamp, result } => {
+            return state.comment_edited(stamp, result);
+        }
         ReviewIntent::DiscardComment => state.discard_comment(),
         ReviewIntent::ReplyToThread => state.reply_to_thread(),
         ReviewIntent::ToggleThreadResolved => return state.toggle_thread_resolved(),
