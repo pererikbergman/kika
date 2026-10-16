@@ -33,6 +33,7 @@ pub(crate) fn update(state: &mut AppState, intent: BranchesIntent) -> Vec<Effect
         BranchesIntent::UnsetUpstream => return state.unset_upstream(),
         BranchesIntent::Next => return state.move_branch(1),
         BranchesIntent::Prev => return state.move_branch(-1),
+        BranchesIntent::MoveBy(delta) => return state.move_branch(delta),
         BranchesIntent::Checkout => return state.checkout_branch(),
         BranchesIntent::New => state.ask_branch_name(PromptKind::NewBranch),
         BranchesIntent::Rename => state.ask_branch_name(PromptKind::RenameBranch),
@@ -462,6 +463,23 @@ mod tests {
         let state = with_branches();
         assert_eq!(state.panel_focus(), KeyScope::Branches);
         assert_eq!(state.key_focus(), KeyScope::Branches);
+    }
+
+    #[test]
+    fn move_by_steps_through_the_shown_branches_with_one_log_load() {
+        let mut state = with_branches();
+        let effects = state.update(AppIntent::Branches(BranchesIntent::MoveBy(5)));
+        assert_eq!(selected_name(&state), "wip", "clamped at the end");
+        assert!(log_load(&effects).is_some(), "{effects:?}");
+        assert_eq!(
+            state.update(AppIntent::Branches(BranchesIntent::MoveBy(1))),
+            vec![]
+        );
+
+        state.branches.list.set_filter("p".into());
+        let effects = state.update(AppIntent::Branches(BranchesIntent::MoveBy(-5)));
+        assert_eq!(selected_name(&state), "topic", "main is hidden");
+        assert!(log_load(&effects).is_some(), "{effects:?}");
     }
 
     #[test]

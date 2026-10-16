@@ -21,7 +21,8 @@
 //! - the handlers in `update.rs`, `reload_stashes` among them (core
 //!   reload in `reload.rs`, `refs_loaded` and `test_support` call it), and
 //!   `files_open`;
-//! - `effects::{load, load_files}` and `view::render_stash_panel`.
+//! - `effects::{load, load_files}` and `view::render_stash_panel`, and the
+//!   mouse's queries `stash_list_shown` and `stash_step_to` (`view.rs`).
 //!
 //! Kept cross-feature reads:
 //! - stashing from the Files panel reads `files` and `files_marked()`,

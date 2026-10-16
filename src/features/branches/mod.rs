@@ -40,7 +40,8 @@
 //!   rename_command, delete_command, set_upstream_command,
 //!   unset_upstream_command}`;
 //! - `effects::{load, load_log}`;
-//! - `view::{render_panel, render_log, RowMarks}`.
+//! - `view::{render_panel, render_log, RowMarks}`, and the mouse's
+//!   queries `branches_list_shown` and `branches_step_to` (`view.rs`).
 //!
 //! Kept cross-feature reads and calls:
 //! - `branches_loaded` writes `forge`'s branch names, and asks core

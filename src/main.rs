@@ -27,6 +27,7 @@ mod list_filter;
 mod list_input;
 mod menu;
 mod model;
+mod mouse;
 mod notice;
 mod op;
 mod op_slot;
@@ -137,6 +138,18 @@ fn main() -> color_eyre::Result<ExitCode> {
     // Focus-in is a cue that the repository may have changed elsewhere.
     // A terminal that cannot report focus still has the timers.
     let _ = execute!(std::io::stdout(), EnableFocusChange);
+    // `[display] mouse`, read once: capture costs the terminal's own text
+    // selection, so it can be turned off.
+    let mouse = config.mouse;
+    if mouse {
+        let _ = execute!(std::io::stdout(), app::EnableClickReports);
+        // A panic must not leave the shell receiving mouse reports.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = execute!(std::io::stdout(), app::DisableClickReports);
+            hook(info);
+        }));
+    }
     let result = runtime.block_on(app::run(
         terminal,
         state,
@@ -146,6 +159,9 @@ fn main() -> color_eyre::Result<ExitCode> {
         global_config,
         config,
     ));
+    if mouse {
+        let _ = execute!(std::io::stdout(), app::DisableClickReports);
+    }
     let _ = execute!(std::io::stdout(), DisableFocusChange);
     ratatui::restore();
     // Quitting interrupts git, but a process that ignores it must not keep

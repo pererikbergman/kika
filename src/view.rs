@@ -228,7 +228,7 @@ pub(crate) struct PanelLook {
 }
 
 impl PanelLook {
-    fn of(state: &AppState, panel: Panel, area: Rect) -> Self {
+    pub(crate) fn of(state: &AppState, panel: Panel, area: Rect) -> Self {
         let focused = state.focus.panel() == panel;
         let mode = match state.screen_mode.note() {
             Some(note) if focused => format!(" · {note}"),
@@ -1215,9 +1215,28 @@ pub(crate) fn scrolled(shown: &[usize], selected: Option<usize>, rows: usize) ->
     let at = selected
         .and_then(|s| shown.iter().position(|&i| i == s))
         .unwrap_or(0);
-    let first = at.saturating_sub(rows.saturating_sub(1));
-    let end = shown.len().min(first + rows);
-    &shown[first.min(end)..end]
+    let first = scroll_start(shown.len(), at, rows);
+    &shown[first..shown.len().min(first + rows)]
+}
+
+/// The first of `shown_len` rows a window of `rows` draws, scrolled just
+/// enough to keep the row at position `at` in view. Shared with the mouse
+/// hit-test, so a click lands on the row drawn under it.
+pub(crate) fn scroll_start(shown_len: usize, at: usize, rows: usize) -> usize {
+    at.saturating_sub(rows.saturating_sub(1)).min(shown_len)
+}
+
+/// The move from `selected` to the row drawn on `line` of a window of
+/// `rows` over `shown`, as `scrolled` draws it; `None` below the last row.
+pub(crate) fn scrolled_step_to(
+    shown: &[usize],
+    selected: usize,
+    rows: usize,
+    line: usize,
+) -> Option<isize> {
+    let at = shown.iter().position(|&i| i == selected).unwrap_or(0);
+    let pos = scroll_start(shown.len(), at, rows) + line;
+    (line < rows && pos < shown.len()).then(|| pos as isize - at as isize)
 }
 
 /// Row `i` drawn as the cursor or a range row: both reversed, and within a

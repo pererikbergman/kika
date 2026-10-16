@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -77,6 +77,8 @@ pub async fn run(
     #[cfg(unix)]
     spawn_interrupt_listener(tx.clone())?;
     spawn_input_listener(tx.clone(), Arc::clone(&input));
+    // Read once by `main`, which turned capture on to match.
+    let mouse = config.mouse;
     state.watch.fetch_enabled = config.watch.fetch.is_some();
     state.commit_hooks_detached = config.commit_hooks_detached;
     // Read by `main` for this repository, so it always applies.
@@ -100,7 +102,7 @@ pub async fn run(
             // Editors run where git does, so relative names mean the same
             // to both, inside an entered submodule too.
             let workdir = runner.workdir();
-            suspend_and_run(terminal, &input, job, runner.as_ref(), &workdir)
+            suspend_and_run(terminal, &input, job, runner.as_ref(), &workdir, mouse)
         },
     )
     .await
@@ -205,18 +207,20 @@ pub fn dispatch(state: &mut AppState, runtime: &Runtime, intent: AppIntent) -> V
 
 /// Give the terminal to `job` and take it back, fully redrawn. Input is
 /// paused throughout so no key meant for the other process is read here.
+/// With `mouse` on, capture is released for the job and taken back after.
 fn suspend_and_run(
     terminal: &mut DefaultTerminal,
     input: &InputGate,
     job: HandOff,
     runner: &dyn GitRunner,
     workdir: &Path,
+    mouse: bool,
 ) -> io::Result<AppIntent> {
     // Everything below blocks; tell tokio so other tasks move elsewhere.
     tokio::task::block_in_place(|| {
         let _paused = input.pause();
         let intent = {
-            let _restore = Suspended::enter()?;
+            let _restore = Suspended::enter(mouse)?;
             let _sigint = CatchInterrupts::new()?;
             handoff::execute(job, runner, workdir)
         };
@@ -231,35 +235,85 @@ fn suspend_and_run(
 }
 
 /// The terminal as it was before Kika took it: cooked mode, main screen,
-/// cursor shown. Dropping it takes the terminal back, even on a panic.
-struct Suspended;
+/// cursor shown, no mouse capture. Dropping it takes the terminal back,
+/// even on a panic. `mouse` says whether Kika captures the mouse.
+struct Suspended {
+    mouse: bool,
+}
 
 impl Suspended {
-    fn enter() -> io::Result<Self> {
-        let guard = Suspended;
+    fn enter(mouse: bool) -> io::Result<Self> {
+        let guard = Suspended { mouse };
         terminal::disable_raw_mode()?;
-        // The other process would read focus reports as typed text.
-        execute!(
-            io::stdout(),
-            DisableFocusChange,
-            LeaveAlternateScreen,
-            cursor::Show
-        )?;
+        leave_screen(&mut io::stdout(), mouse)?;
         Ok(guard)
     }
 }
 
 impl Drop for Suspended {
     fn drop(&mut self) {
+        // A panic in the hand-off is on its way out of Kika: leave the
+        // terminal released, mouse capture off, rather than take it back.
+        if std::thread::panicking() {
+            return;
+        }
         // Nothing to do with an error here: the next draw shows what is left.
-        let _ = execute!(
-            io::stdout(),
-            EnterAlternateScreen,
-            cursor::Hide,
-            EnableFocusChange
-        );
+        let _ = take_screen(&mut io::stdout(), self.mouse);
         let _ = terminal::enable_raw_mode();
     }
+}
+
+/// Turn on mouse reports for presses and the wheel only, SGR encoded:
+/// Kika reads nothing else, and with no motion or drag reports none can be
+/// left queued for the next process to read as typed text.
+pub(crate) struct EnableClickReports;
+
+/// Turn off what [`EnableClickReports`] turned on.
+pub(crate) struct DisableClickReports;
+
+/// Press and release reports (wheel included), then SGR coordinates.
+const CLICK_REPORTS_ON: &str = "\x1b[?1000h\x1b[?1006h";
+const CLICK_REPORTS_OFF: &str = "\x1b[?1006l\x1b[?1000l";
+
+impl crossterm::Command for EnableClickReports {
+    fn write_ansi(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
+        f.write_str(CLICK_REPORTS_ON)
+    }
+
+    /// The legacy console has only all-or-nothing mouse input.
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> io::Result<()> {
+        crossterm::Command::execute_winapi(&crossterm::event::EnableMouseCapture)
+    }
+}
+
+impl crossterm::Command for DisableClickReports {
+    fn write_ansi(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
+        f.write_str(CLICK_REPORTS_OFF)
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> io::Result<()> {
+        crossterm::Command::execute_winapi(&crossterm::event::DisableMouseCapture)
+    }
+}
+
+/// Hand the screen to another process: the other process would read
+/// focus reports and mouse reports as typed text, so both stop.
+fn leave_screen(out: &mut impl Write, mouse: bool) -> io::Result<()> {
+    if mouse {
+        execute!(out, DisableClickReports)?;
+    }
+    execute!(out, DisableFocusChange, LeaveAlternateScreen, cursor::Show)
+}
+
+/// Take the screen back from another process, reports on again.
+fn take_screen(out: &mut impl Write, mouse: bool) -> io::Result<()> {
+    execute!(out, EnterAlternateScreen, cursor::Hide, EnableFocusChange)?;
+    if mouse {
+        execute!(out, EnableClickReports)?;
+    }
+    Ok(())
 }
 
 /// For the length of a hand-off, Ctrl+C in the cooked terminal reaches
@@ -496,6 +550,68 @@ fn lock(mutex: &Mutex<()>) -> MutexGuard<'_, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bytes `execute!` writes for one command.
+    fn bytes_of(command: impl crossterm::Command) -> Vec<u8> {
+        let mut out = Vec::new();
+        execute!(out, command).unwrap();
+        out
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn mouse_reports_are_presses_and_the_wheel_only_in_sgr() {
+        assert_eq!(bytes_of(EnableClickReports), b"\x1b[?1000h\x1b[?1006h");
+        assert_eq!(bytes_of(DisableClickReports), b"\x1b[?1006l\x1b[?1000l");
+        // Never motion (1003) or drag (1002) tracking.
+        let on = bytes_of(EnableClickReports);
+        assert!(!contains(&on, b"1002") && !contains(&on, b"1003"), "{on:?}");
+    }
+
+    #[test]
+    fn a_hand_off_releases_mouse_capture_and_takes_it_back_after() {
+        let (mut left, mut taken) = (Vec::new(), Vec::new());
+        leave_screen(&mut left, true).unwrap();
+        take_screen(&mut taken, true).unwrap();
+        assert!(contains(&left, &bytes_of(DisableClickReports)), "{left:?}");
+        assert!(contains(&left, &bytes_of(DisableFocusChange)), "{left:?}");
+        assert!(!contains(&left, &bytes_of(EnableClickReports)), "{left:?}");
+        assert!(contains(&taken, &bytes_of(EnableClickReports)), "{taken:?}");
+        assert!(contains(&taken, &bytes_of(EnableFocusChange)), "{taken:?}");
+        assert!(
+            !contains(&taken, &bytes_of(DisableClickReports)),
+            "{taken:?}"
+        );
+    }
+
+    #[test]
+    fn with_the_mouse_off_a_hand_off_writes_no_mouse_codes() {
+        let (mut left, mut taken) = (Vec::new(), Vec::new());
+        leave_screen(&mut left, false).unwrap();
+        take_screen(&mut taken, false).unwrap();
+        for out in [&left, &taken] {
+            assert!(!contains(out, &bytes_of(DisableClickReports)), "{out:?}");
+            assert!(!contains(out, &bytes_of(EnableClickReports)), "{out:?}");
+        }
+        // The rest of the hand-off is unchanged.
+        let expected_left = [
+            bytes_of(DisableFocusChange),
+            bytes_of(LeaveAlternateScreen),
+            bytes_of(cursor::Show),
+        ]
+        .concat();
+        assert_eq!(left, expected_left);
+        let expected_taken = [
+            bytes_of(EnterAlternateScreen),
+            bytes_of(cursor::Hide),
+            bytes_of(EnableFocusChange),
+        ]
+        .concat();
+        assert_eq!(taken, expected_taken);
+    }
 
     #[tokio::test]
     async fn dispatch_returns_hand_offs_instead_of_spawning_them() {

@@ -8,9 +8,12 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use super::{BranchesPanel, BranchesTab};
 use crate::features::branches::{remotes, tags};
+use crate::layout::SidePanel;
+use crate::model::AppState;
 use crate::rows::{DIFF_MARK, clock, diff_mark_style};
 use crate::view::{
-    PanelLook, clip, elide_right, fit, list_title, no_matches, pad, range_row, scrolled, width_of,
+    PanelLook, clip, elide_right, fit, list_title, no_matches, pad, range_row, scrolled,
+    scrolled_step_to, width_of,
 };
 use kika_forge::forge::{Words, cli_text, words};
 use kika_forge::{CiState, ForgeState, ForgeStatus, ForgeView, PrBadge, PrState};
@@ -18,6 +21,30 @@ use kika_git::branches::{Branch, BranchName, LogRow, Track};
 
 /// Columns given to a log row's author, so subjects line up.
 const LOG_AUTHOR: usize = 16;
+
+impl AppState {
+    /// Whether the Branches panel lists its local branches, expanded:
+    /// what a click or the wheel can move through.
+    pub(crate) fn branches_list_shown(&self) -> bool {
+        let list = &self.branches.list;
+        self.expanded == SidePanel::Branches
+            && self.branches.tab == BranchesTab::Local
+            && list.error.is_none()
+            && list.loaded
+            && !list.visible().is_empty()
+    }
+
+    /// The move from the cursor to the branch drawn on `line` of the
+    /// listed panel's `rows` inner lines; `None` below the last branch or
+    /// when the panel lists no local branches. `rows` is used as drawn,
+    /// unclamped (Stash clamps to 1 in both places instead).
+    pub(crate) fn branches_step_to(&self, line: usize, rows: usize) -> Option<isize> {
+        let list = &self.branches.list;
+        self.branches_list_shown()
+            .then(|| scrolled_step_to(&list.visible(), list.selected, rows, line))
+            .flatten()
+    }
+}
 
 /// The branch list: why it failed, a placeholder until the first load,
 /// or one row per branch with the selection reversed. Collapsed, the
