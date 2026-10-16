@@ -1,0 +1,6 @@
+HTTP/2.0 200 OK
+Content-Type: application/json; charset=utf-8
+Ratelimit-Remaining: 1996
+Ratelimit-Reset: 1700000060
+
+{"data":{"createNote":{"note":{"id":"gid://gitlab/DiffNote/13","body":"\u001b[31mLooks \"fine\"\u001b[0m"},"errors":[]}}}

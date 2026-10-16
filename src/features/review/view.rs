@@ -56,7 +56,7 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
             None => Vec::new(),
         },
         ReviewScreen::Conversation(_) => {
-            let lines = super::conversation_view::conversation_view(review, inner);
+            let lines = super::conversation_view::conversation_view(review, words, inner);
             frame.render_widget(Paragraph::new(lines), inner);
             // A general comment is typed over it.
             super::pending_view::render_pending(&state.palette, review, words, frame, inner);
@@ -72,7 +72,10 @@ pub fn problem_text(problem: ReviewProblem, words: &Words) -> (String, Option<St
     match problem {
         ReviewProblem::NoForgeHost => (
             NO_FORGE.to_string(),
-            Some("Add its host to [forge] github, or its owner to [forge.allow].".into()),
+            Some(format!(
+                "Add its host to [forge] {}, or its owner to [forge.allow].",
+                words.host_key
+            )),
         ),
         ReviewProblem::Limited(until) => (
             format!("{name} is rate limited until {} UTC", clock(until)),
@@ -361,7 +364,7 @@ fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rec
                         &no_threads
                     }
                 };
-                let scope = ThreadScope::of(files, discussion);
+                let scope = ThreadScope::of(files, discussion).in_words(state.review_words());
                 let mut threads = scope.file_threads(&row.file.path, None);
                 // Numbered once a frame, for the shown file only, and only
                 // when it has a thread on a line or a comment to mark.
@@ -396,7 +399,16 @@ fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rec
     frame.render_widget(body.block(block), diff);
     if let Some(reader) = &files.reader {
         let discussion = state.review.discussion.as_ref();
-        super::reader_view::render_reader(&state.palette, files, discussion, reader, frame, inner);
+        let words = state.review_words();
+        super::reader_view::render_reader(
+            &state.palette,
+            files,
+            discussion,
+            reader,
+            words,
+            frame,
+            inner,
+        );
     }
     super::pending_view::render_pending(&state.palette, &state.review, words, frame, inner);
 }
@@ -1011,6 +1023,12 @@ mod tests {
         assert!(contains(&rows, "GitLab could not be reached"), "{rows:#?}");
         assert!(!rows.iter().any(|r| r.contains("GitHub")), "{rows:#?}");
         let gitlab = kika_forge::forge::words(kika_forge::url::ForgeKind::GitLab);
+        assert_eq!(
+            problem_text(ReviewProblem::NoForgeHost, gitlab)
+                .1
+                .as_deref(),
+            Some("Add its host to [forge] gitlab_ask, or its owner to [forge.allow].")
+        );
         let text = |status| problem_text(ReviewProblem::Status(status), gitlab);
         assert_eq!(
             text(ForgeStatus::NotLoggedIn),
@@ -1285,7 +1303,7 @@ mod tests {
             (FilesStage::Listing, "Loading files…"),
             (FilesStage::Fetching, "Fetching PR head…"),
             (
-                FilesStage::Failed(crate::features::review::files::NO_FETCH_REMOTE.into()),
+                FilesStage::Failed(crate::features::review::files::tests::NO_FETCH_REMOTE.into()),
                 "PR head is not here",
             ),
         ] {

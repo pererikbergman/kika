@@ -1,8 +1,10 @@
-//! Marking the selected file viewed, or not viewed, on GitHub from the
-//! files screen. GitHub keeps the mark per file for the whole pull
-//! request. It is asked only on the key, one mark at a time, and only on
+//! Marking the selected file viewed, or not viewed, on the forge from
+//! the files screen. GitHub keeps the mark per file for the whole pull
+//! request; GitLab has no such mark, so `v` there answers that it is not
+//! available. It is asked only on the key, one mark at a time, and only on
 //! a host the global config lists and `[forge.allow]` allows.
 
+use super::discussion_write::no_pr_id;
 use super::files::{PrFile, ViewedMark, files_screen};
 use crate::effect::{Effect, Tag};
 use crate::keymap::Reason;
@@ -13,7 +15,6 @@ use kika_forge::{CreateError, ForgeHost, ForgeRepo};
 const NO_FILE: &str = "Select a file first";
 const MARKING: &str = "Already marking";
 const NOT_UTF8: &str = "Kika cannot mark a file whose name is not UTF-8";
-const NO_NODE_ID: &str = "GitHub sent no pull request id; refresh with r";
 
 /// Why `v` cannot mark the selected file now.
 pub(crate) fn review_viewed_disabled(state: &AppState) -> Option<Reason> {
@@ -54,7 +55,7 @@ impl AppState {
             .as_ref()
             .filter(|d| d.number == files.number)
             .and_then(|d| d.node_id.clone())
-            .ok_or(NO_NODE_ID)?;
+            .ok_or_else(|| no_pr_id(self.review_words()))?;
         let (host, repo) = self.review_forge_target()?;
         Ok(Target {
             host,
@@ -175,6 +176,7 @@ mod tests {
     use crossterm::event::KeyCode;
 
     use super::*;
+    use crate::features::review::discussion_write::tests::NO_PR_ID as NO_NODE_ID;
     use crate::features::review::files::FilesStage;
     use crate::features::review::git::{CommitsHere, FileCounts, PrFileRow};
     use crate::features::review::state::NO_FORGE;

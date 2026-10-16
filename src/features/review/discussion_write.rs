@@ -14,13 +14,11 @@ use crate::effect::{Effect, Tag};
 use crate::keymap::Reason;
 use crate::model::AppState;
 use kika_forge::discussion_write::{DiscussionWrite, Written};
-use kika_forge::forge::Words;
-use kika_forge::review::node_id_ok;
+use kika_forge::forge::{Words, write_id_ok};
 use kika_forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
 
 pub(super) const POSTING: &str = "Already posting";
 const NO_THREAD: &str = "Open a review thread first";
-const NO_THREAD_ID: &str = "GitHub sent no id for this thread; refresh with r";
 const NOT_CONVERSATION: &str = "Open the conversation first (C)";
 const GONE: &str = "That thread is no longer shown; refresh with r";
 // The warning leads, so a narrow bar keeps it.
@@ -30,6 +28,10 @@ const MAYBE_SUBMITTED: &str = "May have been posted - check before submitting ag
 /// Why nothing may change while a write is on its way to the forge.
 pub(super) fn wait(words: &Words) -> String {
     format!("Wait for {} to answer", words.name)
+}
+
+fn no_thread_id(words: &Words) -> String {
+    format!("{} sent no id for this thread; refresh with r", words.name)
 }
 
 pub(super) fn no_pr_id(words: &Words) -> String {
@@ -46,7 +48,7 @@ fn offline(words: &Words) -> String {
     )
 }
 
-/// The one write in flight: its sequence, the pull request it is on and
+/// The one write in flight: its sequence, the request it is on and
 /// what was sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscussionWriting {
@@ -72,7 +74,7 @@ pub(crate) fn thread_write_disabled(state: &AppState) -> Option<Reason> {
 }
 
 /// Why `a` on the conversation cannot start a comment: it is not shown,
-/// or GitHub sent no id for the pull request.
+/// or the forge sent no id for the request.
 pub(crate) fn general_comment_disabled(state: &AppState) -> Option<Reason> {
     state.general_subject().err()
 }
@@ -120,7 +122,10 @@ impl AppState {
         if self.review.writing.is_some() {
             return Err(POSTING.into());
         }
-        let node_id = thread.node_id.clone().ok_or(NO_THREAD_ID)?;
+        let node_id = thread
+            .node_id
+            .clone()
+            .ok_or_else(|| no_thread_id(self.review_words()))?;
         let (host, repo) = self.review_forge_target()?;
         Ok(ThreadTarget {
             host,
@@ -132,19 +137,22 @@ impl AppState {
         })
     }
 
-    /// The conversation's pull request number and node id.
+    /// The conversation's request number and node id.
     fn general_subject(&self) -> Result<(u64, String), Reason> {
         let ReviewScreen::Conversation(number) = self.review.screen else {
             return Err(NOT_CONVERSATION.into());
         };
-        let subject = self
-            .review
+        Ok((number, self.request_node_id(number)?))
+    }
+
+    /// The node id of request `number`, from its loaded detail.
+    fn request_node_id(&self, number: u64) -> Result<String, Reason> {
+        self.review
             .detail
             .as_ref()
             .filter(|d| d.number == number)
             .and_then(|d| d.node_id.clone())
-            .ok_or_else(|| no_pr_id(self.review_words()))?;
-        Ok((number, subject))
+            .ok_or_else(|| no_pr_id(self.review_words()).into())
     }
 
     /// `a` in the reader: the composer, for a reply to the thread shown.
@@ -156,10 +164,11 @@ impl AppState {
                 return;
             }
         };
+        let words = self.review_words();
         let (Some(files), Some(discussion)) = (files_screen(self), &self.review.discussion) else {
             return;
         };
-        let label = thread_label(files, discussion, target.index);
+        let label = thread_label(files, discussion, target.index, words);
         self.review.composer = Some(Composer::new(ComposerKind::Reply {
             number: target.number,
             thread: target.node_id,
@@ -209,7 +218,7 @@ impl AppState {
         self.send_write(target.host, target.repo, target.number, write, notice)
     }
 
-    /// The `y` of "Post this … to GitHub?": post the composer's text,
+    /// The `y` of "Post this … to the forge?": post the composer's text,
     /// checked again, as a reply or a general comment.
     pub(crate) fn post_comment(&mut self) -> Vec<Effect> {
         match self.post_target() {
@@ -229,7 +238,7 @@ impl AppState {
     }
 
     /// What the composer would post now, or why not: no write runs, its
-    /// pull request and target are still shown, the host may be asked, and
+    /// request and target are still shown, the host may be asked, and
     /// the text is a comment's.
     fn post_target(&mut self) -> Result<(ForgeHost, ForgeRepo, u64, DiscussionWrite), Reason> {
         if self.review.writing.is_some() {
@@ -238,7 +247,8 @@ impl AppState {
         let Some(composer) = self.review.composer.clone() else {
             return Err(GONE.into());
         };
-        let number = match &composer.kind {
+        let kind = self.review_forge_kind();
+        let (number, reply_subject) = match &composer.kind {
             ComposerKind::Reply { number, thread, .. } => {
                 let known = files_screen(self).is_some_and(|f| f.number == *number)
                     && self.review.discussion.as_ref().is_some_and(|d| {
@@ -246,16 +256,16 @@ impl AppState {
                             .iter()
                             .any(|t| t.node_id.as_deref() == Some(thread.as_str()))
                     });
-                if !known || !node_id_ok(thread) {
+                if !known || !write_id_ok(kind, thread) {
                     return Err(GONE.into());
                 }
-                *number
+                (*number, Some(self.request_node_id(*number)?))
             }
             ComposerKind::General { number, subject } => {
                 if self.general_subject()? != (*number, subject.clone()) {
                     return Err(no_pr_id(self.review_words()).into());
                 }
-                *number
+                (*number, None)
             }
             ComposerKind::Review { number, event } => {
                 return self.submit_write(*number, *event, &composer.text.text());
@@ -266,10 +276,16 @@ impl AppState {
         let body = self
             .comment_body(&composer.text.text())
             .ok_or_else(|| self.notice.clone().unwrap_or_else(|| GONE.into()))?;
-        let write = match composer.kind {
-            ComposerKind::Reply { thread, .. } => DiscussionWrite::Reply { thread, body },
-            ComposerKind::General { subject, .. } => DiscussionWrite::Comment { subject, body },
-            ComposerKind::Line { .. } | ComposerKind::Review { .. } => return Err(GONE.into()),
+        let write = match (composer.kind, reply_subject) {
+            (ComposerKind::Reply { thread, .. }, Some(subject)) => DiscussionWrite::Reply {
+                thread,
+                subject,
+                body,
+            },
+            (ComposerKind::General { subject, .. }, _) => {
+                DiscussionWrite::Comment { subject, body }
+            }
+            _ => return Err(GONE.into()),
         };
         Ok((host, repo, number, write))
     }
@@ -300,7 +316,7 @@ impl AppState {
         }]
     }
 
-    /// GitHub answered a write. A post closes the composer and reads the
+    /// The forge answered a write. A post closes the composer and reads the
     /// discussion again, once; a submitted review also leaves the pending
     /// review; a resolve is applied where it is shown. A failure keeps the
     /// composer, its text and every pending comment. An answer to any other
@@ -383,7 +399,7 @@ impl AppState {
         }
     }
 
-    /// Show what GitHub took.
+    /// Show what the forge took.
     fn take_write(&mut self, number: u64, write: DiscussionWrite) -> Vec<Effect> {
         let shown = matches!(
             self.review.screen,
@@ -471,6 +487,7 @@ pub(crate) mod tests {
     const OFFLINE: &str = "GitHub could not be reached, or did not answer in time";
     const NO_ANSWER: &str = "GitHub did not answer";
     const NO_USABLE: &str = "GitHub gave no usable answer";
+    const NO_THREAD_ID: &str = "GitHub sent no id for this thread; refresh with r";
 
     const NOW: i64 = 1_700_000_000;
 
@@ -478,9 +495,11 @@ pub(crate) mod tests {
         ForgeHost::parse("github.com").unwrap()
     }
 
-    /// The reader open on cache.rs's unresolved thread 0 (`PRRT_kwDOA1`).
+    /// The reader open on cache.rs's unresolved thread 0 (`PRRT_kwDOA1`),
+    /// its detail's number matching, so a reply has the request's id.
     pub(crate) fn reading() -> AppState {
         let mut state = two_files();
+        state.review.detail.as_mut().unwrap().number = 12;
         type_char(&mut state, ']');
         press(&mut state, KeyCode::Enter);
         assert_eq!(reader(&state).shown(), Some(0));
@@ -609,6 +628,7 @@ pub(crate) mod tests {
             write,
             DiscussionWrite::Reply {
                 thread: "PRRT_kwDOA1".into(),
+                subject: "PR_kwDOA1".into(),
                 body: text.into(),
             }
         );
@@ -783,6 +803,7 @@ pub(crate) mod tests {
             |sent| {
                 sent.2 = DiscussionWrite::Reply {
                     thread: "PRRT_other".into(),
+                    subject: "PR_kwDOA1".into(),
                     body: "Done".into(),
                 }
             },
@@ -1252,5 +1273,124 @@ pub(crate) mod tests {
             draw_at(&mut reading(), width, height);
             draw_at(&mut conversing(), width, height);
         }
+    }
+
+    const DISCUSSION: &str = "gid://gitlab/Discussion/1111111111111111111111111111111111111111";
+    const MR: &str = "gid://gitlab/MergeRequest/4242";
+
+    /// `state` on a `gitlab_ask` host, with GitLab's ids on the request
+    /// and on the first thread.
+    fn gitlab_ids(state: AppState) -> AppState {
+        let mut state = crate::features::review::state::tests::on_gitlab(state);
+        state.review.detail.as_mut().unwrap().node_id = Some(MR.into());
+        if let Some(d) = state.review.discussion.as_mut() {
+            d.threads[0].node_id = Some(DISCUSSION.into());
+        }
+        state
+    }
+
+    /// The one write `effects` holds, sent to the GitLab host.
+    fn sent_to_gitlab(effects: &[Effect]) -> DiscussionWrite {
+        let [Effect::WriteDiscussion { host, write, .. }] = effects else {
+            panic!("expected one write, got {effects:?}");
+        };
+        assert_eq!(host.as_str(), "gitlab.example.com");
+        write.clone()
+    }
+
+    #[test]
+    fn on_gitlab_a_reply_to_a_discussion_carries_the_merge_requests_id() {
+        let mut state = gitlab_ids(reading());
+        assert_eq!(type_char(&mut state, 'a'), []);
+        type_text(&mut state, "Fixed");
+        assert_eq!(ctrl(&mut state, 's'), []);
+        assert_eq!(
+            question_text(&state).as_deref(),
+            Some("Post this reply to GitLab? (y/n)")
+        );
+        assert_eq!(
+            sent_to_gitlab(&type_char(&mut state, 'y')),
+            DiscussionWrite::Reply {
+                thread: DISCUSSION.into(),
+                subject: MR.into(),
+                body: "Fixed".into(),
+            }
+        );
+
+        // With no id on the detail, nothing is sent.
+        let mut state = gitlab_ids(reading());
+        assert_eq!(type_char(&mut state, 'a'), []);
+        type_text(&mut state, "Fixed");
+        ctrl(&mut state, 's');
+        state.review.detail.as_mut().unwrap().node_id = None;
+        assert_eq!(type_char(&mut state, 'y'), []);
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("GitLab sent no merge request id; refresh with r")
+        );
+        assert_eq!(state.review.writing, None);
+        assert!(state.review.composer.is_some());
+
+        // A GitHub-shaped thread id is not one GitLab makes.
+        let mut state = gitlab_ids(reading());
+        state.review.discussion.as_mut().unwrap().threads[0].node_id = Some("PRRT_kwDOA1".into());
+        assert_eq!(type_char(&mut state, 'a'), []);
+        type_text(&mut state, "Fixed");
+        ctrl(&mut state, 's');
+        assert_eq!(type_char(&mut state, 'y'), []);
+        assert_eq!(state.notice.as_deref(), Some(GONE));
+    }
+
+    #[test]
+    fn on_github_a_reply_with_no_request_id_is_refused() {
+        let mut state = reading();
+        assert_eq!(type_char(&mut state, 'a'), []);
+        type_text(&mut state, "Fixed");
+        ctrl(&mut state, 's');
+        state.review.detail.as_mut().unwrap().node_id = None;
+        assert_eq!(type_char(&mut state, 'y'), []);
+        assert_eq!(state.notice.as_deref(), Some(NO_PR_ID));
+    }
+
+    #[test]
+    fn on_gitlab_a_comment_and_a_resolve_are_sent_in_gitlabs_words() {
+        let mut state = gitlab_ids(conversing());
+        assert_eq!(type_char(&mut state, 'a'), []);
+        type_text(&mut state, "LGTM");
+        assert_eq!(ctrl(&mut state, 's'), []);
+        assert_eq!(
+            question_text(&state).as_deref(),
+            Some("Post this comment on !12 to GitLab? (y/n)")
+        );
+        let Some(Popup::Question(q)) = state.popups.last() else {
+            panic!("a question");
+        };
+        assert_eq!(q.title, "Post to GitLab");
+        assert_eq!(
+            sent_to_gitlab(&type_char(&mut state, 'y')),
+            DiscussionWrite::Comment {
+                subject: MR.into(),
+                body: "LGTM".into(),
+            }
+        );
+
+        let mut state = gitlab_ids(reading());
+        let effects = state.update(AppIntent::Review(ReviewIntent::ToggleThreadResolved));
+        assert_eq!(
+            sent_to_gitlab(&effects),
+            DiscussionWrite::Resolve {
+                thread: DISCUSSION.into(),
+                resolved: true,
+            }
+        );
+
+        // With no id on the thread, GitLab is named.
+        let mut state = gitlab_ids(reading());
+        state.review.discussion.as_mut().unwrap().threads[0].node_id = None;
+        assert_eq!(type_char(&mut state, 'a'), []);
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("GitLab sent no id for this thread; refresh with r")
+        );
     }
 }

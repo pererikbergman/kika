@@ -585,11 +585,17 @@ pub(super) fn refusal(body: &[u8]) -> Option<String> {
     if parts.is_empty() {
         return None;
     }
-    let text = terminal_safe(parts.join(": ").as_bytes());
-    Some(match text.char_indices().nth(MAX_REFUSAL) {
+    Some(refusal_text(&parts.join(": ")))
+}
+
+/// A forge's reason for a refusal as the user is shown it: terminal-safe
+/// and cut to [`MAX_REFUSAL`].
+pub(super) fn refusal_text(text: &str) -> String {
+    let text = terminal_safe(text.as_bytes());
+    match text.char_indices().nth(MAX_REFUSAL) {
         Some((cut, _)) => format!("{}…", &text[..cut]),
         None => text,
-    })
+    }
 }
 
 /// Pull requests asked per head ref name: one of another owner's forks

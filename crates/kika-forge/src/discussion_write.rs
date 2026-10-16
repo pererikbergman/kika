@@ -1,9 +1,10 @@
-//! Writing to a pull request's discussion on GitHub: a reply to a review
-//! thread, resolving or unresolving one, a general comment, and a whole
-//! review with its line comments, submitted in one step. Each is
-//! one GraphQL mutation of fixed text; the ids and the body travel only
-//! as variables on stdin, so argv is the fixed `gh api graphql` line
-//! whatever is written.
+//! Writing to a request's discussion: a reply to a review thread,
+//! resolving or unresolving one, a general comment, and a whole review
+//! with its line comments, submitted in one step. [`DiscussionWrite`] is
+//! what each forge adapter is asked; this file also holds GitHub's
+//! answer to it. On GitHub each write is one GraphQL mutation of fixed
+//! text; the ids and the body travel only as variables on stdin, so argv
+//! is the fixed `gh api graphql` line whatever is written.
 
 use std::io;
 
@@ -61,11 +62,15 @@ impl ReviewEvent {
 }
 
 /// One write the user asked for. `thread` is a review thread's node id
-/// and `subject` the pull request's.
+/// and `subject` the request's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiscussionWrite {
+    /// A reply carries the request's id too: GitLab names the noteable
+    /// even for a note in an existing discussion. GitHub's request leaves
+    /// it out.
     Reply {
         thread: String,
+        subject: String,
         body: String,
     },
     Resolve {
@@ -148,7 +153,7 @@ impl DiscussionWrite {
     fn sendable(&self) -> bool {
         let body_ok = |body: &str| !body.trim().is_empty() && body.len() <= MAX_BODY;
         match self {
-            DiscussionWrite::Reply { thread, body } => node_id_ok(thread) && body_ok(body),
+            DiscussionWrite::Reply { thread, body, .. } => node_id_ok(thread) && body_ok(body),
             DiscussionWrite::Resolve { thread, .. } => node_id_ok(thread),
             DiscussionWrite::Comment { subject, body } => node_id_ok(subject) && body_ok(body),
             DiscussionWrite::SubmitReview {
@@ -167,7 +172,7 @@ impl DiscussionWrite {
     /// The request body sent on stdin, and the field its answer is under.
     fn request(&self) -> (Value, &'static str) {
         match self {
-            DiscussionWrite::Reply { thread, body } => (
+            DiscussionWrite::Reply { thread, body, .. } => (
                 json!({ "query": REPLY, "variables": { "id": thread, "body": body } }),
                 "addPullRequestReviewThreadReply",
             ),
@@ -330,6 +335,7 @@ mod tests {
     fn reply() -> DiscussionWrite {
         DiscussionWrite::Reply {
             thread: THREAD.into(),
+            subject: PR.into(),
             body: BODY.into(),
         }
     }
@@ -446,14 +452,17 @@ mod tests {
         let cases = [
             DiscussionWrite::Reply {
                 thread: "PRRT kw".into(),
+                subject: PR.into(),
                 body: BODY.into(),
             },
             DiscussionWrite::Reply {
                 thread: THREAD.into(),
+                subject: PR.into(),
                 body: " \n\t ".into(),
             },
             DiscussionWrite::Reply {
                 thread: THREAD.into(),
+                subject: PR.into(),
                 body: long.clone(),
             },
             DiscussionWrite::Resolve {
