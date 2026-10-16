@@ -185,7 +185,7 @@ impl Glab<'_> {
 
     /// Run one call, shown in the Command log under its own id, and read
     /// its answer with `read`.
-    fn call<T>(
+    pub(crate) fn call<T>(
         &self,
         kind: GlabCall,
         read: impl FnOnce(Answer) -> Result<T, Refusal>,
@@ -250,7 +250,6 @@ fn request_body(repo: &ForgeRepo, batch: &[Head]) -> Vec<u8> {
 #[derive(Deserialize)]
 struct Response {
     data: Option<Data>,
-    errors: Option<Vec<serde::de::IgnoredAny>>,
 }
 
 #[derive(Deserialize)]
@@ -288,6 +287,20 @@ struct SourceProject {
 #[derive(Deserialize)]
 struct Pipeline {
     status: String,
+}
+
+/// What [`classify`] checks of any answer: no errors, and data naming a
+/// project. What the project holds is each reader's own concern.
+#[derive(Deserialize)]
+struct Probe {
+    data: Option<ProbeData>,
+    errors: Option<Vec<serde::de::IgnoredAny>>,
+}
+
+#[derive(Deserialize)]
+struct ProbeData {
+    /// Null when the project does not exist or the login cannot see it.
+    project: Option<serde::de::IgnoredAny>,
 }
 
 /// The only headers read; the rest are dropped unseen.
@@ -342,7 +355,7 @@ pub fn classify(output: io::Result<GhOutput>, now: i64) -> Answer {
     if !success {
         return Answer::Failed(ForgeStatus::Failed);
     }
-    let Ok(response) = serde_json::from_slice::<Response>(body) else {
+    let Ok(response) = serde_json::from_slice::<Probe>(body) else {
         return Answer::Failed(ForgeStatus::Failed);
     };
     if response.errors.is_some_and(|e| !e.is_empty()) {
@@ -350,8 +363,8 @@ pub fn classify(output: io::Result<GhOutput>, now: i64) -> Answer {
     }
     match response.data {
         None => Answer::Failed(ForgeStatus::Failed),
-        Some(Data { project: None }) => Answer::Failed(ForgeStatus::NoAccess),
-        Some(Data { project: Some(_) }) => Answer::Body {
+        Some(ProbeData { project: None }) => Answer::Failed(ForgeStatus::NoAccess),
+        Some(ProbeData { project: Some(_) }) => Answer::Body {
             etag: None,
             body: body.to_vec(),
         },

@@ -114,6 +114,11 @@ pub struct PrSummary {
 pub struct Queues([Vec<PrSummary>; 4]);
 
 impl Queues {
+    /// The queues from their lists, in [`QueueKind::ALL`] order.
+    pub(crate) fn from_lists(lists: [Vec<PrSummary>; 4]) -> Self {
+        Self(lists)
+    }
+
     pub fn get(&self, kind: QueueKind) -> &[PrSummary] {
         &self.0[kind.index()]
     }
@@ -464,14 +469,15 @@ struct QueuesData {
     q3: Option<Nodes<SearchNode>>,
 }
 
+/// A GraphQL connection's nodes; null ones are skipped.
 #[derive(Deserialize)]
-struct Nodes<T> {
+pub(crate) struct Nodes<T> {
     #[serde(default = "Vec::new")]
     nodes: Vec<Option<T>>,
 }
 
 impl<T> Nodes<T> {
-    fn items(self) -> impl Iterator<Item = T> {
+    pub(crate) fn items(self) -> impl Iterator<Item = T> {
         self.nodes.into_iter().flatten()
     }
 }

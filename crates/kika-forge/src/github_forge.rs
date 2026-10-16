@@ -24,7 +24,9 @@ impl GitHubForge<'_> {
     /// How GitHub is named to the user.
     pub const WORDS: Words = Words {
         cli: "gh",
+        request: "pull request",
         requests: "pull requests",
+        short: "PR",
         sign: '#',
     };
 

@@ -21,6 +21,7 @@ use crate::theme::Palette;
 use crate::view::width_of;
 use kika_forge::anchor::{GhSide, Placement, RowNumber, thread_span};
 use kika_forge::discussion::{PrDiscussion, ReviewThread};
+use kika_forge::forge::Words;
 use kika_git::diff::{DiffLine, LineKind};
 
 /// Body rows an unresolved comment shows inline before it is cut.
@@ -52,7 +53,7 @@ pub fn short_time(created: &str) -> String {
 }
 
 /// The detail screen's thread line, when the threads were asked for.
-pub fn thread_summary(review: &ReviewState) -> Option<String> {
+pub fn thread_summary(review: &ReviewState, words: &Words) -> Option<String> {
     let ReviewFetch { loading, error, .. } = &review.discussion_fetch;
     if *loading {
         return Some("Threads: loading…".into());
@@ -60,7 +61,7 @@ pub fn thread_summary(review: &ReviewState) -> Option<String> {
     if let Some(problem) = error {
         return Some(format!(
             "Threads: could not be read ({}), r to try again",
-            problem_text(*problem).0
+            problem_text(*problem, words).0
         ));
     }
     let discussion = review.discussion.as_ref()?;
@@ -506,6 +507,8 @@ pub fn thread_diff_body(
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    const GITHUB: &Words = &kika_forge::forge::GitHubForge::WORDS;
     use ratatui::style::Color;
 
     use super::*;
@@ -602,7 +605,7 @@ mod tests {
         }
         review.discussion = Some(discussion);
         assert_eq!(
-            thread_summary(&review).as_deref(),
+            thread_summary(&review, GITHUB).as_deref(),
             Some("Threads: 2 unresolved of 5 · 3 conversation comments")
         );
     }
@@ -949,23 +952,23 @@ mod tests {
     fn the_detail_counts_the_threads_or_says_it_waits_or_failed() {
         use crate::features::review::state::ReviewProblem;
         let mut review = ReviewState::default();
-        assert_eq!(thread_summary(&review), None);
+        assert_eq!(thread_summary(&review, GITHUB), None);
         review.discussion_fetch.loading = true;
         assert_eq!(
-            thread_summary(&review).as_deref(),
+            thread_summary(&review, GITHUB).as_deref(),
             Some("Threads: loading…")
         );
         review.discussion_fetch.loading = false;
         review.discussion_fetch.error =
             Some(ReviewProblem::Status(kika_forge::ForgeStatus::Offline));
         assert_eq!(
-            thread_summary(&review).as_deref(),
+            thread_summary(&review, GITHUB).as_deref(),
             Some("Threads: could not be read (GitHub could not be reached), r to try again")
         );
         review.discussion_fetch.error = None;
         review.discussion = Some(fixture_discussion());
         assert_eq!(
-            thread_summary(&review).as_deref(),
+            thread_summary(&review, GITHUB).as_deref(),
             Some("Threads: 2 unresolved of 5 · 1 addressed · 3 conversation comments")
         );
     }

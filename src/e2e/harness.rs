@@ -29,6 +29,7 @@ use crate::model::{AppState, Context};
 use crate::view;
 use kika_forge::ForgeHost;
 use kika_forge::github::FakeGh;
+use kika_forge::gitlab::FakeGlab;
 use kika_forge::task::ForgeContext;
 use kika_git::recording::CommandSink;
 use kika_git::repo_root::find_toplevel;
@@ -93,9 +94,26 @@ impl Harness {
         gh: Arc<FakeGh>,
         hosts: Vec<ForgeHost>,
     ) -> Self {
+        Self::start_with_runners(repo, gh, Arc::new(FakeGlab::new()), hosts).await
+    }
+
+    /// Start with `glab` standing in for GitLab on `host`, a `gitlab_ask`
+    /// host, configured as [`start_with_forge`](Self::start_with_forge)
+    /// configures GitHub's.
+    pub async fn start_with_glab(repo: &TestRepo, glab: Arc<FakeGlab>, host: &str) -> Self {
+        let hosts = vec![ForgeHost::parse_gitlab(host).unwrap()];
+        Self::start_with_runners(repo, Arc::new(FakeGh::new()), glab, hosts).await
+    }
+
+    async fn start_with_runners(
+        repo: &TestRepo,
+        gh: Arc<FakeGh>,
+        glab: Arc<FakeGlab>,
+        hosts: Vec<ForgeHost>,
+    ) -> Self {
         let forge = ForgeContext {
             gh,
-            glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
+            glab,
             sink: CommandSink::new(),
             cache_dir: None,
             cli: kika_forge::cli::CliGate::default(),

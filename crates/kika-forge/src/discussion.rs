@@ -297,8 +297,8 @@ fn side_of(text: Option<&str>) -> Option<GhSide> {
     }
 }
 
-/// A line number GitHub may send: 1 or more, within `u32`.
-fn line_number(n: Option<i64>) -> Option<u32> {
+/// A line number a forge may send: 1 or more, within `u32`.
+pub(crate) fn line_number(n: Option<i64>) -> Option<u32> {
     n.and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0)
 }
 

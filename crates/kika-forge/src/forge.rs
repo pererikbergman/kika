@@ -169,8 +169,12 @@ pub fn supports(kind: ForgeKind, capability: Capability) -> Result<(), Unsupport
 pub struct Words {
     /// The CLI that holds the login, as the user runs it.
     pub cli: &'static str,
+    /// What one of its pull requests is called.
+    pub request: &'static str,
     /// What its pull requests are called, plural.
     pub requests: &'static str,
+    /// The short name of one, as in `PR #7`.
+    pub short: &'static str,
     /// What goes before a request's number.
     pub sign: char,
 }
@@ -206,6 +210,12 @@ pub fn cli_text(kind: ForgeKind, status: CliStatus) -> (String, Option<String>) 
     }
 }
 
+/// The words of `kind`, or GitHub's while no kind is known yet: a host is
+/// GitHub unless the config says otherwise.
+pub fn words_or_default(kind: Option<ForgeKind>) -> &'static Words {
+    kind.map_or(&GitHubForge::WORDS, words)
+}
+
 /// The adapter for `host`'s forge kind. The caller has already checked
 /// the repository is on `host` and allowed: this is the one place a
 /// forge kind picks the code that runs.
@@ -227,12 +237,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn github_supports_every_capability_and_gitlab_only_badges() {
+    fn github_supports_every_capability_and_gitlab_only_badges_and_review() {
         for capability in Capability::ALL {
             assert_eq!(supports(ForgeKind::GitHub, capability), Ok(()));
             let gitlab = supports(ForgeKind::GitLab, capability);
             match capability {
-                Capability::Badges => assert_eq!(gitlab, Ok(())),
+                Capability::Badges | Capability::Review => assert_eq!(gitlab, Ok(())),
                 _ => assert_eq!(
                     gitlab,
                     Err(Unsupported {
@@ -250,7 +260,9 @@ mod tests {
             *words(ForgeKind::GitHub),
             Words {
                 cli: "gh",
+                request: "pull request",
                 requests: "pull requests",
+                short: "PR",
                 sign: '#'
             }
         );
@@ -258,9 +270,16 @@ mod tests {
             *words(ForgeKind::GitLab),
             Words {
                 cli: "glab",
+                request: "merge request",
                 requests: "merge requests",
+                short: "MR",
                 sign: '!'
             }
+        );
+        assert_eq!(words_or_default(None), words(ForgeKind::GitHub));
+        assert_eq!(
+            words_or_default(Some(ForgeKind::GitLab)),
+            words(ForgeKind::GitLab)
         );
     }
 

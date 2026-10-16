@@ -2792,6 +2792,55 @@ async fn review_files_fetch_a_missing_head_once_then_list_and_diff_it_locally() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn review_mode_on_a_gitlab_ask_host_lists_merge_requests_and_opens_one() {
+    use std::sync::Arc;
+
+    use crate::features::review::ReviewScreen;
+    use kika_forge::github::answer;
+    use kika_forge::gitlab::FakeGlab;
+    use kika_forge::gitlab_discussion::fixtures::DISCUSSION;
+    use kika_forge::gitlab_review::fixtures::{DETAIL, QUEUES};
+
+    let repo = TestRepo::new().write("a.txt", "one\n").commit("first");
+    repo.git([
+        "remote",
+        "add",
+        "origin",
+        "https://gitlab.example.com/acme/widgets",
+    ]);
+    let glab = Arc::new(
+        FakeGlab::new()
+            .reply(answer(QUEUES))
+            .reply(answer(DETAIL))
+            .reply(answer(DISCUSSION)),
+    );
+    let mut app = Harness::start_with_glab(&repo, Arc::clone(&glab), "gitlab.example.com").await;
+    assert_eq!(glab.calls().len(), 0, "starting asked GitLab");
+
+    app.type_text("G").await;
+    app.assert_screen_contains("!12  Cache widget lookups");
+    app.assert_screen_contains("Review · acme/widgets");
+    app.press(KeyCode::Enter).await;
+    assert_eq!(app.state().review.screen, ReviewScreen::Detail(12));
+    app.assert_screen_contains("Add widget caching");
+    app.assert_screen_contains("!12 by octocat");
+    app.assert_screen_contains("main ← feature/cache");
+    app.assert_screen_contains("✗ build  failed");
+    app.assert_screen_contains("alice approved");
+    app.assert_screen_contains("Threads: 3 unresolved of 6");
+    let calls = glab.calls();
+    assert_eq!(calls.len(), 3);
+    for call in &calls {
+        assert_eq!(
+            call.display_line(),
+            "glab api graphql --include --hostname gitlab.example.com --input -"
+        );
+    }
+    let sent: serde_json::Value = serde_json::from_slice(&calls[1].stdin()).unwrap();
+    assert_eq!(sent["variables"]["iid"], "12");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn shift_b_in_branches_asks_github_once_and_only_for_an_opted_in_host() {
     use std::sync::Arc;
 
