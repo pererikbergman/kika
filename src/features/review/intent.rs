@@ -173,6 +173,8 @@ pub(crate) enum ReviewIntent {
         write: DiscussionWrite,
         result: Result<Written, CreateError>,
     },
+    /// Submit the pending review: pick its type, then write a summary.
+    OpenSubmitReview,
     /// List the pending comments.
     OpenPendingList,
     /// Move the list's cursor by this many rows.

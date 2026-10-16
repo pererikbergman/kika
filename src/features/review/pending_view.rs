@@ -14,6 +14,7 @@ use super::comment_pick::{CommentPick, live_pick};
 use super::files::{PrFiles, ReviewView};
 use super::pending::{CommentTarget, PendingSlot, lines_label};
 use super::state::ReviewState;
+use super::submit::comments_label;
 use super::threads_view::{CommentMarks, clip_line, dim};
 use crate::model::AppState;
 use crate::view::{centered, elide_left, width_of};
@@ -99,7 +100,8 @@ pub fn render_pending(review: &ReviewState, frame: &mut Frame, area: Rect) {
         render_list(slot, cursor, frame, area);
     }
     if let Some(composer) = &review.composer {
-        render_composer(composer, review.composer_posting(), frame, area);
+        let comments = review.pending_count();
+        render_composer(composer, comments, review.composer_posting(), frame, area);
     }
 }
 
@@ -121,9 +123,10 @@ const POSTING_CUES: [&str; 2] = [" · posting… ", " posting… "];
 const MIN_LABEL: usize = 8;
 
 /// The composer's title for a box `room` columns inside: what is written
-/// and where it goes. For a post the cue that it goes to GitHub, or that
+/// and where it goes; a review's summary also counts the `comments` it
+/// carries. For a post the cue that it goes to GitHub, or that
 /// it is on its way, is kept whole; the label gives way first.
-fn composer_title(composer: &Composer, posting: bool, room: usize) -> String {
+fn composer_title(composer: &Composer, comments: usize, posting: bool, room: usize) -> String {
     let head = match &composer.kind {
         ComposerKind::Line {
             target,
@@ -144,6 +147,11 @@ fn composer_title(composer: &Composer, posting: bool, room: usize) -> String {
             }
         }
         ComposerKind::General { number, .. } => format!(" Comment on #{number}"),
+        ComposerKind::Review { number, event } => format!(
+            " Review summary: {} #{number} ({})",
+            event.label(),
+            comments_label(comments)
+        ),
     };
     let cues: &[&str] = if posting { &POSTING_CUES } else { &POSTS_CUES };
     let (with_head, alone) = cues
@@ -162,11 +170,17 @@ fn composer_title(composer: &Composer, posting: bool, room: usize) -> String {
         .to_string()
 }
 
-fn render_composer(composer: &Composer, posting: bool, frame: &mut Frame, area: Rect) {
+fn render_composer(
+    composer: &Composer,
+    comments: usize,
+    posting: bool,
+    frame: &mut Frame,
+    area: Rect,
+) {
     let popup = box_area(area);
     let room = usize::from(popup.width).saturating_sub(2);
     let block = frame_block(clip_title(
-        &composer_title(composer, posting, room),
+        &composer_title(composer, comments, posting, room),
         popup.width,
     ));
     let inner = block.inner(popup);

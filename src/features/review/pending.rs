@@ -7,6 +7,7 @@
 //! request are then off, and nothing is written. Nothing reaches GitHub.
 
 use super::comment_pick::numbered_in_view;
+use super::discussion_write::WAIT;
 use super::files::{FilesStage, ReviewView, files_screen};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
@@ -29,7 +30,7 @@ const NO_PLACE: &str = "No place to keep a pending review for this repository";
 const NOT_UTF8: &str = "Comments need a file name that is UTF-8";
 const NO_ROW: &str = "No line of the diff in view to comment on";
 const NO_COMMENTS: &str = "No pending comments";
-const NOT_FILES: &str = "Open the pull request's files first (f)";
+pub(super) const NOT_FILES: &str = "Open the pull request's files first (f)";
 const GONE: &str = "That comment is no longer in the pending review";
 pub(super) const BLANK: &str = "Write something first";
 
@@ -122,7 +123,7 @@ fn unreadable(number: u64, why: PendingError, file: Option<&Path>) -> Reason {
 }
 
 /// Why the pending review cannot be changed now, from its slot.
-fn slot_disabled(state: &AppState) -> Result<&PendingReview, Reason> {
+pub(super) fn slot_disabled(state: &AppState) -> Result<&PendingReview, Reason> {
     let slot = state.review.pending.as_ref().ok_or(NO_PLACE)?;
     match &slot.load {
         PendingLoad::Loading(_) => Err(LOADING.into()),
@@ -148,6 +149,9 @@ pub(crate) fn comment_disabled(state: &AppState) -> Option<Reason> {
         Ok(review) => review,
         Err(reason) => return Some(reason),
     };
+    if state.review.submitting() {
+        return Some(WAIT.into());
+    }
     let utf8 = files
         .selected()
         .is_some_and(|row| std::str::from_utf8(row.file.path.as_bytes()).is_ok());
@@ -300,16 +304,24 @@ impl AppState {
             Ok(review) => review,
             Err(reason) => return Some(reason),
         };
+        // The review on its way to GitHub was made from these comments.
+        if self.review.submitting() {
+            return Some(WAIT.into());
+        }
         match editing {
             Some(id) => (!review.comments.iter().any(|c| c.id == id)).then(|| GONE.into()),
             None => (review.comments.len() >= MAX_COMMENTS).then(|| full().into()),
         }
     }
 
-    /// The comments, to change, once read; else why not, in the notice.
+    /// The comments, to change, once read and while no review made from
+    /// them is on its way; else why not, in the notice.
     fn pending_review_mut(&mut self) -> Option<&mut PendingReview> {
         if let Err(reason) = slot_disabled(self) {
             self.notice = Some(reason);
+            return None;
+        }
+        if self.refused_while_submitting() {
             return None;
         }
         match self.review.pending.as_mut().map(|s| &mut s.load) {
@@ -372,6 +384,38 @@ impl AppState {
         self.save_pending()
     }
 
+    /// A review made from the pending comments is on its way to GitHub,
+    /// so they may not change: say so.
+    fn refused_while_submitting(&mut self) -> bool {
+        let submitting = self.review.submitting();
+        if submitting {
+            self.notice = Some(WAIT.into());
+        }
+        submitting
+    }
+
+    /// Take the comments a submitted review carried out of pull request
+    /// `number`'s pending review, by id, and save what is left. Comments
+    /// it did not carry stay.
+    pub(super) fn remove_sent_pending(
+        &mut self,
+        number: u64,
+        sent: &[PendingComment],
+    ) -> Vec<Effect> {
+        let review = match self.review.pending.as_mut() {
+            Some(PendingSlot {
+                number: held,
+                load: PendingLoad::Ready(review),
+                ..
+            }) if *held == number => review,
+            _ => return vec![],
+        };
+        review
+            .comments
+            .retain(|c| !sent.iter().any(|s| s.id == c.id));
+        self.save_pending()
+    }
+
     /// `P`: list the pending comments.
     pub(crate) fn open_pending_list(&mut self) {
         if let Some(reason) = pending_list_disabled(self) {
@@ -408,6 +452,9 @@ impl AppState {
 
     /// `enter`/`e` in the list: the comment's text in the composer.
     pub(crate) fn edit_pending(&mut self) {
+        if self.refused_while_submitting() {
+            return;
+        }
         let Some(comment) = self.listed_comment() else {
             return;
         };
@@ -423,6 +470,9 @@ impl AppState {
 
     /// `d` in the list: ask before deleting the comment under the cursor.
     pub(crate) fn ask_delete_pending(&mut self) {
+        if self.refused_while_submitting() {
+            return;
+        }
         let Some(comment) = self.listed_comment() else {
             return;
         };

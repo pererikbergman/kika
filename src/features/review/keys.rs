@@ -14,6 +14,7 @@ use super::reader::thread_reader_disabled;
 use super::state::{
     open_check_disabled, open_pr_disabled, queue_keys_disabled, refresh_review_disabled,
 };
+use super::submit::submit_disabled;
 use super::threads::thread_nav_disabled;
 use super::viewed::review_viewed_disabled;
 use crate::confirm_question::Answer;
@@ -582,6 +583,17 @@ pub(crate) static REVIEW_COMMENT_KEYS: &[Binding] = &[
         bar: true,
         disabled: pending_list_disabled,
     },
+    // Reaches GitHub, after a question only y answers.
+    Binding {
+        id: "review_files.submit",
+        keys: &[KeyPattern::any(KeyCode::Char('S'))],
+        scope: KeyScope::ReviewFiles,
+        intent: AppIntent::Review(ReviewIntent::OpenSubmitReview),
+        description: "Submit the pending review to GitHub: approve, request changes or comment, with a summary",
+        label: "submit",
+        bar: true,
+        disabled: submit_disabled,
+    },
     Binding {
         id: "review_pick.down",
         keys: &[
@@ -730,6 +742,16 @@ pub(crate) static REVIEW_COMMENT_KEYS: &[Binding] = &[
         label: "delete",
         bar: true,
         disabled: never,
+    },
+    Binding {
+        id: "review_pending.submit",
+        keys: &[KeyPattern::any(KeyCode::Char('S'))],
+        scope: KeyScope::ReviewPending,
+        intent: AppIntent::Review(ReviewIntent::OpenSubmitReview),
+        description: "Submit the pending review to GitHub: approve, request changes or comment, with a summary",
+        label: "submit",
+        bar: true,
+        disabled: submit_disabled,
     },
     Binding {
         id: "review_pending.close",
@@ -1001,6 +1023,35 @@ mod tests {
             "review_pending.delete",
         ] {
             assert!(!REPO_LOCKED.contains(&id), "{id}");
+        }
+    }
+
+    #[test]
+    fn s_submits_from_the_files_the_diff_and_the_pending_list_and_is_locked() {
+        let shift_s = KeyPress::new(KeyCode::Char('S'), KeyModifiers::SHIFT);
+        for focus in [KeyScope::ReviewFiles, KeyScope::ReviewDiff] {
+            assert_eq!(
+                owner(focus, shift_s),
+                Some("review_files.submit"),
+                "{focus:?}"
+            );
+        }
+        assert_eq!(
+            owner(KeyScope::ReviewPending, shift_s),
+            Some("review_pending.submit")
+        );
+        // Typed into a summary or a comment.
+        assert_eq!(owner(KeyScope::ReviewComment, shift_s), None);
+        for id in ["review_files.submit", "review_pending.submit"] {
+            let binding = registry().iter().find(|b| b.id == id).unwrap();
+            assert_eq!(
+                binding.intent,
+                AppIntent::Review(ReviewIntent::OpenSubmitReview),
+                "{id}"
+            );
+            assert_eq!(binding.label, "submit", "{id}");
+            assert!(binding.bar, "{id}");
+            assert!(REPO_LOCKED.contains(&id), "{id}");
         }
     }
 

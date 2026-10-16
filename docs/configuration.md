@@ -1925,6 +1925,7 @@ lines changed still read `outdated`.
 | `review_files.open_line` | `o` | Open the selected thread's line, else the top line, on GitHub's pull request page | locked |
 | `review_files.comment` | `a` | Pick a diff line or range and write a comment on it, kept in the pending review | |
 | `review_files.pending` | `P` | List the pending review's comments, to edit or delete them | |
+| `review_files.submit` | `S` | Submit the pending review to GitHub: approve, request changes or comment, with a summary | locked |
 | `review_diff.down` | `j`, `down` | Scroll the diff down a line | |
 | `review_diff.up` | `k`, `up` | Scroll the diff up a line | |
 | `review_diff.page_down` | `pgdn` | Scroll the diff down a page | |
@@ -1983,6 +1984,7 @@ and `?` are typed.
 | `review_pending.up` | `k`, `up` | Select the previous pending comment | |
 | `review_pending.edit` | `enter`, `e` | Edit the selected comment | |
 | `review_pending.delete` | `d` | Delete the selected comment, after a question only y answers | |
+| `review_pending.submit` | `S` | Submit the pending review to GitHub: approve, request changes or comment, with a summary | locked |
 | `review_pending.close` | `esc` | Close the list | |
 | `review_pending.quit` | `ctrl-c` | Quit Kika | locked |
 

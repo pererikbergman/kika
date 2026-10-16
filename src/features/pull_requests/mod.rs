@@ -27,9 +27,9 @@
 //!   selection and remotes (branches);
 //! - `commit_url_disabled` and `commit_page` read the selected commit
 //!   (commits);
-//! - `pick_select` dispatches to `pick_check`, `pick_merge_method` and
-//!   `pick_review_commit` (review), accepted cross-feature calls listed in
-//!   ADR-0001's Outcome;
+//! - `pick_select` dispatches to `pick_check`, `pick_merge_method`,
+//!   `pick_review_commit` and `pick_review_event` (review), accepted
+//!   cross-feature calls listed in ADR-0001's Outcome;
 //! - `REFRESH_LIMITED`, `same_repo` and `ForgeState::record_rate_limit`,
 //!   which review's merge shares, live in `kika_forge`;
 //! - branches (`branches_loaded`, when a branch list loads) and review
