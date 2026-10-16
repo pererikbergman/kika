@@ -12,6 +12,7 @@ use crate::rows::{DIFF_MARK, clock, diff_mark_style};
 use crate::view::{
     PanelLook, clip, elide_right, fit, list_title, no_matches, pad, range_row, scrolled, width_of,
 };
+use kika_forge::forge::{Words, words};
 use kika_forge::{CiState, ForgeState, ForgeStatus, ForgeView, PrBadge, PrState};
 use kika_git::branches::{Branch, BranchName, LogRow, Track};
 
@@ -37,6 +38,9 @@ pub(crate) fn render_panel(
     frame: &mut Frame,
     area: Rect,
 ) {
+    // Badges are known only on a matched host, which says how they read.
+    let words = forge.kind().map(words);
+    let badge = |name: &BranchName| Some((forge.badges.get(name)?, words?));
     let row = |branch: &Branch, width: usize| {
         let frame = marks
             .spinner
@@ -45,24 +49,14 @@ pub(crate) fn render_panel(
         // While a branch is marked, every row keeps a column for it, so
         // the names line up.
         let Some(marked) = marks.diff else {
-            return Line::from(branch_row(
-                branch,
-                frame,
-                forge.badges.get(&branch.name),
-                width,
-            ));
+            return Line::from(branch_row(branch, frame, badge(&branch.name), width));
         };
         let mark = if *marked == branch.name {
             Span::styled(DIFF_MARK, diff_mark_style(&look.palette))
         } else {
             Span::raw("  ")
         };
-        let rest = branch_row(
-            branch,
-            frame,
-            forge.badges.get(&branch.name),
-            width.saturating_sub(2),
-        );
+        let rest = branch_row(branch, frame, badge(&branch.name), width.saturating_sub(2));
         Line::from(vec![mark, Span::raw(rest)])
     };
     let current = panel.current();
@@ -204,13 +198,13 @@ fn tabs_title(shown: BranchesTab, look: &PanelLook) -> String {
 
 /// `* name  upstream ↑1 ↓2  #12 open ✓`: `*` marks the current branch,
 /// counts of zero are left out, a deleted upstream says `gone`, and the
-/// branch's pull request ends the row. The name loses its start first,
-/// so the upstream, counts and pull request stay in sight. A `spinner`
-/// frame takes the marker's place.
+/// branch's pull request, in its forge's words, ends the row. The name
+/// loses its start first, so the upstream, counts and pull request stay
+/// in sight. A `spinner` frame takes the marker's place.
 fn branch_row(
     branch: &Branch,
     spinner: Option<&str>,
-    badge: Option<&PrBadge>,
+    badge: Option<(&PrBadge, &Words)>,
     width: usize,
 ) -> String {
     let marker = match spinner {
@@ -236,8 +230,8 @@ fn branch_row(
         Some(upstream) => format!("  {upstream}{track}"),
         None => String::new(),
     };
-    if let Some(badge) = badge {
-        let badge = format!("  {}", badge_text(badge));
+    if let Some((badge, words)) = badge {
+        let badge = format!("  {}", badge_text(badge, words));
         // Too narrow for both beside a name: the pull request stays.
         if width_of(&suffix) + width_of(&badge) + 3 > width {
             suffix = badge;
@@ -249,9 +243,10 @@ fn branch_row(
     elide_right(&format!("{marker}{name}"), width)
 }
 
-/// `#12 open ✓`: the number, the state, and a mark for the checks when
-/// there are any: ✓ passed, ✗ failed, ● running.
-fn badge_text(badge: &PrBadge) -> String {
+/// `#12 open ✓` (`!12` on GitLab): the number after the forge's sign, the
+/// state, and a mark for the checks when there are any: ✓ passed, ✗
+/// failed, ● running.
+fn badge_text(badge: &PrBadge, words: &Words) -> String {
     let state = match badge.state {
         PrState::Open => "open",
         PrState::Draft => "draft",
@@ -264,7 +259,7 @@ fn badge_text(badge: &PrBadge) -> String {
         Some(CiState::Pending) => " ●",
         None => "",
     };
-    format!("#{} {state}{ci}", badge.number)
+    format!("{}{} {state}{ci}", words.sign, badge.number)
 }
 
 /// The panel's bottom line about the forge, fitted to `width`, or none:
@@ -273,42 +268,47 @@ fn badge_text(badge: &PrBadge) -> String {
 /// badges are still drawn) follow only where they fit, and what still
 /// does not fit ends in `…`. A rate limit whose reset is at or before
 /// `now` (the loop's clock, never read here) says to fetch to retry,
-/// since nothing asks the forge again by itself. Fixed words and the
-/// configured host only; nothing the forge or `gh` said.
+/// since nothing asks the forge again by itself. Fixed words in the
+/// forge's own terms and the configured host only; nothing the forge or
+/// its CLI said.
 fn forge_line(forge: &ForgeState, now: i64, width: usize) -> Option<String> {
     let repo = forge.repo.as_ref()?;
+    let kind = forge.kind()?;
+    let name = kind.name();
+    let Words { cli, requests, .. } = words(kind);
     let problem = match forge.status {
         ForgeView::Off | ForgeView::Cached | ForgeView::Fresh => return None,
-        ForgeView::Updating => return Some(elide_right("GitHub: updating…", width)),
+        ForgeView::Updating => return Some(elide_right(&format!("{name}: updating…"), width)),
         ForgeView::Problem(problem) => problem,
     };
     let (what, hint) = match problem {
         ForgeStatus::NotLoggedIn => (
-            "GitHub: not logged in",
+            format!("{name}: not logged in"),
             Some(format!(
-                "run gh auth login --hostname {}",
+                "run {cli} auth login --hostname {}",
                 repo.host.to_ascii_lowercase()
             )),
         ),
         ForgeStatus::NoGh => (
-            "GitHub: gh not found",
-            Some("install the GitHub CLI to see pull requests".to_string()),
+            format!("{name}: {cli} not found"),
+            Some(format!("install the {name} CLI to see {requests}")),
         ),
-        ForgeStatus::Offline => ("GitHub: offline", None),
-        ForgeStatus::NoAccess => ("GitHub: repository not found or no access", None),
-        ForgeStatus::Failed => ("GitHub: could not load pull requests", None),
+        ForgeStatus::Offline => (format!("{name}: offline"), None),
+        ForgeStatus::NoAccess => (format!("{name}: repository not found or no access"), None),
+        ForgeStatus::Failed => (format!("{name}: could not load {requests}"), None),
         // Over once `now` reaches the reset, as the load task judges it.
         ForgeStatus::RateLimited => match forge.limited_until {
             Some(until) if now >= until => (
-                "GitHub: rate limit over",
+                format!("{name}: rate limit over"),
                 Some("fetch to retry".to_string()),
             ),
             until => (
-                "GitHub: rate limited",
+                format!("{name}: rate limited"),
                 until.map(|until| format!("until {} UTC", clock(until))),
             ),
         },
     };
+    let what = what.as_str();
     // A rate limit leaves no room for `cached`: when it ends, or that it
     // has, matters more, and the line says no new answer came anyway.
     let cached =
@@ -395,6 +395,7 @@ mod tests {
     use crate::model::{AppState, Context, Focus};
     use crate::test_support::{load_list, reversed_at, spinner_tick};
     use crate::view::{buffer_rows, render};
+    use kika_forge::url::ForgeKind;
 
     fn draw(state: &AppState, width: u16, height: u16) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -473,6 +474,7 @@ mod tests {
                 .map(|(name, _)| branch(name, false, None, Track::None))
                 .collect(),
         );
+        state.forge.hosts = vec![kika_forge::ForgeHost::parse("github.com").unwrap()];
         state.forge.repo = Some(kika_forge::ForgeRepo {
             host: "github.com".into(),
             owner: "acme".into(),
@@ -519,7 +521,10 @@ mod tests {
         let row = branch_row(
             &branch(&long, false, Some("origin/x"), Track::None),
             None,
-            Some(&pr(42, PrState::Open, Some(CiState::Failure))),
+            Some((
+                &pr(42, PrState::Open, Some(CiState::Failure)),
+                words(ForgeKind::GitHub),
+            )),
             34,
         );
         assert!(row.ends_with("origin/x  #42 open ✗"), "{row:?}");
@@ -529,9 +534,15 @@ mod tests {
 
     /// The forge line drawn at `width` x 24, borders trimmed off.
     fn forge_line_at(state: &AppState, width: u16) -> Option<String> {
+        line_from(state, width, "GitHub:")
+    }
+
+    /// The bottom line from `start` on, drawn at `width` x 24, borders
+    /// trimmed off.
+    fn line_from(state: &AppState, width: u16, start: &str) -> Option<String> {
         let rows = draw(state, width, 24);
         rows.iter()
-            .find_map(|row| row.find("GitHub:").map(|at| row[at..].to_string()))
+            .find_map(|row| row.find(start).map(|at| row[at..].to_string()))
             .map(|text| {
                 text.trim_end_matches(['─', '┘', '╯', ' ', '│', '┛', '━'])
                     .to_string()
@@ -592,6 +603,85 @@ mod tests {
         state.forge.status = ForgeView::Problem(ForgeStatus::Failed);
         state.forge.repo = None;
         assert_eq!(line(&state), None);
+    }
+
+    /// [`with_badges`] on a repository that matched a GitLab host.
+    fn on_gitlab(rows: &[(&str, Option<PrBadge>)]) -> AppState {
+        let mut state = with_badges(rows);
+        state.forge.hosts =
+            vec![kika_forge::ForgeHost::parse_gitlab("gitlab.example.com").unwrap()];
+        state.forge.repo = Some(kika_forge::ForgeRepo {
+            host: "gitlab.example.com".into(),
+            owner: "acme".into(),
+            name: "widgets".into(),
+        });
+        state
+    }
+
+    #[test]
+    fn a_gitlab_badge_is_a_merge_request_number() {
+        let rows = [
+            ("ok", Some(pr(12, PrState::Open, Some(CiState::Success)))),
+            ("wip", Some(pr(3, PrState::Draft, Some(CiState::Pending)))),
+            ("done", Some(pr(7, PrState::Merged, None))),
+            ("nope", Some(pr(9, PrState::Closed, Some(CiState::Failure)))),
+        ];
+        let mut state = on_gitlab(&rows);
+        state.branches.list.rows[0].upstream = Some("origin/ok".into());
+        let drawn = draw(&state, 160, 24);
+        assert!(
+            contains(&drawn, "  ok  origin/ok  !12 open ✓"),
+            "{drawn:#?}"
+        );
+        assert!(contains(&drawn, "  wip  !3 draft ●"), "{drawn:#?}");
+        assert!(contains(&drawn, "  done  !7 merged "), "{drawn:#?}");
+        assert!(contains(&drawn, "  nope  !9 closed ✗"), "{drawn:#?}");
+        assert!(!contains(&drawn, "#12"), "{drawn:#?}");
+        // The same badges on GitHub keep their `#`.
+        let drawn = draw(&with_badges(&rows), 160, 24);
+        assert!(contains(&drawn, "  wip  #3 draft ●"), "{drawn:#?}");
+        assert!(!contains(&drawn, "!3"), "{drawn:#?}");
+    }
+
+    #[test]
+    fn each_forge_status_on_gitlab_draws_its_exact_line() {
+        let mut state = on_gitlab(&[("main", None)]);
+        let line = |state: &AppState| line_from(state, 240, "GitLab:");
+        assert_eq!(line(&state), None, "Fresh says nothing");
+        state.forge.status = ForgeView::Updating;
+        assert_eq!(line(&state).as_deref(), Some("GitLab: updating…"));
+        for (problem, want) in [
+            (
+                ForgeStatus::NotLoggedIn,
+                "GitLab: not logged in · run glab auth login --hostname gitlab.example.com",
+            ),
+            (
+                ForgeStatus::NoGh,
+                "GitLab: glab not found · install the GitLab CLI to see merge requests",
+            ),
+            (ForgeStatus::Offline, "GitLab: offline"),
+            (
+                ForgeStatus::NoAccess,
+                "GitLab: repository not found or no access",
+            ),
+            (ForgeStatus::Failed, "GitLab: could not load merge requests"),
+            (ForgeStatus::RateLimited, "GitLab: rate limited"),
+        ] {
+            state.forge.status = ForgeView::Problem(problem);
+            assert_eq!(line(&state).as_deref(), Some(want), "{problem:?}");
+            assert!(!contains(&draw(&state, 240, 24), "GitHub"), "{problem:?}");
+        }
+        state.forge.limited_until = Some(1_700_000_000);
+        state.now = 1_700_000_000 - 1;
+        assert_eq!(
+            line(&state).as_deref(),
+            Some("GitLab: rate limited · until 22:13 UTC")
+        );
+        state.now = 1_700_000_000;
+        assert_eq!(
+            line(&state).as_deref(),
+            Some("GitLab: rate limit over · fetch to retry")
+        );
     }
 
     #[test]
@@ -776,7 +866,10 @@ mod tests {
                 },
             ),
             None,
-            Some(&pr(12, PrState::Open, Some(CiState::Success))),
+            Some((
+                &pr(12, PrState::Open, Some(CiState::Success)),
+                words(ForgeKind::GitHub),
+            )),
             24,
         );
         assert_eq!(row, "  topic  #12 open ✓");
@@ -784,7 +877,7 @@ mod tests {
         let wide = branch_row(
             &branch("topic", false, Some("origin/topic"), Track::None),
             None,
-            Some(&pr(12, PrState::Open, None)),
+            Some((&pr(12, PrState::Open, None), words(ForgeKind::GitHub))),
             60,
         );
         assert_eq!(wide, "  topic  origin/topic  #12 open");
@@ -792,7 +885,7 @@ mod tests {
         let cjk = branch_row(
             &branch("日本語のブランチ名前", false, None, Track::None),
             None,
-            Some(&pr(3, PrState::Merged, None)),
+            Some((&pr(3, PrState::Merged, None), words(ForgeKind::GitHub))),
             16,
         );
         assert!(cjk.ends_with("  #3 merged"), "{cjk:?}");

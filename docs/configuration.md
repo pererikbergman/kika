@@ -41,11 +41,13 @@ hooks_detached = true   # commits that only run hooks stay in the background
 
 [forge]
 github = ["github.com"]   # leave out to keep pull requests off
-gitlab = ["gitlab.com"]   # only used to build URLs, never contacted
+gitlab = ["gitlab.com"]   # builds URLs; gitlab alone never contacts a host
+gitlab_ask = ["gitlab.com"]  # asks glab for merge requests; leave out to keep it off
 browser = ["open"]        # opens forge pages; leave out to keep it off
 
 [forge.allow]
 "github.com" = ["acme", "me/kika"]   # leave out to allow every repository on the host
+"gitlab.com" = ["acme"]              # a gitlab_ask host is limited the same way
 
 [display]
 emoji_zwj_terminals = ["WezTerm"]   # leave out to keep emoji joiners escaped
@@ -253,7 +255,9 @@ hooks_detached = true   # default false: any commit hook hands the terminal over
 
 ## `[forge]` (global file only)
 
-Kika can show each local branch's GitHub pull request in the Branches panel:
+Kika can show each local branch's GitHub pull request (or GitLab merge
+request, see [GitLab merge requests](#gitlab-merge-requests)) in the
+Branches panel:
 its number, its state (`open`, `draft`, `merged` or `closed`) and its checks
 (`✓` passed, `✗` failed, `●` running, nothing when there are none), as in
 `main  origin/main  #123 open ✓`. **It is off by default.** It turns on only
@@ -353,16 +357,77 @@ github = ["github.com", "github.example.com"]
   `ACME/widgets`. There are no patterns: `*`, a third `/` part, an empty
   part, a part of dots only or a name ending in `.git` is an error, as is
   any character other than letters, digits, `.`, `_` and `-`.
-- Each key must be one of the hosts in `github`. A key for a `gitlab` host,
-  or for a host not listed, is an error. Any error ignores the whole file.
+- Each key must be one of the hosts in `github` or `gitlab_ask`. A key for
+  a host that is only in `gitlab`, or for a host not listed, is an error.
+  Any error ignores the whole file.
 - It gates every `gh` call for a repository: the badges, review mode, and
-  creating a pull request. A clone it leaves out shows no badges, its cache
+  creating a pull request. On a `gitlab_ask` host it gates every `glab`
+  call the same way. A clone it leaves out shows no badges, its cache
   is neither read nor written, and `gh` is never run for it. Only the
   repository a call is about is checked: you can open a pull request from
   your own fork, whatever its owner, into a repository the list allows,
   and only allowed repositories are offered as its target.
 - Opening or copying a forge page does not run `gh`, so it works
   for any repository on a listed host.
+
+### GitLab merge requests
+
+`gitlab` alone never contacts a host; `gitlab_ask` does. Name a GitLab host
+in both, and its branches show their merge request, as in
+`topic  origin/topic  !12 open ✓`:
+
+```toml
+[forge]
+gitlab = ["gitlab.com", "gitlab.example.com"]
+gitlab_ask = ["gitlab.example.com"]
+
+[forge.allow]
+"gitlab.example.com" = ["acme"]
+```
+
+- **It is off by default.** A host only in `gitlab` builds URLs and is
+  never contacted. Each `gitlab_ask` host must also be in `gitlab`, and must
+  not be in `github`; it is written as any host is (see above). A host that
+  breaks a rule is an error, and the whole file is ignored.
+- `[forge.allow]` takes a `gitlab_ask` host as a key, and limits which of
+  its repositories `glab` is asked about, as it does for `gh`.
+- Kika asks GitLab through the [GitLab CLI](https://gitlab.com/gitlab-org/cli),
+  `glab`, found as `glab` on your `PATH`. It must be installed and logged in
+  for the host (`glab auth login --hostname <host>`, or `GITLAB_TOKEN` in the
+  environment). `glab` holds your login: Kika never reads, stores, passes or
+  shows a token. Each refresh runs, once per 50 branches,
+
+  ```
+  glab api graphql --include --hostname <host> --input -
+  ```
+
+  with the query and branch names on its input, never on the command line.
+  It runs with telemetry off (`GLAB_SEND_TELEMETRY=0`), no prompts and no
+  update check, and without `GITLAB_HOST`, `GITLAB_URI`, `GITLAB_API_HOST`,
+  `GITLAB_URL` or `GITLAB_REPO`, so only the command line picks the host.
+  The answer is judged by its HTTP status line, not by `glab`'s exit code,
+  so a GraphQL answer is read even when `glab` exits with an error.
+- There is no probe: GitLab has no cheap "has anything changed" request
+  here, so each refresh (open, fetch, pull, push, or `B`) runs the query.
+  There is no timer, as on GitHub, and the last answer is cached the same
+  way.
+- A badge is `!` and the merge request's number, then its state: `open`
+  (a `locked` merge request shows as open), `draft`, `merged` or `closed`.
+  Its pipeline shows `✓` passed, `✗` failed or cancelled, `●` running,
+  pending or scheduled, and nothing for a manual pipeline (it waits for a
+  person), a skipped one, an unknown status, or none.
+- Problems show on the Branches panel's bottom line in GitLab's words:
+  `GitLab: updating…`, `GitLab: not logged in · run glab auth login
+  --hostname <host>`, `GitLab: glab not found · install the GitLab CLI to
+  see merge requests`, `GitLab: offline`, `GitLab: repository not found or
+  no access`, `GitLab: could not load merge requests`, and `GitLab: rate
+  limited · until HH:MM UTC` or `GitLab: rate limit over · fetch to retry`.
+  `B` during a rate limit says `GitLab is rate limited; refresh after the
+  limit resets`.
+- A project in a subgroup (`group/sub/project`) gets no badge yet.
+- Review mode, creating and merging are GitHub only. On a GitLab host
+  **Create pull request…** is off and says so, and the page `o` opens stays
+  the filtered list of merge requests.
 
 ### Opening, copying and creating pull requests
 
@@ -376,22 +441,23 @@ branch:
 - **Create pull request…** opens a pull request on GitHub (see below).
 
 The page of a GitHub branch is its pull request, so it needs the badge.
-GitLab is never contacted, so no merge request number is known: a GitLab
-branch's page is the list of its merge requests, in any state, filtered to
-the branch. Every URL is built by Kika from the remote's host, owner and
+A GitLab branch's page is the list of its merge requests, in any state,
+filtered to the branch, so it needs no number, even where a `gitlab_ask`
+host shows the `!N` badge. Every URL is built by Kika from the remote's host, owner and
 repository name, always `https://`, never with the user name, password,
 token or port the remote URL may hold.
 
 ```toml
 [forge]
 github = ["github.com"]
-gitlab = ["gitlab.com", "gitlab.example.com"]   # only to build URLs
+gitlab = ["gitlab.com", "gitlab.example.com"]   # builds URLs
 browser = ["open"]                             # macOS; ["xdg-open"] on Linux
 ```
 
-- `gitlab` lists GitLab hosts the same way `github` lists GitHub ones. They
-  are only used to build URLs: Kika never contacts them, and they never
-  turn the pull-request badges on.
+- `gitlab` lists GitLab hosts the same way `github` lists GitHub ones, to
+  build URLs. `gitlab` alone never contacts a host; `gitlab_ask` does, and
+  turns the merge-request badges on (see
+  [GitLab merge requests](#gitlab-merge-requests)).
 - `browser` is the program and its arguments as a list, run directly with
   no shell. The program must be a bare name (looked up on your `PATH`) or
   an absolute path; anything else is an error, and the whole file is

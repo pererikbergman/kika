@@ -82,6 +82,12 @@ impl ForgeHost {
         })
     }
 
+    /// `text` as a GitLab host, checked as [`Self::parse`] checks it: what
+    /// the config's `gitlab_ask` list gives, so `glab` is asked about it.
+    pub fn parse_gitlab(text: &str) -> Result<Self, String> {
+        Ok(Self::parse(text)?.with_kind(ForgeKind::GitLab))
+    }
+
     /// The host as a `kind` forge; [`Self::parse`] makes a GitHub one.
     pub fn with_kind(self, kind: ForgeKind) -> Self {
         Self { kind, ..self }
@@ -122,7 +128,16 @@ pub struct ForgeRepo {
     pub name: String,
 }
 
+/// The review callers' notice; review runs on GitHub only.
 pub const REFRESH_LIMITED: &str = "GitHub is rate limited; refresh after the limit resets";
+
+/// Why a refresh of `kind`'s badges is held back: its host is rate limited.
+pub fn refresh_limited(kind: ForgeKind) -> String {
+    format!(
+        "{} is rate limited; refresh after the limit resets",
+        kind.name()
+    )
+}
 
 /// GitHub compares owners and names without regard to case.
 pub fn same_repo(a: &ForgeRepo, b: &ForgeRepo) -> bool {
@@ -580,6 +595,26 @@ pub(crate) mod tests {
             ..widgets()
         });
         assert_eq!(forge.kind(), None);
+    }
+
+    #[test]
+    fn a_gitlab_host_parses_as_any_host_and_says_its_kind() {
+        let host = ForgeHost::parse_gitlab("gitlab.example.com").unwrap();
+        assert_eq!(host.kind(), ForgeKind::GitLab);
+        assert_eq!(host.as_str(), "gitlab.example.com");
+        assert_eq!(
+            ForgeHost::parse_gitlab("GitLab.com"),
+            ForgeHost::parse("GitLab.com")
+        );
+    }
+
+    #[test]
+    fn the_refresh_notice_names_the_forge() {
+        assert_eq!(refresh_limited(ForgeKind::GitHub), REFRESH_LIMITED);
+        assert_eq!(
+            refresh_limited(ForgeKind::GitLab),
+            "GitLab is rate limited; refresh after the limit resets"
+        );
     }
 
     #[test]
