@@ -431,17 +431,19 @@ gitlab_ask = ["gitlab.example.com"]
 
   ```toml
   [forge.allow]
-  "gitlab.example.com" = ["acme", "acme/team", "acme/sub/project"]
+  "gitlab.example.com" = ["acme", "beta/team", "gamma/sub/project"]
   ```
 
-  - `acme` allows the projects directly in the group `acme`, such as
-    `acme/widgets`, but not `acme/team/widgets`: a group does not allow its
-    subgroups. Name each subgroup you want.
-  - `acme/team` allows the projects directly in the group `acme/team`, and
-    the project `acme/team` should that be a project instead (GitLab never
-    lets a group and a project share a path).
-  - `acme/sub/project` allows that project (or, were it a group, the
-    projects directly in it).
+  - `acme` allows every project under the group `acme`, at any depth:
+    `acme/widgets`, `acme/team/widgets`, `acme/a/b/c/widgets`. Paths are
+    compared whole part by whole part, so `acme` never allows
+    `acmecorp/widgets`.
+  - Naming a subgroup instead of its group narrows it: `beta/team` allows
+    the project `beta/team` and every project under the group `beta/team`
+    (`beta/team/x`, `beta/team/deep/y`), but not `beta/other/x` or
+    `beta/widgets`.
+  - `gamma/sub/project` allows that project (GitLab never lets a group and
+    a project share a path).
 
   The part rules are those above, and a part that is only `-` is an error
   too.

@@ -299,6 +299,45 @@ mod tests {
     }
 
     #[test]
+    fn a_gitlab_allow_entry_opens_its_whole_namespace_at_the_gate() {
+        let glab = Arc::new(FakeGlab::new());
+        let ctx = ForgeContext {
+            glab: glab.clone(),
+            ..context(Arc::new(FakeGh::new()), None)
+        };
+        let on = |owner: &str, name: &str| ForgeRepo {
+            host: "gitlab.example.com".into(),
+            owner: owner.into(),
+            name: name.into(),
+        };
+        let rule = |entry: &str| {
+            gitlab("gitlab.example.com").with_allow(vec![AllowRule::parse_nested(entry).unwrap()])
+        };
+        let cases = [
+            ("acme", "acme", "x", true),
+            ("acme", "acme/sub", "x", true),
+            ("acme", "acme/a/b/c", "x", true),
+            ("acme", "acmecorp", "x", false),
+            ("acme/sub", "acme", "sub", true),
+            ("acme/sub", "acme/sub", "x", true),
+            ("acme/sub", "acme/sub/deep", "y", true),
+            ("acme/sub", "acme/other", "x", false),
+            ("acme/sub", "acme", "x", false),
+        ];
+        for (entry, owner, name, open) in cases {
+            let host = rule(entry);
+            let gate = ctx.forge(&host, &on(owner, name), 0);
+            let shown = format!("{entry} for {owner}/{name}");
+            if open {
+                assert!(gate.is_ok(), "{shown}");
+            } else {
+                assert!(matches!(gate, Err(Shut::Outside)), "{shown}");
+            }
+        }
+        assert!(glab.calls().is_empty());
+    }
+
+    #[test]
     fn each_cli_is_only_asked_about_its_own_kind_of_host() {
         let gh = Arc::new(FakeGh::new());
         let glab = Arc::new(FakeGlab::new());

@@ -8,8 +8,8 @@ use super::remote::{MAX_PARTS, segment_ok};
 
 /// One `[forge.allow]` entry: every repository of `owner`, or only
 /// `owner/name`. On a GitLab host the entry may be a group path: then it
-/// names that project, or the projects directly in that group. Exact
-/// names, no patterns, so it allows no more than it says.
+/// names that project, or every project under that group at any depth.
+/// Whole names, no patterns, so it allows no more than it says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AllowRule {
     /// One part or more, none holding a `/`.
@@ -59,20 +59,19 @@ impl AllowRule {
         })
     }
 
-    /// Whether `repo` is the repository this names, or is directly in the
-    /// owner or group it names. Case is ignored, as the forges ignore it.
+    /// Whether `repo` is the repository this names, or sits under the
+    /// owner or group it names: its path starts with this one's, whole
+    /// part by whole part, so `acme` never covers `acmecorp/x`. Case is
+    /// ignored, as the forges ignore it. A GitHub path has two parts, so
+    /// there this is the owner, or that one repository.
     pub fn allows(&self, repo: &ForgeRepo) -> bool {
-        let owner: Vec<&str> = repo.owner.split('/').collect();
-        let same = |path: &[&str]| {
-            path.len() == self.path.len()
-                && path
-                    .iter()
-                    .zip(&self.path)
-                    .all(|(a, b)| a.eq_ignore_ascii_case(b))
-        };
-        let mut full = owner.clone();
-        full.push(&repo.name);
-        same(&owner) || same(&full)
+        let full: Vec<&str> = repo.owner.split('/').chain([repo.name.as_str()]).collect();
+        self.path.len() <= full.len()
+            && self
+                .path
+                .iter()
+                .zip(&full)
+                .all(|(rule, part)| rule.eq_ignore_ascii_case(part))
     }
 }
 
@@ -149,27 +148,32 @@ mod tests {
     }
 
     #[test]
-    fn a_group_allows_only_the_projects_directly_in_it() {
+    fn a_group_allows_every_project_under_it_at_any_depth() {
         assert!(nested("acme", "acme", "x"));
-        assert!(!nested("acme", "acme/sub", "x"));
-        assert!(nested("acme/sub", "acme/sub", "x"));
-        assert!(nested("ACME/Sub", "acme/SUB", "x"));
-        assert!(!nested("acme/sub", "acme/sub/deep", "x"));
-        assert!(!nested("acme/sub", "acme/other", "x"));
-        assert!(!nested("acme/sub", "acme", "subx"));
+        assert!(nested("acme", "acme/sub", "x"));
+        assert!(nested("acme", "acme/a/b/c", "x"));
+        assert!(nested("ACME", "Acme/Sub", "x"));
+        // Whole parts, never a string prefix.
+        assert!(!nested("acme", "acmecorp", "x"));
+        assert!(!nested("acme", "acmecorp/sub", "x"));
+        assert!(!nested("acme", "other/acme", "x"));
     }
 
     #[test]
-    fn a_longer_path_allows_that_project_and_nothing_deeper() {
-        // `acme/sub` may be a project in `acme` as well as a group.
+    fn a_subgroup_narrows_to_its_own_projects_and_subgroups() {
+        // `acme/sub` the project, and everything under the group.
         assert!(nested("acme/sub", "acme", "sub"));
+        assert!(nested("acme/sub", "acme/sub", "x"));
+        assert!(nested("acme/sub", "acme/sub/deep", "y"));
+        assert!(nested("ACME/Sub", "acme/SUB", "x"));
+        assert!(!nested("acme/sub", "acme/other", "x"));
+        assert!(!nested("acme/sub", "acme", "x"));
+        assert!(!nested("acme/sub", "acme", "subx"));
+        assert!(!nested("acme/sub", "acme/subx", "y"));
+        // A project path: that project (and anything a group of that
+        // path would hold; GitLab never lets the two share a path).
         assert!(nested("acme/sub/x", "acme/sub", "x"));
-        assert!(nested("acme/sub/x", "Acme/Sub", "X"));
         assert!(!nested("acme/sub/x", "acme/sub", "y"));
-        // Or, were `acme/sub/x` a group, the projects directly in it:
-        // GitLab never lets a group and a project share a path.
-        assert!(nested("acme/sub/x", "acme/sub/x", "y"));
-        assert!(!nested("acme/sub/x", "acme/sub/x/deep", "y"));
         assert!(!nested("acme/sub/x", "acme", "x"));
     }
 
