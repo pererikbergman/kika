@@ -15,6 +15,8 @@ pub enum PickPurpose {
     MergeMethod,
     /// The whole pull request or one of its commits, for review.
     ReviewCommit,
+    /// How a submitted review judges the pull request; its summary follows.
+    ReviewEvent,
 }
 
 impl PickPurpose {
@@ -25,6 +27,7 @@ impl PickPurpose {
             PickPurpose::CheckDetails => "Check details",
             PickPurpose::MergeMethod => "Merge method",
             PickPurpose::ReviewCommit => "Review commit",
+            PickPurpose::ReviewEvent => "Review type",
         }
     }
 }

@@ -1,9 +1,9 @@
 //! The built-in comment composer: a multi-line markdown buffer edited key
 //! by key over the files screen or the conversation. For a line comment
-//! `ctrl-s` keeps it in the pending review; for a reply or a general
-//! comment it asks before posting to GitHub. `esc` drops it (asking first
-//! when it has text), and every other key is typed. Pure, so `update`
-//! owns it and tests drive it.
+//! `ctrl-s` keeps it in the pending review; for a reply, a general
+//! comment or a review's summary it asks before posting to GitHub. `esc`
+//! drops it (asking first when it has text), and every other key is
+//! typed. Pure, so `update` owns it and tests drive it.
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -17,7 +17,7 @@ use crate::intent::AppIntent;
 use crate::keymap::{KeyPress, KeyScope};
 use crate::model::AppState;
 use crate::popup::{Popup, byte_at, char_len};
-use kika_forge::discussion_write::DiscussionWrite;
+use kika_forge::discussion_write::{DiscussionWrite, ReviewEvent};
 
 /// Text being typed. `row` indexes `lines` and `col` counts chars, not
 /// bytes, in that line; both always point inside the text.
@@ -144,6 +144,9 @@ pub enum ComposerKind {
     /// A general comment on pull request `number`, whose node id is
     /// `subject`, posted to GitHub.
     General { number: u64, subject: String },
+    /// The summary of the pending review of pull request `number`,
+    /// submitted to GitHub as `event` with every pending comment.
+    Review { number: u64, event: ReviewEvent },
 }
 
 /// The open composer: what its text is for, and the text.
@@ -206,14 +209,16 @@ impl AppState {
     }
 
     /// `ctrl-s`: keep a line comment in the pending review, never posted;
-    /// for a reply or a general comment, ask before posting it to GitHub.
+    /// for a reply, a general comment or a review's summary, ask before
+    /// posting it to GitHub.
     /// Blank text is refused, and the composer stays.
     pub(crate) fn save_comment(&mut self) -> Vec<Effect> {
         let Some(composer) = &self.review.composer else {
             return vec![];
         };
         let text = composer.text.text();
-        let question = match &composer.kind {
+        let kind = composer.kind.clone();
+        let question = match &kind {
             ComposerKind::Line { editing, .. } => {
                 // Refused: the composer stays, so the text can be tried again.
                 if let Some(reason) = self.pending_change_refused(*editing) {
@@ -226,13 +231,22 @@ impl AppState {
             ComposerKind::General { number, .. } => {
                 Some(format!("Post this comment on #{number} to GitHub? (y/n)"))
             }
+            ComposerKind::Review { number, event } => Some(self.submit_question(*number, *event)),
         };
         if let Some(question) = question {
             if self.review.writing.is_some() {
                 self.notice = Some(POSTING.into());
                 return vec![];
             }
-            return self.ask_post(question, &text);
+            // A review's summary may be blank; a comment's may not.
+            let checked = match kind {
+                ComposerKind::Review { event, .. } => self.review_summary(event, &text).is_some(),
+                _ => self.comment_body(&text).is_some(),
+            };
+            if checked {
+                self.ask_post(question);
+            }
+            return vec![];
         }
         let Some(body) = self.comment_body(&text) else {
             return vec![];
@@ -249,16 +263,15 @@ impl AppState {
                 editing: None,
             } => self.add_pending(target, body),
             // Asked about above; never kept.
-            ComposerKind::Reply { .. } | ComposerKind::General { .. } => vec![],
+            ComposerKind::Reply { .. }
+            | ComposerKind::General { .. }
+            | ComposerKind::Review { .. } => vec![],
         }
     }
 
     /// The question before a post. Only `y` answers it; the composer and
     /// its text stay under it either way.
-    fn ask_post(&mut self, question: String, text: &str) -> Vec<Effect> {
-        if self.comment_body(text).is_none() {
-            return vec![];
-        }
+    fn ask_post(&mut self, question: String) {
         self.popups.push(Popup::Question(ConfirmQuestion {
             scope: KeyScope::ReviewCommentConfirm,
             title: "Post to GitHub".into(),
@@ -268,7 +281,6 @@ impl AppState {
             range: false,
             head: None,
         }));
-        vec![]
     }
 
     /// `esc`: close a blank composer at once; ask before dropping text.

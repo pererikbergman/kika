@@ -98,6 +98,7 @@ pub(crate) fn update(state: &mut AppState, intent: ReviewIntent) -> Vec<Effect> 
             write,
             result,
         } => return state.discussion_written(tag, &host, number, write, result),
+        ReviewIntent::OpenSubmitReview => state.open_submit(),
         ReviewIntent::OpenPendingList => state.open_pending_list(),
         ReviewIntent::MovePendingList(delta) => state.move_pending_list(delta),
         ReviewIntent::EditPending => state.edit_pending(),

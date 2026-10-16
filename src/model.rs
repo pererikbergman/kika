@@ -5593,6 +5593,7 @@ mod tests {
             (pick(PickPurpose::BaseBranch), Some("pull request")),
             (pick(PickPurpose::MergeMethod), Some("pull request")),
             (pick(PickPurpose::ReviewCommit), None),
+            (pick(PickPurpose::ReviewEvent), None),
             (prompt(PromptKind::PullRequestTitle), Some("pull request")),
             (
                 Popup::Question(crate::features::pull_requests::create_question(

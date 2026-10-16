@@ -1,5 +1,6 @@
 //! Writing to a pull request's discussion on GitHub: a reply to a review
-//! thread, resolving or unresolving one, and a general comment. Each is
+//! thread, resolving or unresolving one, a general comment, and a whole
+//! review with its line comments, submitted in one step. Each is
 //! one GraphQL mutation of fixed text; the ids and the body travel only
 //! as variables on stdin, so argv is the fixed `gh api graphql` line
 //! whatever is written.
@@ -9,8 +10,9 @@ use std::io;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::anchor::{GhLine, GhSide};
 use super::github::{Answer, Gh, GhCall, GhOutput, classify, refusal, split_include};
-use super::pending::MAX_BODY;
+use super::pending::{MAX_BODY, MAX_COMMENTS, PendingComment};
 use super::review::node_id_ok;
 use super::{CreateError, ForgeStatus};
 use kika_git::recording::CommandOutcome;
@@ -23,14 +25,106 @@ const UNRESOLVE: &str =
     "mutation($id:ID!){unresolveReviewThread(input:{threadId:$id}){thread{isResolved}}}";
 const COMMENT: &str = "mutation($id:ID!,$body:String!)\
 {addComment(input:{subjectId:$id,body:$body}){commentEdge{node{id}}}}";
+// One round trip: GitHub creates the review, its threads and submits it
+// together, so no half-made review is left behind.
+const SUBMIT: &str = "mutation($id:ID!,$commit:GitObjectID!,$event:PullRequestReviewEvent!,\
+$body:String,$threads:[DraftPullRequestReviewThread])\
+{addPullRequestReview(input:{pullRequestId:$id,commitOID:$commit,event:$event,\
+body:$body,threads:$threads}){pullRequestReview{id state}}}";
+
+/// How a submitted review judges the pull request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewEvent {
+    Approve,
+    RequestChanges,
+    Comment,
+}
+
+impl ReviewEvent {
+    /// The name GitHub's `PullRequestReviewEvent` gives it.
+    fn github(self) -> &'static str {
+        match self {
+            ReviewEvent::Approve => "APPROVE",
+            ReviewEvent::RequestChanges => "REQUEST_CHANGES",
+            ReviewEvent::Comment => "COMMENT",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ReviewEvent::Approve => "Approve",
+            ReviewEvent::RequestChanges => "Request changes",
+            ReviewEvent::Comment => "Comment",
+        }
+    }
+}
 
 /// One write the user asked for. `thread` is a review thread's node id
 /// and `subject` the pull request's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiscussionWrite {
-    Reply { thread: String, body: String },
-    Resolve { thread: String, resolved: bool },
-    Comment { subject: String, body: String },
+    Reply {
+        thread: String,
+        body: String,
+    },
+    Resolve {
+        thread: String,
+        resolved: bool,
+    },
+    Comment {
+        subject: String,
+        body: String,
+    },
+    /// The pending review: `pull` is the pull request's node id, `commit`
+    /// the hex head the comments were written against.
+    SubmitReview {
+        pull: String,
+        commit: String,
+        event: ReviewEvent,
+        body: String,
+        threads: Vec<PendingComment>,
+    },
+}
+
+/// The body rules GitHub has for each kind of review: Approve needs
+/// nothing, Request changes a summary, and Comment a summary or a line
+/// comment.
+fn review_ok(event: ReviewEvent, body: &str, threads: &[PendingComment]) -> bool {
+    let has_body = !body.trim().is_empty();
+    let parts_ok = body.len() <= MAX_BODY
+        && threads.len() <= MAX_COMMENTS
+        && threads
+            .iter()
+            .all(|t| !t.body.trim().is_empty() && t.body.len() <= MAX_BODY);
+    let event_ok = match event {
+        ReviewEvent::Approve => true,
+        ReviewEvent::RequestChanges => has_body,
+        ReviewEvent::Comment => has_body || !threads.is_empty(),
+    };
+    parts_ok && event_ok
+}
+
+fn side(side: GhSide) -> &'static str {
+    match side {
+        GhSide::Left => "LEFT",
+        GhSide::Right => "RIGHT",
+    }
+}
+
+/// One line comment as GitHub's `DraftPullRequestReviewThread`.
+fn draft_thread(comment: &PendingComment) -> Value {
+    let GhLine { side: end, line } = comment.end;
+    let mut thread = json!({
+        "path": comment.path,
+        "body": comment.body,
+        "line": line,
+        "side": side(end),
+    });
+    if let Some(start) = comment.start {
+        thread["startLine"] = json!(start.line);
+        thread["startSide"] = json!(side(start.side));
+    }
+    thread
 }
 
 /// What GitHub took: a posted reply or comment, or the thread's state
@@ -43,13 +137,25 @@ pub enum Written {
 
 impl DiscussionWrite {
     /// Whether the write may be sent at all: an id GitHub would have made,
-    /// and a body that is neither blank nor longer than a comment holds.
+    /// and a body that is neither blank nor longer than a comment holds. A
+    /// review also needs a hex head, at most a pending review's comments,
+    /// and the summary its kind asks for.
     fn sendable(&self) -> bool {
         let body_ok = |body: &str| !body.trim().is_empty() && body.len() <= MAX_BODY;
         match self {
             DiscussionWrite::Reply { thread, body } => node_id_ok(thread) && body_ok(body),
             DiscussionWrite::Resolve { thread, .. } => node_id_ok(thread),
             DiscussionWrite::Comment { subject, body } => node_id_ok(subject) && body_ok(body),
+            DiscussionWrite::SubmitReview {
+                pull,
+                commit,
+                event,
+                body,
+                threads,
+            } => {
+                let commit_ok = commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit());
+                node_id_ok(pull) && commit_ok && review_ok(*event, body, threads)
+            }
         }
     }
 
@@ -74,6 +180,28 @@ impl DiscussionWrite {
                 json!({ "query": COMMENT, "variables": { "id": subject, "body": body } }),
                 "addComment",
             ),
+            DiscussionWrite::SubmitReview {
+                pull,
+                commit,
+                event,
+                body,
+                threads,
+            } => {
+                // No summary is sent as none, not as an empty one.
+                let body = Some(body).filter(|b| !b.trim().is_empty());
+                let threads: Vec<Value> = threads.iter().map(draft_thread).collect();
+                let variables = json!({
+                    "id": pull,
+                    "commit": commit,
+                    "event": event.github(),
+                    "body": body,
+                    "threads": threads,
+                });
+                (
+                    json!({ "query": SUBMIT, "variables": variables }),
+                    "addPullRequestReview",
+                )
+            }
         }
     }
 
@@ -89,6 +217,10 @@ impl DiscussionWrite {
                 .get("commentEdge")
                 .and_then(|e| e.get("node"))
                 .filter(|n| n.is_object())
+                .map(|_| Written::Posted),
+            DiscussionWrite::SubmitReview { .. } => answer
+                .get("pullRequestReview")
+                .filter(|r| r.is_object())
                 .map(|_| Written::Posted),
             DiscussionWrite::Resolve { resolved, .. } => answer
                 .get("thread")
@@ -424,9 +556,199 @@ mod tests {
         assert_eq!(text.chars().count(), MAX_REFUSAL + 1, "{text}");
     }
 
+    const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
+    const SUBMITTED: &str = "{\"data\":{\"addPullRequestReview\":\
+{\"pullRequestReview\":{\"id\":\"PRR_1\",\"state\":\"APPROVED\"}}}}";
+
+    fn line(side: GhSide, line: u32) -> GhLine {
+        GhLine { side, line }
+    }
+
+    fn pending(id: u64, start: Option<GhLine>, end: GhLine) -> PendingComment {
+        PendingComment {
+            id,
+            path: "src/café.rs".into(),
+            start,
+            end,
+            body: format!("{BODY} {id}"),
+            head: HEAD.into(),
+        }
+    }
+
+    fn threads() -> Vec<PendingComment> {
+        vec![
+            pending(1, None, line(GhSide::Right, 4)),
+            pending(2, Some(line(GhSide::Left, 10)), line(GhSide::Right, 12)),
+        ]
+    }
+
+    fn submit(event: ReviewEvent, body: &str, threads: Vec<PendingComment>) -> DiscussionWrite {
+        DiscussionWrite::SubmitReview {
+            pull: PR.into(),
+            commit: HEAD.into(),
+            event,
+            body: body.into(),
+            threads,
+        }
+    }
+
+    #[test]
+    fn each_review_is_one_fixed_mutation_with_everything_on_stdin() {
+        let events = [
+            (ReviewEvent::Approve, "APPROVE"),
+            (ReviewEvent::RequestChanges, "REQUEST_CHANGES"),
+            (ReviewEvent::Comment, "COMMENT"),
+        ];
+        for (event, name) in events {
+            let runner = FakeGh::new().reply(answer(&ok(SUBMITTED)));
+            let w = submit(event, BODY, threads());
+            assert_eq!(write(&runner, &w), Ok(Written::Posted), "{name}");
+            let [cmd] = runner.calls().try_into().unwrap();
+            assert_eq!(
+                cmd.args(),
+                [
+                    "api",
+                    "graphql",
+                    "--include",
+                    "--hostname",
+                    "github.com",
+                    "--input",
+                    "-"
+                ]
+                .map(OsString::from),
+                "{name}"
+            );
+            let sent: Value = serde_json::from_slice(&cmd.stdin()).unwrap();
+            let want = json!({
+                "id": PR,
+                "commit": HEAD,
+                "event": name,
+                "body": BODY,
+                "threads": [
+                    {
+                        "path": "src/café.rs",
+                        "body": format!("{BODY} 1"),
+                        "line": 4,
+                        "side": "RIGHT",
+                    },
+                    {
+                        "path": "src/café.rs",
+                        "body": format!("{BODY} 2"),
+                        "line": 12,
+                        "side": "RIGHT",
+                        "startLine": 10,
+                        "startSide": "LEFT",
+                    },
+                ],
+            });
+            assert_eq!(sent["variables"], want, "{name}");
+            let query = sent["query"].as_str().unwrap();
+            assert_eq!(query, SUBMIT);
+            assert!(query.contains("{addPullRequestReview(input:"), "{query}");
+            let argv = format!("{:?}", cmd.args());
+            for secret in [PR, HEAD, "café", "fine"] {
+                assert!(!query.contains(secret), "{name}: {query}");
+                assert!(!argv.contains(secret), "{name}: {argv}");
+            }
+        }
+        // An approval may carry nothing; no summary goes as none.
+        let runner = FakeGh::new().reply(answer(&ok(SUBMITTED)));
+        let bare = submit(ReviewEvent::Approve, " \n", vec![]);
+        assert_eq!(write(&runner, &bare), Ok(Written::Posted));
+        let [cmd] = runner.calls().try_into().unwrap();
+        let sent: Value = serde_json::from_slice(&cmd.stdin()).unwrap();
+        assert_eq!(sent["variables"]["body"], Value::Null);
+        assert_eq!(sent["variables"]["threads"], json!([]));
+        // A comment review may be line comments alone.
+        let runner = FakeGh::new().reply(answer(&ok(SUBMITTED)));
+        let lines_only = submit(ReviewEvent::Comment, "", threads());
+        assert_eq!(write(&runner, &lines_only), Ok(Written::Posted));
+    }
+
+    #[test]
+    fn a_review_github_would_refuse_makes_no_call() {
+        let runner = FakeGh::new();
+        let long = "a".repeat(MAX_BODY + 1);
+        let many: Vec<PendingComment> = (1..=MAX_COMMENTS as u64 + 1)
+            .map(|id| pending(id, None, line(GhSide::Right, 1)))
+            .collect();
+        let blank_thread = vec![PendingComment {
+            body: " \t".into(),
+            ..pending(1, None, line(GhSide::Right, 1))
+        }];
+        let long_thread = vec![PendingComment {
+            body: long.clone(),
+            ..pending(1, None, line(GhSide::Right, 1))
+        }];
+        let with = |change: fn(&mut DiscussionWrite)| {
+            let mut w = submit(ReviewEvent::Comment, BODY, threads());
+            change(&mut w);
+            w
+        };
+        let cases = [
+            with(|w| {
+                if let DiscussionWrite::SubmitReview { pull, .. } = w {
+                    *pull = "PR kw".into();
+                }
+            }),
+            with(|w| {
+                if let DiscussionWrite::SubmitReview { commit, .. } = w {
+                    *commit = "z".repeat(40);
+                }
+            }),
+            with(|w| {
+                if let DiscussionWrite::SubmitReview { commit, .. } = w {
+                    *commit = "abc123".into();
+                }
+            }),
+            submit(ReviewEvent::RequestChanges, " \n", threads()),
+            submit(ReviewEvent::Comment, "", vec![]),
+            submit(ReviewEvent::Approve, &long, vec![]),
+            submit(ReviewEvent::Comment, BODY, many),
+            submit(ReviewEvent::Comment, BODY, blank_thread),
+            submit(ReviewEvent::Approve, "", long_thread),
+        ];
+        for w in &cases {
+            assert_eq!(write(&runner, w), failed(), "{w:?}");
+        }
+        assert_eq!(runner.calls(), []);
+    }
+
+    #[test]
+    fn a_review_answer_without_the_review_or_with_errors_is_not_posted() {
+        let cases = [
+            "{\"data\":{\"addPullRequestReview\":null},\"errors\":[{\"type\":\"UNPROCESSABLE\"}]}",
+            "{\"data\":{\"addPullRequestReview\":{\"pullRequestReview\":null}}}",
+            "{\"data\":{}}",
+            COMMENTED,
+        ];
+        for body in cases {
+            let runner = FakeGh::new().reply(answer(&ok(body)));
+            let w = submit(ReviewEvent::Approve, "", threads());
+            assert_eq!(write(&runner, &w), failed(), "{body}");
+        }
+        let refused = json!({
+            "data": { "addPullRequestReview": null },
+            "errors": [{ "message": "Can not approve your own pull request" }],
+        });
+        let runner = FakeGh::new().reply(answer(&ok(&refused.to_string())));
+        let w = submit(ReviewEvent::Approve, "", threads());
+        assert_eq!(
+            write(&runner, &w),
+            Err(CreateError::Refused(
+                "Can not approve your own pull request".into()
+            ))
+        );
+    }
+
     #[test]
     fn limits_logins_the_network_and_a_missing_gh_say_why() {
-        for w in [reply(), resolve(true), comment()] {
+        for w in [
+            reply(),
+            resolve(true),
+            comment(),
+            submit(ReviewEvent::RequestChanges, BODY, threads()),
+        ] {
             let runner = FakeGh::new().reply(answer(GRAPHQL_RATE_LIMITED));
             assert!(
                 matches!(write(&runner, &w), Err(CreateError::RateLimited { .. })),
