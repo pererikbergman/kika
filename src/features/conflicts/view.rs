@@ -4,12 +4,13 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
 use super::state::{ConflictView, Row, RowKind};
 use crate::keymap::{KeyPattern, Keymap, registry};
+use crate::theme::Palette;
 use crate::view::{PanelLook, clip, reversed};
 use kika_git::diff::{EmojiZwj, sanitize_body};
 
@@ -65,7 +66,7 @@ pub fn render(
             .iter()
             .skip(view.scroll)
             .take(rows)
-            .map(|row| styled_row(view, row, width))
+            .map(|row| styled_row(&look.palette, view, row, width))
             .collect::<Vec<_>>();
         Paragraph::new(lines)
     };
@@ -73,7 +74,12 @@ pub fn render(
 }
 
 /// One row, coloured by what it is. File text is made safe to draw first.
-fn styled_row(view: &ConflictView, row: &Row<'_>, width: usize) -> Line<'static> {
+fn styled_row(
+    palette: &Palette,
+    view: &ConflictView,
+    row: &Row<'_>,
+    width: usize,
+) -> Line<'static> {
     let block = row
         .block
         .and_then(|i| view.loaded.as_ref()?.file.blocks().nth(i));
@@ -88,7 +94,7 @@ fn styled_row(view: &ConflictView, row: &Row<'_>, width: usize) -> Line<'static>
         RowKind::Text => (sanitize_body(row.line, EmojiZwj::Escape), Style::new()),
         RowKind::Ours => (
             sanitize_body(row.line, EmojiZwj::Escape),
-            Style::new().fg(Color::Green),
+            Style::new().fg(palette.conflict_ours),
         ),
         RowKind::Base => (
             sanitize_body(row.line, EmojiZwj::Escape),
@@ -96,7 +102,7 @@ fn styled_row(view: &ConflictView, row: &Row<'_>, width: usize) -> Line<'static>
         ),
         RowKind::Theirs => (
             sanitize_body(row.line, EmojiZwj::Escape),
-            Style::new().fg(Color::Cyan),
+            Style::new().fg(palette.conflict_theirs),
         ),
         RowKind::OursMarker => (
             label("<<<<<<<", block.map_or("", |b| &b.ours_label)),

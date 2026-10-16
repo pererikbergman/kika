@@ -2,11 +2,12 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::log::{CommandLog, CommandLogView, LogEntry, row_text};
+use crate::theme::Palette;
 use crate::view::{clip, elide_right, pad, width_of};
 use kika_git::recording::CommandOutcome;
 use kika_git::safe_text::sanitize;
@@ -15,7 +16,14 @@ use kika_git::safe_text::sanitize;
 /// command, oldest at the top, scrolled so the cursor row is in view. The
 /// cursor row is reversed while the log is on top and its row is shown,
 /// and failures are red.
-pub fn render(log: &CommandLog, view: &CommandLogView, top: bool, frame: &mut Frame, area: Rect) {
+pub fn render(
+    palette: &Palette,
+    log: &CommandLog,
+    view: &CommandLogView,
+    top: bool,
+    frame: &mut Frame,
+    area: Rect,
+) {
     frame.render_widget(Clear, area);
     let room = usize::from(area.width.saturating_sub(2));
     let shown = usize::from(area.height.saturating_sub(2)).max(1);
@@ -44,7 +52,7 @@ pub fn render(log: &CommandLog, view: &CommandLogView, top: bool, frame: &mut Fr
             .map(|&i| {
                 let entry = &entries[i];
                 let mut style = if failed(entry) {
-                    Style::new().fg(Color::Red)
+                    Style::new().fg(palette.error)
                 } else {
                     Style::new()
                 };
@@ -105,6 +113,7 @@ fn failed(entry: &LogEntry) -> bool {
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
 
     use std::time::Duration;
 
@@ -299,7 +308,16 @@ mod tests {
         };
         let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
         terminal
-            .draw(|frame| render(&state.command_log, view, false, frame, frame.area()))
+            .draw(|frame| {
+                render(
+                    &state.palette,
+                    &state.command_log,
+                    view,
+                    false,
+                    frame,
+                    frame.area(),
+                )
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         for y in 0..10 {

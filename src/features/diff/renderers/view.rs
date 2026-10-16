@@ -9,7 +9,8 @@ use ratatui::widgets::{Block, Paragraph, Wrap};
 
 use super::RenderedDiff;
 use crate::hunk_view::HunkView;
-use crate::view::{FOCUSED, PanelLook, elide_right, reversed, width_of};
+use crate::theme::Palette;
+use crate::view::{PanelLook, elide_right, reversed, width_of};
 
 /// A diff tool's title, ` [n] <head> <path><tail> · <label> (display only) `,
 /// fitted so the note stays as long as it can: the label gives way first,
@@ -44,6 +45,7 @@ pub(crate) fn tool_title(
 /// the Diff pane focused (`view`), the selection's rows get a `▌`, and in
 /// line mode are reversed too, like the built-in view's.
 pub(crate) fn render_rendered(
+    palette: &Palette,
     rendered: &RenderedDiff,
     block: Block<'static>,
     view: Option<&HunkView>,
@@ -81,7 +83,7 @@ pub(crate) fn render_rendered(
                     .as_ref()
                     .is_some_and(|(rows, _)| rows.contains(&at));
                 let gutter = if marked { "▌" } else { " " };
-                let mut spans = vec![Span::styled(gutter, Style::new().fg(FOCUSED))];
+                let mut spans = vec![Span::styled(gutter, Style::new().fg(palette.focused))];
                 spans.extend(elide_runs(&row.runs, width.saturating_sub(1)));
                 let line = Line::from(spans);
                 let lines_mode = selected.as_ref().is_some_and(|(_, lines)| *lines);
@@ -360,6 +362,7 @@ mod tests {
     #[test]
     fn a_tool_title_cuts_the_label_then_the_path_then_all_but_the_note() {
         let look = |width: usize| PanelLook {
+            palette: Palette::DEFAULT,
             number: 0,
             focused: true,
             mode: String::new(),

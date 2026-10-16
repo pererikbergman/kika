@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -17,6 +17,7 @@ use super::threads::{FileThreads, ThreadScope, first_rows};
 use super::view::problem_text;
 use crate::diff_pane::DiffPane;
 use crate::diff_pane_view::{diff_pane_body, marks_of, styled_diff_line};
+use crate::theme::Palette;
 use crate::view::width_of;
 use kika_forge::anchor::{GhSide, Placement, RowNumber, thread_span};
 use kika_forge::discussion::{PrDiscussion, ReviewThread};
@@ -126,13 +127,17 @@ pub(super) fn addressed(thread: &ReviewThread) -> bool {
 
 /// How a thread's header is drawn: resolved ones dim, addressed ones
 /// green so a returning reviewer sees what changed, the rest yellow.
-pub(super) fn header_style(thread: &ReviewThread, placement: Option<Placement>) -> Style {
+pub(super) fn header_style(
+    palette: &Palette,
+    thread: &ReviewThread,
+    placement: Option<Placement>,
+) -> Style {
     if thread.resolved {
         dim()
     } else if addressed(thread) && placement == Some(Placement::Outdated) {
-        Style::new().fg(Color::Green)
+        Style::new().fg(palette.thread_addressed)
     } else {
-        Style::new().fg(Color::Yellow)
+        Style::new().fg(palette.thread_open)
     }
 }
 
@@ -175,7 +180,12 @@ pub(super) fn span_label(thread: &ReviewThread) -> Option<String> {
 /// many comments. A thread above the diff (`top` is where it was placed)
 /// leads with why it is there; its lines show only when they are real
 /// lines of another view.
-fn header(thread: &ReviewThread, top: Option<Placement>, selected: bool) -> Line<'static> {
+fn header(
+    palette: &Palette,
+    thread: &ReviewThread,
+    top: Option<Placement>,
+    selected: bool,
+) -> Line<'static> {
     let first = thread.comments.first();
     let mut parts: Vec<String> = top.map(|p| top_label(thread, p)).into_iter().collect();
     parts.push(first.map_or_else(|| "ghost".to_string(), |c| c.author.clone()));
@@ -200,7 +210,7 @@ fn header(thread: &ReviewThread, top: Option<Placement>, selected: bool) -> Line
     } else {
         format!("{n} comments")
     });
-    let mut style = header_style(thread, top);
+    let mut style = header_style(palette, thread, top);
     if selected {
         style = style.add_modifier(Modifier::BOLD);
     }
@@ -213,7 +223,7 @@ fn bar() -> Span<'static> {
 }
 
 /// A context line of an outdated thread, coloured by its `+`/`-`.
-pub(super) fn context_line(text: &str, width: usize) -> Line<'static> {
+pub(super) fn context_line(palette: &Palette, text: &str, width: usize) -> Line<'static> {
     let kind = match text.chars().next() {
         Some('+') => LineKind::Added,
         Some('-') => LineKind::Removed,
@@ -225,7 +235,7 @@ pub(super) fn context_line(text: &str, width: usize) -> Line<'static> {
         text: text.to_string(),
     };
     let mut spans = vec![bar()];
-    spans.extend(styled_diff_line(&line, width.saturating_sub(2), &[]).spans);
+    spans.extend(styled_diff_line(palette, &line, width.saturating_sub(2), &[]).spans);
     Line::from(spans)
 }
 
@@ -233,13 +243,21 @@ pub(super) fn context_line(text: &str, width: usize) -> Line<'static> {
 /// for [`header`]. Each is set in a column, so it reads as a note on the
 /// row above. A thread cut for room ends in a row that says so.
 fn thread_rows(
+    palette: &Palette,
     thread: &ReviewThread,
     top: Option<Placement>,
     selected: bool,
     width: usize,
     room: usize,
 ) -> Vec<Line<'static>> {
-    let mut out = whole_thread(thread, top, selected, width.saturating_sub(INDENT), room);
+    let mut out = whole_thread(
+        palette,
+        thread,
+        top,
+        selected,
+        width.saturating_sub(INDENT),
+        room,
+    );
     if out.len() > room {
         out.truncate(room);
         if room >= 2 {
@@ -260,6 +278,7 @@ const INDENT: usize = 1;
 
 /// [`thread_rows`] before the cut: built only a row past `room`.
 fn whole_thread(
+    palette: &Palette,
     thread: &ReviewThread,
     top: Option<Placement>,
     selected: bool,
@@ -267,13 +286,18 @@ fn whole_thread(
     room: usize,
 ) -> Vec<Line<'static>> {
     let outdated = top == Some(Placement::Outdated);
-    let mut out = vec![header(thread, top, selected)];
+    let mut out = vec![header(palette, thread, top, selected)];
     // Folded to its header; for now its text is read on GitHub.
     if thread.resolved {
         return out;
     }
     if outdated {
-        out.extend(thread.context.iter().map(|c| context_line(c, width)));
+        out.extend(
+            thread
+                .context
+                .iter()
+                .map(|c| context_line(palette, c, width)),
+        );
     }
     let inner = width.saturating_sub(2).max(1);
     for comment in thread.comments.iter().take(INLINE_COMMENTS) {
@@ -319,6 +343,7 @@ fn whole_thread(
 /// fold. Otherwise, with a diff to show, the block takes at most half the
 /// rows. Threads it has no room for are counted on its last row.
 fn top_block(
+    palette: &Palette,
     threads: &FileThreads,
     scope: &ThreadScope,
     selected: Option<usize>,
@@ -359,6 +384,7 @@ fn top_block(
             .saturating_sub(out.len() + usize::from(after > 0))
             .max(1);
         out.extend(thread_rows(
+            palette,
             thread,
             Some(placement),
             selected == Some(t),
@@ -380,11 +406,11 @@ pub struct CommentMarks {
 
 /// The row under a pending comment's line: its first line of text, made
 /// safe to draw.
-fn pending_row(first: &str) -> Line<'static> {
+fn pending_row(palette: &Palette, first: &str) -> Line<'static> {
     let text = kika_git::safe_text::sanitize(first.as_bytes());
     Line::styled(
         format!("{}✎ pending: {text}", " ".repeat(INDENT)),
-        Style::new().fg(Color::Cyan),
+        Style::new().fg(palette.location),
     )
 }
 
@@ -392,7 +418,9 @@ fn pending_row(first: &str) -> Line<'static> {
 /// `numbers` are [`kika_forge::anchor::row_numbers`] of the shown diff;
 /// `selected` is the thread `]`/`[` went to; `marks` the pending
 /// review's. An error or a slow load shows as the plain diff pane does.
+#[allow(clippy::too_many_arguments)]
 pub fn thread_diff_body(
+    palette: &Palette,
     diff: &DiffPane,
     numbers: &[RowNumber],
     threads: &FileThreads,
@@ -402,7 +430,7 @@ pub fn thread_diff_body(
     inner: Rect,
 ) -> Paragraph<'static> {
     if diff.error.is_some() || diff.show_loading {
-        return diff_pane_body(diff, inner);
+        return diff_pane_body(palette, diff, inner);
     }
     let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
     let discussion: &PrDiscussion = scope.discussion;
@@ -411,6 +439,7 @@ pub fn thread_diff_body(
     // The block above the diff belongs to its top.
     if start == 0 {
         out = top_block(
+            palette,
             threads,
             scope,
             selected,
@@ -433,7 +462,8 @@ pub fn thread_diff_body(
         if out.len() >= rows {
             break;
         }
-        let mut drawn = styled_diff_line(line, width, &marks_of(&diff.search, at));
+        let marks_here = marks_of(palette, &diff.search, at);
+        let mut drawn = styled_diff_line(palette, line, width, &marks_here);
         if marks
             .picked
             .is_some_and(|(first, last)| (first..=last).contains(&at))
@@ -443,7 +473,7 @@ pub fn thread_diff_body(
         out.push(drawn);
         for first in marks.under.get(&at).into_iter().flatten() {
             if out.len() < rows {
-                out.push(pending_row(first));
+                out.push(pending_row(palette, first));
             }
         }
         for &t in under.get(&at).into_iter().flatten() {
@@ -454,7 +484,14 @@ pub fn thread_diff_body(
                 continue;
             };
             let room = rows - out.len();
-            out.extend(thread_rows(thread, None, selected == Some(t), width, room));
+            out.extend(thread_rows(
+                palette,
+                thread,
+                None,
+                selected == Some(t),
+                width,
+                room,
+            ));
         }
     }
     out.truncate(rows);
@@ -469,6 +506,7 @@ pub fn thread_diff_body(
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
 
     use super::*;
     use crate::features::review::files::FilesFocus;

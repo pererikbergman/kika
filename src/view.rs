@@ -20,6 +20,7 @@ use crate::model::{AppState, Context, Focus};
 use crate::popup_view;
 use crate::reason_fit::fit_reason;
 use crate::remote_run::RemoteRun;
+use crate::theme::Palette;
 use kika_git::bisect::BisectState;
 use kika_git::emoji;
 use kika_git::remote::RemoteOp;
@@ -27,7 +28,7 @@ use kika_git::safe_text::sanitize;
 use kika_git::status::Head;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
@@ -44,7 +45,13 @@ pub fn render(state: &AppState, frame: &mut Frame) {
     if state.help_open {
         render_help(state, frame, main);
     }
-    commit::view::render_commit(&state.commit, state.commit_on_terminal, frame, main);
+    commit::view::render_commit(
+        &state.palette,
+        &state.commit,
+        state.commit_on_terminal,
+        frame,
+        main,
+    );
     popup_view::render_popups(state, frame, main);
     let (bar, cursor) = status_bar(state, status.width);
     frame.render_widget(bar, status);
@@ -146,11 +153,19 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
             let (side, tail) = hunk_title_parts(view, options);
             let path = view.path.display();
             let block = look.block(tool_title(&look, side, path, &tail, label));
-            render_rendered(rendered, block, None, hint, frame, area);
+            render_rendered(&look.palette, rendered, block, None, hint, frame, area);
         }
         (Focus::Diff, Some(view), Some(rendered), Some(label)) => {
             let block = look.block(hunk_title(view, options, label, &look));
-            render_rendered(rendered, block, Some(view), hint, frame, area);
+            render_rendered(
+                &look.palette,
+                rendered,
+                block,
+                Some(view),
+                hint,
+                frame,
+                area,
+            );
         }
         (Focus::Diff, Some(view), None, Some(label)) if state.rendered_for_shown().is_some() => {
             // Short, so it fits the pane's title at 80 columns.
@@ -182,12 +197,12 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
         (_, _, Some(rendered), Some(label)) if state.display_only() => {
             let (path, tail) = (rendered.path.display(), options_note(options));
             let block = look.block(tool_title(&look, "Diff", path, &tail, label));
-            render_rendered(rendered, block, None, hint, frame, area);
+            render_rendered(&look.palette, rendered, block, None, hint, frame, area);
         }
         (_, _, Some(rendered), Some(label)) => {
             let tail = format!("{} · {label}", options_note(options));
             let block = look.block(look.path_title("Diff", rendered.path.display(), &tail));
-            render_rendered(rendered, block, None, hint, frame, area);
+            render_rendered(&look.palette, rendered, block, None, hint, frame, area);
         }
         _ => render_diff_pane(&state.diff, options, &look, frame, area),
     }
@@ -197,6 +212,9 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
 /// screen mode its title names, and whether it has room for more than a
 /// title row.
 pub(crate) struct PanelLook {
+    /// The colours to draw with, so a panel drawn from its own state
+    /// alone still follows the theme.
+    pub(crate) palette: Palette,
     pub(crate) number: u8,
     pub(crate) focused: bool,
     /// ` · half` or ` · full` on the focused panel, else empty.
@@ -217,6 +235,7 @@ impl PanelLook {
             _ => String::new(),
         };
         Self {
+            palette: state.palette,
             number: panel.number(),
             focused,
             mode,
@@ -281,7 +300,7 @@ impl PanelLook {
     /// drops its bottom one, so the title still shows; the corners and
     /// sides stay so it lines up with the panels around it.
     pub(crate) fn block(&self, title: String) -> Block<'static> {
-        let block = panel_block(title, self.focused);
+        let block = panel_block(&self.palette, title, self.focused);
         if self.top_only {
             block.borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
         } else {
@@ -293,15 +312,15 @@ impl PanelLook {
 /// A panel's frame: focused, a thick coloured border and a bold title, so
 /// the panel with the keys stands out without colour too; else a thin dim
 /// border.
-pub(crate) fn panel_block(title: String, focused: bool) -> Block<'static> {
+pub(crate) fn panel_block(palette: &Palette, title: String, focused: bool) -> Block<'static> {
     let block = Block::bordered().title(title);
     if focused {
         block
             .border_type(BorderType::Thick)
             .title_style(Style::new().add_modifier(Modifier::BOLD))
-            .border_style(Style::new().fg(FOCUSED))
+            .border_style(Style::new().fg(palette.focused))
     } else {
-        block.border_style(Style::new().fg(Color::DarkGray))
+        block.border_style(Style::new().fg(palette.dim))
     }
 }
 
@@ -329,7 +348,9 @@ pub(crate) fn bisect_lines(
                 &format!("{FOUND_MARK} Found: {short} {}", found.subject),
                 width,
             ),
-            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(state.palette.warning)
+                .add_modifier(Modifier::BOLD),
         ));
     } else if bisect.only_skipped {
         lines.push(row("Only skipped commits left".to_string()));
@@ -391,9 +412,6 @@ pub(crate) fn short_hash(oid: &str) -> &str {
         .nth(SHORT_HASH)
         .map_or(oid, |(end, _)| &oid[..end])
 }
-
-/// The border colour of the panel or commit box that has the keys.
-pub(crate) const FOCUSED: Color = Color::Cyan;
 
 /// Popups wider than this are harder to read; it is a common message width.
 pub(crate) const COMMIT_WIDTH: u16 = 72;
@@ -609,14 +627,14 @@ pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
 /// The last `room` of `rows`. When they do not all fit, the first row
 /// says how many earlier ones are cut, since the end of git's output is
 /// usually where it says what went wrong.
-pub(crate) fn tail(rows: &[String], room: usize) -> Vec<Line<'_>> {
+pub(crate) fn tail<'a>(palette: &Palette, rows: &'a [String], room: usize) -> Vec<Line<'a>> {
     let mut lines: Vec<Line> = Vec::new();
     let mut shown = rows;
     if rows.len() > room && room >= 2 {
         shown = &rows[rows.len() - (room - 1)..];
         lines.push(Line::styled(
             format!("… {} earlier lines", rows.len() - shown.len()),
-            Style::new().fg(Color::DarkGray),
+            Style::new().fg(palette.dim),
         ));
     } else if rows.len() > room {
         shown = &rows[rows.len() - room..];
@@ -712,12 +730,12 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
             }
             _ => elide_right(&format!(" {notice}"), room),
         };
-        spans.push(Span::styled(text, Style::new().fg(Color::Yellow)));
+        spans.push(Span::styled(text, Style::new().fg(state.palette.warning)));
     } else if let Some(error) = state.op_error() {
         let text = format!(" error: {}", error.lines().next().unwrap_or_default());
         spans.push(Span::styled(
             elide_right(&text, room),
-            Style::new().fg(Color::Red),
+            Style::new().fg(state.palette.error),
         ));
     } else {
         let focus = state.key_focus();
@@ -725,7 +743,7 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
         if let Some(note) = note {
             spans.push(Span::styled(
                 format!(" {note}"),
-                Style::new().fg(Color::DarkGray),
+                Style::new().fg(state.palette.dim),
             ));
         }
         let mut room = room.saturating_sub(note.map_or(0, |n| width_of(n) + 1));
@@ -733,7 +751,9 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
         if let Some(copied) = &copied {
             spans.push(Span::styled(
                 format!(" {copied}"),
-                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::new()
+                    .fg(state.palette.copied)
+                    .add_modifier(Modifier::BOLD),
             ));
             room = room.saturating_sub(width_of(copied) + 1);
         }
@@ -783,7 +803,7 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
         for (i, (hint, disabled)) in fit_hints(&hints, room).into_iter().enumerate() {
             let first = i == 0 && note.is_none() && copied.is_none();
             spans.push(Span::raw(if first { " " } else { "  " }));
-            spans.push(Span::styled(hint, dimmed_if(disabled)));
+            spans.push(Span::styled(hint, dimmed_if(&state.palette, disabled)));
         }
     }
     (Line::from(spans), cursor)
@@ -1035,9 +1055,9 @@ fn fit_hints(hints: &[(String, bool, bool)], room: usize) -> Vec<(String, bool)>
     kept
 }
 
-fn dimmed_if(disabled: bool) -> Style {
+fn dimmed_if(palette: &Palette, disabled: bool) -> Style {
     if disabled {
-        Style::new().fg(Color::DarkGray)
+        Style::new().fg(palette.dim)
     } else {
         Style::new()
     }
@@ -1080,7 +1100,7 @@ fn render_help(state: &AppState, frame: &mut Frame, area: Rect) {
             let pad = key_width - width_of(keys);
             Line::styled(
                 format!(" {keys}{}  {description} ", " ".repeat(pad)),
-                dimmed_if(*disabled),
+                dimmed_if(&state.palette, *disabled),
             )
         })
         .collect();
@@ -1094,7 +1114,10 @@ fn render_help(state: &AppState, frame: &mut Frame, area: Rect) {
     if entries.len() > builtin_count {
         lines.insert(
             builtin_count,
-            Line::styled("─".repeat(content_width), Style::new().fg(Color::DarkGray)),
+            Line::styled(
+                "─".repeat(content_width),
+                Style::new().fg(state.palette.dim),
+            ),
         );
     }
     let popup = centered(
@@ -1162,8 +1185,8 @@ pub(crate) fn filter_title(look: &PanelLook, name: &str, query: &str, counts: &s
 }
 
 /// What a list says when its filter hides every row.
-pub(crate) fn no_matches() -> Line<'static> {
-    Line::styled("No matches", Style::new().fg(Color::DarkGray))
+pub(crate) fn no_matches(palette: &Palette) -> Line<'static> {
+    Line::styled("No matches", Style::new().fg(palette.dim))
 }
 
 /// A list's title text: `base` alone, or with ` · N selected` while a
@@ -1282,11 +1305,16 @@ pub(crate) fn row_text(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff_pane_view::{CURRENT_MATCH, MATCH};
+    use crate::diff_pane_view::{current_match, search_match};
     use crate::features::blame::CommitView;
     use crate::features::custom_commands::CustomCommandsIntent;
     use crate::hunk_view::HunkView;
     use crate::test_support::OID;
+    use crate::theme::Palette;
+    use ratatui::style::Color;
+
+    const MATCH: Style = search_match(&Palette::DEFAULT);
+    const CURRENT_MATCH: Style = current_match(&Palette::DEFAULT);
     use crate::test_support::screen::{
         TWO_HUNKS, assert_no_split_cluster, blame_line, blamed, branch, cell_at, contains,
         diff_line, draw, draw_buffer, draw_with_cursor, file, files_rows, find, hunks, loaded, on,
@@ -2551,11 +2579,20 @@ mod tests {
     }
 
     #[test]
+    fn the_focused_border_takes_its_colour_from_the_state_palette() {
+        let mut state = with_diff(vec![diff_line(LineKind::Added, "+new")]);
+        state.palette.focused = Color::Magenta;
+        let buffer = draw_buffer(&state, 80, 24);
+        let (border, _) = frame_style(&buffer, "[2] Files");
+        assert_eq!(border.fg, Some(Color::Magenta));
+    }
+
+    #[test]
     fn the_focused_panel_has_a_coloured_border_and_a_bold_title() {
         let mut state = with_diff(vec![diff_line(LineKind::Added, "+new")]);
         let buffer = draw_buffer(&state, 80, 24);
         let (border, title) = frame_style(&buffer, "[2] Files");
-        assert_eq!(border.fg, Some(FOCUSED));
+        assert_eq!(border.fg, Some(Palette::DEFAULT.focused));
         assert!(title.add_modifier.contains(Modifier::BOLD));
         // Without colour too: the focused frame is thick, the others thin.
         let rows = buffer_rows(&buffer);
@@ -2572,7 +2609,7 @@ mod tests {
         state.expanded = SidePanel::Stash;
         let buffer = draw_buffer(&state, 80, 24);
         let (border, title) = frame_style(&buffer, "[5] Stash");
-        assert_eq!(border.fg, Some(FOCUSED));
+        assert_eq!(border.fg, Some(Palette::DEFAULT.focused));
         assert!(title.add_modifier.contains(Modifier::BOLD));
         for other in ["[1] Status", "[2] Files", "[0] Diff"] {
             let (border, title) = frame_style(&buffer, other);

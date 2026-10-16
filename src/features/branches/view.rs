@@ -53,7 +53,7 @@ pub(crate) fn render_panel(
             ));
         };
         let mark = if *marked == branch.name {
-            Span::styled(DIFF_MARK, diff_mark_style())
+            Span::styled(DIFF_MARK, diff_mark_style(&look.palette))
         } else {
             Span::raw("  ")
         };
@@ -80,9 +80,14 @@ pub(crate) fn render_panel(
         block = block.title_bottom(Line::from(line));
     }
     let body = if expanded && panel.tab == BranchesTab::Remotes {
-        remotes::view::list_body(&panel.remotes, usize::from(inner.height), width)
+        remotes::view::list_body(
+            &look.palette,
+            &panel.remotes,
+            usize::from(inner.height),
+            width,
+        )
     } else if expanded && panel.tab == BranchesTab::Tags {
-        tags::view::list_body(&panel.tags, usize::from(inner.height), width)
+        tags::view::list_body(&look.palette, &panel.tags, usize::from(inner.height), width)
     } else if let Some(error) = &panel.list.error {
         let mut lines: Vec<Line> = error.lines().map(Line::from).collect();
         lines.push(Line::from("Press r to retry"));
@@ -97,7 +102,7 @@ pub(crate) fn render_panel(
         let list = &panel.list;
         let shown = list.visible();
         if shown.is_empty() {
-            Paragraph::new(no_matches())
+            Paragraph::new(no_matches(&look.palette))
         } else {
             let range = list.range();
             let selected = Some(list.selected);

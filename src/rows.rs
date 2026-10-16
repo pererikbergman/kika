@@ -3,13 +3,18 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use crate::theme::Palette;
 use crate::view::elide_right;
 use kika_git::commit_files::CommitFile;
 
 /// `<status> <path>`, or `<status> <old> → <new>` for a rename or copy,
 /// cut to `width`.
-pub(crate) fn commit_file_line(file: &CommitFile, width: usize) -> Line<'static> {
-    let colour = status_colour(file.status);
+pub(crate) fn commit_file_line(
+    palette: &Palette,
+    file: &CommitFile,
+    width: usize,
+) -> Line<'static> {
+    let colour = status_colour(palette, file.status);
     let path = drawn_path(file);
     Line::from(vec![
         Span::styled(file.status.to_string(), Style::new().fg(colour)),
@@ -19,13 +24,13 @@ pub(crate) fn commit_file_line(file: &CommitFile, width: usize) -> Line<'static>
 }
 
 /// The colour of a changed file's status letter.
-pub(crate) fn status_colour(status: char) -> Color {
+pub(crate) fn status_colour(palette: &Palette, status: char) -> Color {
     match status {
-        'A' => Color::Green,
-        'D' => Color::Red,
-        'M' => Color::Yellow,
-        'R' | 'C' => Color::Cyan,
-        _ => Color::Reset,
+        'A' => palette.added,
+        'D' => palette.removed,
+        'M' => palette.modified,
+        'R' | 'C' => palette.renamed,
+        _ => palette.text,
     }
 }
 
@@ -34,8 +39,8 @@ pub(crate) fn status_colour(status: char) -> Color {
 /// colour.
 pub(crate) const DIFF_MARK: &str = "◆ ";
 
-pub(crate) fn diff_mark_style() -> Style {
-    Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD)
+pub(crate) fn diff_mark_style(palette: &Palette) -> Style {
+    Style::new().fg(palette.mark).add_modifier(Modifier::BOLD)
 }
 
 /// A row's path as drawn, with the old name before it for a rename or

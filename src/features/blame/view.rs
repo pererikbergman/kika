@@ -48,7 +48,7 @@ pub(crate) fn render_blame(view: &BlameView, look: &PanelLook, frame: &mut Frame
                 let row = blame_row(line, number_width);
                 // Matches are in the text, after the drawn columns.
                 let prefix = row.chars().count() - line.text.chars().count();
-                let marks: Vec<_> = marks_of(&view.search, i)
+                let marks: Vec<_> = marks_of(&look.palette, &view.search, i)
                     .into_iter()
                     .map(|(start, end, style)| (start + prefix, end + prefix, style))
                     .collect();
@@ -108,7 +108,10 @@ pub(crate) fn render_commit_view(
             view.lines[start..end]
                 .iter()
                 .zip(start..)
-                .map(|(line, at)| styled_diff_line(line, width, &marks_of(&view.search, at)))
+                .map(|(line, at)| {
+                    let marks = marks_of(&look.palette, &view.search, at);
+                    styled_diff_line(&look.palette, line, width, &marks)
+                })
                 .collect::<Vec<_>>(),
         )
     };
