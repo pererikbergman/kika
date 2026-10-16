@@ -78,6 +78,12 @@ pub(crate) fn update(state: &mut AppState, intent: ReviewIntent) -> Vec<Effect> 
         ReviewIntent::StepCommentPick(down) => return state.step_comment_pick(down),
         ReviewIntent::ToggleCommentRange => state.toggle_comment_range(),
         ReviewIntent::ConfirmCommentPick => state.confirm_comment_pick(),
+        ReviewIntent::ConfirmSuggestionPick => return state.confirm_suggestion_pick(),
+        ReviewIntent::SuggestionLinesRead {
+            tag,
+            target,
+            result,
+        } => state.suggestion_read(tag, target, result),
         ReviewIntent::CancelCommentPick => return state.end_comment_pick(),
         ReviewIntent::TypeComment(key) => state.type_comment(key),
         ReviewIntent::SaveComment => return state.save_comment(),
