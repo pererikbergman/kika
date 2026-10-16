@@ -2,17 +2,17 @@
 //! report the cache, then ask the forge when told to. Each step is
 //! reported as a [`LoadEvent`]; the caller decides what it becomes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::cache::{self, CacheKey, Cached};
-use super::github::{Answer, GhRunner, MAX_BRANCHES, Refusal};
+use super::forge::Badges;
+use super::github::{GhRunner, MAX_BRANCHES, Refusal};
 use super::gitlab::GlabRunner;
-use super::head::{Head, heads};
+use super::head::heads;
 use super::remote::{allowed, parse_remote};
-use super::url::ForgeKind;
-use super::{CiState, ForgeHost, ForgeRepo, ForgeStatus, PrBadge, PrState};
+use super::{ForgeHost, ForgeRepo, ForgeStatus, PrBadge};
 use kika_git::GitRunner;
 use kika_git::branches::BranchName;
 use kika_git::forge_remote::{read_remote_url, read_upstreams};
@@ -69,12 +69,10 @@ pub struct Load<'a> {
 /// Run `load`, sending each event as it is known: `RepoNone`, or
 /// `Cached` and then, on a refresh, `Fetched`.
 ///
-/// The host's kind picks the CLI: `gh` for GitHub, `glab` for GitLab.
-/// On GitHub a refresh first probes, for free, whether the pull requests
-/// changed; when they did not and the cache is still good, no GraphQL
-/// query runs. A fork skips the probe: its own list says nothing of its
-/// parent's pull requests. GitLab has no probe. A rate-limited host gets
-/// no call at all until its limit resets. Each branch is asked about by its head, read from local git.
+/// The host's forge adapter asks for the badges, and may reuse the cached
+/// ones (see [`Forge::badges`](crate::forge::Forge::badges)). A
+/// rate-limited host gets no call at all until its limit resets. Each
+/// branch is asked about by its head, read from local git.
 /// A repository its host's allow-list leaves out answers `RepoNone`.
 pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn Fn(LoadEvent)) {
     // Defence in depth: with no hosts nothing is read, run or written.
@@ -124,41 +122,13 @@ pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn
     let branches = &load.branches[..load.branches.len().min(MAX_BRANCHES)];
     // The client applies the same allow gate as above, so a `None` is the
     // allow-list miss's answer should the two ever disagree.
-    let (found, etag, heads) = match host.kind() {
-        ForgeKind::GitHub => {
-            let Some(gh) = ctx.gh(host, &repo, load.now) else {
-                return send(LoadEvent::RepoNone);
-            };
-            let heads = heads(branches, &read_upstreams(git), &repo);
-            let sent = cached.as_ref().and_then(|c| c.etag.clone());
-            let forked = cached.as_ref().is_some_and(|c| c.forked);
-            let etag = if forked {
-                sent
-            } else {
-                match gh.probe(&repo, sent.as_deref()) {
-                    Answer::Limited { until } => return limited(until),
-                    // The cache is left as it is: its `fetched_at` stays the
-                    // time of the last GraphQL answer, which bounds how long
-                    // 304s may reuse it.
-                    Answer::NotModified => match cached.filter(|c| reusable(c, &heads, load.now)) {
-                        Some(cached) => return fetched(Ok(cached.badges), None),
-                        None => sent,
-                    },
-                    Answer::Body { etag, .. } => etag,
-                    // No worse than without a probe: ask anyway.
-                    Answer::Failed(_) => None,
-                }
-            };
-            (gh.fetch_badges(&repo, &heads), etag, heads)
-        }
-        // GitLab has no probe: each refresh asks GraphQL.
-        ForgeKind::GitLab => {
-            let Some(glab) = ctx.glab(host, &repo, load.now) else {
-                return send(LoadEvent::RepoNone);
-            };
-            let heads = heads(branches, &read_upstreams(git), &repo);
-            (glab.fetch_badges(&repo, &heads), None, heads)
-        }
+    let Some(forge) = ctx.forge(host, &repo, load.now) else {
+        return send(LoadEvent::RepoNone);
+    };
+    let heads = heads(branches, &read_upstreams(git), &repo);
+    let (found, etag) = match forge.badges(&repo, &heads, cached.as_ref()) {
+        Badges::Reuse(badges) => return fetched(Ok(badges), None),
+        Badges::Fresh { found, etag } => (found, etag),
     };
     match found {
         Ok(found) => {
@@ -177,27 +147,9 @@ pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn
         }
         Err(Refusal::Limited { until }) => limited(until),
         Err(Refusal::Status(status)) => fetched(Err(status), None),
+        // A forge kind without badges shows nothing, as when off.
+        Err(Refusal::Unsupported(_)) => send(LoadEvent::RepoNone),
     }
-}
-
-/// How long, in seconds, a GraphQL answer may be reused on 304s alone.
-/// CI can finish or re-run without changing the pull-request list, so a
-/// green badge is asked about again at least this often.
-const MAX_REUSE: i64 = 15 * 60;
-
-/// Whether `cached` still answers for `heads` at `now` when the pull
-/// requests did not change: the same heads were asked, less than
-/// [`MAX_REUSE`] ago, and no open PR waits on CI, which can finish
-/// without changing the pull-request list.
-fn reusable(cached: &Cached, heads: &[Head], now: i64) -> bool {
-    let waiting = cached.badges.values().any(|badge| {
-        matches!(badge.state, PrState::Open | PrState::Draft)
-            && matches!(badge.ci, Some(CiState::Pending | CiState::Failure))
-    });
-    let set = |heads: &[Head]| heads.iter().cloned().collect::<HashSet<_>>();
-    // A time ahead of the clock is not trusted either.
-    let young = (0..MAX_REUSE).contains(&(now - cached.fetched_at));
-    set(&cached.queried) == set(heads) && young && !waiting
 }
 
 #[cfg(test)]
@@ -208,11 +160,14 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::CiState;
+    use crate::forge::reusable;
     use crate::github::fixtures::{
         FORK_PARENT, GRAPHQL_RATE_LIMITED, HTTP_401_STDERR, LIMIT_PRIMARY, PROBE_200, PROBE_304,
         RENAMED_HEAD, SERVER_ERROR, STATES,
     };
     use crate::github::{FakeGh, GhCall, GhCommand, answer, failure};
+    use crate::head::Head;
     use crate::{ForgeRepo, ForgeState, ForgeStatus, ForgeView, LoadSeq, PrBadge, PrState};
     use kika_git::fake::{FakeRunner, TempDir, ok};
 
