@@ -23,7 +23,7 @@ use crate::features::{
     blame, commit, conflicts, custom_commands, files, operation, pull_requests, repos, review,
     stash, submodules, sync, worktrees,
 };
-use crate::handoff::HandOff;
+use crate::handoff::{HandOff, KeptFile};
 use crate::intent::AppIntent;
 use crate::op::{GitOp, run_op};
 use kika_forge::discussion_write::DiscussionWrite;
@@ -446,6 +446,9 @@ pub enum Effect {
         key: PendingKey,
         review: PendingReview,
     },
+    /// Remove the temp file a review comment was written in, and its
+    /// directory. Answered by nothing; a failure leaves a private temp dir.
+    RemoveCommentFile(KeptFile),
 
     // --- branches ---
     /// List the local branches; always answered by one
@@ -1351,6 +1354,7 @@ impl Runtime {
             Effect::SavePendingReview { tag, key, review } => {
                 review::effects::save_pending(self.pending_store.clone(), tx, tag, key, review)
             }
+            Effect::RemoveCommentFile(file) => review::effects::remove_comment_file(tx, file),
             Effect::LoadPullRequests {
                 tag,
                 hosts,

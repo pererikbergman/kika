@@ -14,6 +14,7 @@ use super::git::{self as pr_objects, CommitsHere};
 use crate::background;
 use crate::effect::{AnswerSlot, Bridge, Tag};
 use crate::features::review::ReviewIntent;
+use crate::handoff::KeptFile;
 use crate::intent::AppIntent;
 use kika_forge::discussion_write::DiscussionWrite;
 use kika_forge::merge::MergeMethod;
@@ -449,6 +450,19 @@ pub(crate) fn save_pending(
     );
 }
 
+/// Remove the file a comment was written in, with its directory and
+/// whatever the editor left beside it. Nobody is told: the comment was
+/// already used, and a leftover is a private temp dir.
+pub(crate) fn remove_comment_file(tx: UnboundedSender<AppIntent>, file: KeptFile) {
+    background::run_with(
+        tx,
+        move || {
+            let _ = std::fs::remove_dir_all(&file.dir);
+        },
+        |_| None,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -466,6 +480,32 @@ mod tests {
     use kika_git::commit_files::CommitId;
     use kika_git::fake::FakeRunner;
     use kika_git::recording::CommandSink;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn removing_a_comment_file_takes_its_directory_and_tells_nobody() {
+        let tmp = kika_git::fake::TempDir::new("comment-file");
+        let dir = tmp.path().join("kika-comment-1-0");
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("kika-comment-1-0.md");
+        std::fs::write(&path, "text").unwrap();
+        std::fs::write(dir.join("kika-comment-1-0.md.swp"), "swap").unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(FakeRunner::new()), tx);
+
+        runtime.spawn(Effect::RemoveCommentFile(crate::handoff::KeptFile {
+            dir: dir.clone(),
+            path,
+        }));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while dir.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(!dir.exists(), "{dir:?} was left behind");
+        drop(runtime);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(rx.try_recv().is_err(), "an intent was sent");
+    }
 
     #[tokio::test]
     async fn review_loads_answer_once_and_reach_nobody_without_a_forge_client() {
