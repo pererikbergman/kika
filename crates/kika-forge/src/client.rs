@@ -16,6 +16,7 @@ use super::forge::{self, Forge};
 use super::github::Gh;
 use super::gitlab::Glab;
 use super::merge::MergeMethod;
+use super::remote;
 use super::task::ForgeContext;
 use super::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
 use kika_git::commit_files::CommitId;
@@ -57,10 +58,12 @@ impl ForgeContext {
             .unwrap_or_else(std::env::temp_dir)
     }
 
-    /// Whether `repo` may be asked about on `host`: it is on the host, and
-    /// the host's allow-list lets the repository through.
+    /// Whether `repo` may be asked about on `host`: it is on the host (a
+    /// GitHub one only for an `owner/repo` path), and the host's
+    /// allow-list lets the repository through. The same gate as
+    /// [`remote::allowed`], so no caller can skip it.
     fn opens(host: &ForgeHost, repo: &ForgeRepo) -> bool {
-        repo.host.eq_ignore_ascii_case(host.as_str()) && host.allows(repo)
+        remote::allowed(repo, std::slice::from_ref(host)).is_some()
     }
 
     /// The forge adapter of `host`'s kind for `repo`, or why not: `repo`
@@ -228,6 +231,31 @@ mod tests {
             failed
         );
         assert!(runner.calls().is_empty());
+    }
+
+    #[test]
+    fn a_nested_owner_never_reaches_gh_on_a_github_host() {
+        let runner = Arc::new(FakeGh::new());
+        let ctx = context(runner.clone(), None);
+        let nested = ForgeRepo {
+            owner: "acme/sub".into(),
+            name: "x".into(),
+            ..repo()
+        };
+        let open = ForgeHost::parse("github.com").unwrap();
+        let rule = open
+            .clone()
+            .with_allow(vec![AllowRule::parse("acme/sub").unwrap()]);
+        for host in [open, rule] {
+            assert!(
+                matches!(ctx.forge(&host, &nested, 0), Err(Shut::Outside)),
+                "{host:?}"
+            );
+        }
+        assert!(runner.calls().is_empty());
+        // A GitLab host lets the same path through.
+        let lab = ForgeHost::parse_gitlab("github.com").unwrap();
+        assert!(ForgeContext::opens(&lab, &nested));
     }
 
     #[test]
