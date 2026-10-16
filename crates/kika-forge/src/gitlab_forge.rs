@@ -3,7 +3,7 @@
 use crate::cache::Cached;
 use crate::discussion::PrDiscussion;
 use crate::discussion_write::{DiscussionWrite, Written};
-use crate::forge::{Badges, Capability, Forge, Unsupported};
+use crate::forge::{Badges, Capability, Forge, Unsupported, Words};
 use crate::github::Refusal;
 use crate::gitlab::Glab;
 use crate::head::Head;
@@ -19,6 +19,13 @@ pub struct GitLabForge<'a>(pub(crate) Glab<'a>);
 impl GitLabForge<'_> {
     /// What GitLab can be asked so far.
     pub const SUPPORTS: &'static [Capability] = &[Capability::Badges];
+
+    /// How GitLab is named to the user: merge requests, numbered `!N`.
+    pub const WORDS: Words = Words {
+        cli: "glab",
+        requests: "merge requests",
+        sign: '!',
+    };
 
     fn lacks(capability: Capability) -> Unsupported {
         Unsupported {

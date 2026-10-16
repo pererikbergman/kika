@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use crate::cache::Cached;
 use crate::discussion::PrDiscussion;
 use crate::discussion_write::{DiscussionWrite, Written};
-use crate::forge::{Badges, Capability, Forge};
+use crate::forge::{Badges, Capability, Forge, Words};
 use crate::github::{Answer, Gh, Refusal};
 use crate::head::Head;
 use crate::review::{MergeMethod, PrDetail, Queues};
@@ -19,6 +19,13 @@ pub struct GitHubForge<'a>(pub(crate) Gh<'a>);
 impl GitHubForge<'_> {
     /// What GitHub can be asked: everything.
     pub const SUPPORTS: &'static [Capability] = &Capability::ALL;
+
+    /// How GitHub is named to the user.
+    pub const WORDS: Words = Words {
+        cli: "gh",
+        requests: "pull requests",
+        sign: '#',
+    };
 }
 
 impl Forge for GitHubForge<'_> {

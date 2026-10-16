@@ -261,6 +261,7 @@ fn the_page_documents_every_forge_key_and_the_pull_request_menu() {
     for needle in [
         "github = [",
         "gitlab = [",
+        "gitlab_ask = [",
         "browser = [",
         "Open in browser",
         "Create pull request",

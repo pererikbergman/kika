@@ -158,6 +158,27 @@ pub fn supports(kind: ForgeKind, capability: Capability) -> Result<(), Unsupport
     }
 }
 
+/// How a forge kind names its CLI, its requests and their numbers in
+/// user text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Words {
+    /// The CLI that holds the login, as the user runs it.
+    pub cli: &'static str,
+    /// What its pull requests are called, plural.
+    pub requests: &'static str,
+    /// What goes before a request's number.
+    pub sign: char,
+}
+
+/// `kind`'s words, without building an adapter, so a view can ask. Each
+/// adapter's own list answers, as [`supports`] does.
+pub fn words(kind: ForgeKind) -> &'static Words {
+    match kind {
+        ForgeKind::GitHub => &GitHubForge::WORDS,
+        ForgeKind::GitLab => &GitLabForge::WORDS,
+    }
+}
+
 /// The adapter for `host`'s forge kind. The caller has already checked
 /// the repository is on `host` and allowed: this is the one place a
 /// forge kind picks the code that runs.
@@ -194,6 +215,26 @@ mod tests {
                 ),
             }
         }
+    }
+
+    #[test]
+    fn each_kind_has_its_own_words() {
+        assert_eq!(
+            *words(ForgeKind::GitHub),
+            Words {
+                cli: "gh",
+                requests: "pull requests",
+                sign: '#'
+            }
+        );
+        assert_eq!(
+            *words(ForgeKind::GitLab),
+            Words {
+                cli: "glab",
+                requests: "merge requests",
+                sign: '!'
+            }
+        );
     }
 
     #[test]
