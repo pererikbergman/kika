@@ -669,6 +669,8 @@ pub const REPO_LOCKED: &[&str] = &[
     "review_thread.reply",
     "review_thread.resolve",
     "review.comment_general",
+    "review_files.submit",
+    "review_pending.submit",
     "review_pick.quit",
     "review_comment.quit",
     "review_comment.edit_externally",
@@ -5291,6 +5293,8 @@ mod tests {
                     | Review(ReviewIntent::ReplyToThread)
                     | Review(ReviewIntent::ToggleThreadResolved)
                     | Review(ReviewIntent::StartGeneralComment)
+                    // A review is submitted to GitHub after its question.
+                    | Review(ReviewIntent::OpenSubmitReview)
                     // It starts the user's editor.
                     | Review(ReviewIntent::EditCommentExternally)
                     | PullRequests(PullRequestsIntent::PickSelect)
@@ -5424,7 +5428,9 @@ mod tests {
                 "review_files.open_line",
                 "review_thread.reply",
                 "review_thread.resolve",
+                "review_files.submit",
                 "review_comment.edit_externally",
+                "review_pending.submit",
                 "merge_pr.yes",
                 "checkout_pr.yes",
             ]
@@ -5958,6 +5964,7 @@ mod tests {
         "review_thread.quit",
         "review_files.comment",
         "review_files.pending",
+        "review_files.submit",
         "review_pick.down",
         "review_pick.up",
         "review_pick.range",
@@ -5972,6 +5979,7 @@ mod tests {
         "review_pending.up",
         "review_pending.edit",
         "review_pending.delete",
+        "review_pending.submit",
         "review_pending.close",
         "review_pending.quit",
         "files.blame",

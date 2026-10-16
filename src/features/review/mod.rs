@@ -15,7 +15,8 @@
 //! its body (`markdown.rs`), the pending review of line comments kept on
 //! disk (`pending.rs`), picking the lines a comment goes on
 //! (`comment_pick.rs`) and typing it (`comment_editor.rs`) or writing it in
-//! the user's editor (`comment_external.rs`), all drawn by
+//! the user's editor (`comment_external.rs`), submitting the pending
+//! review to GitHub (`submit.rs`), all drawn by
 //! `pending_view.rs`, and the local git reads behind the files screen and
 //! the checkout (`git.rs`). The feature
 //! also owns its key bindings (`keys.rs`), its screen (`view.rs`) and the
@@ -33,7 +34,7 @@
 //! `state.rs`, `files.rs`, `commit_view.rs`, `viewed.rs`, `threads.rs`,
 //! `reader.rs`, `conversation.rs`, `discussion_write.rs`, `line_link.rs`, `merge.rs`,
 //! `checkout.rs`, `pending.rs`, `comment_pick.rs`, `comment_editor.rs` and
-//! `comment_external.rs`.
+//! `comment_external.rs` and `submit.rs`.
 //! The review guards on core arms (`ScrollDiff`, `OpenSearch`,
 //! `DiffEscape`) stay in core.
 //!
@@ -48,8 +49,8 @@
 //!   `thread_reader_open`, `composer_open`, `pending_list_open` and
 //!   `comment_pick_open`, which core focus uses, and those in `keys.rs`;
 //! - the handlers in `state.rs`, `files.rs`, `commit_view.rs`, `viewed.rs`,
-//!   `threads.rs`, `line_link.rs`, `merge.rs` and `checkout.rs` that
-//!   `update` calls, including the `review_files_shown` guard and
+//!   `threads.rs`, `line_link.rs`, `merge.rs`, `checkout.rs` and
+//!   `submit.rs` that `update` calls, including the `review_files_shown` guard and
 //!   `open_line_disabled`;
 //! - `pr_branch`, `verify_pr_branch` and `pr_checkout_commands`
 //!   (`git.rs`), which core's `GitOp::CheckoutPrBranch` is named, checked
@@ -69,8 +70,8 @@
 //! Kept cross-feature reads and calls:
 //! - `merge.rs` reloads the badges after a merge by asking core
 //!   `apply_plan` (`reload.rs`) for `Scope::PullRequests`;
-//! - pull_requests' `pick_select` calls `pick_check`, `pick_merge_method`
-//!   and `pick_review_commit`;
+//! - pull_requests' `pick_select` calls `pick_check`, `pick_merge_method`,
+//!   `pick_review_commit` and `pick_review_event`;
 //! - `files.rs` reads and writes `diff` and `diff_options` (diff), and
 //!   `comment_pick.rs` reads the streamed lines of `diff` and moves its
 //!   scroll to keep the pick in view, which `pending_view.rs` draws;
@@ -97,6 +98,7 @@ mod pending_view;
 mod reader;
 mod reader_view;
 mod state;
+mod submit;
 mod threads;
 mod threads_view;
 mod update;

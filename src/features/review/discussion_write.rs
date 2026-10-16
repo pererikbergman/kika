@@ -27,6 +27,7 @@ const GONE: &str = "That thread is no longer shown; refresh with r";
 const OFFLINE: &str = "GitHub could not be reached, or did not answer in time";
 // The warning leads, so a narrow bar keeps it.
 const MAYBE_POSTED: &str = "May have been posted - check before posting again";
+const MAYBE_SUBMITTED: &str = "May have been posted - check before submitting again";
 const NO_ANSWER: &str = "GitHub did not answer";
 const NO_USABLE: &str = "GitHub gave no usable answer";
 
@@ -64,16 +65,20 @@ pub(crate) fn general_comment_disabled(state: &AppState) -> Option<Reason> {
 /// What the user is told when a write failed. A post that timed out or
 /// had no usable answer may still have been made.
 fn failure_notice(error: &CreateError, write: &DiscussionWrite) -> String {
-    let post = !matches!(write, DiscussionWrite::Resolve { .. });
-    match error {
-        CreateError::Status(ForgeStatus::Offline) if post => {
-            format!("{MAYBE_POSTED} ({NO_ANSWER})")
+    let maybe = match write {
+        DiscussionWrite::Resolve { .. } => None,
+        DiscussionWrite::SubmitReview { .. } => Some(MAYBE_SUBMITTED),
+        DiscussionWrite::Reply { .. } | DiscussionWrite::Comment { .. } => Some(MAYBE_POSTED),
+    };
+    match (error, maybe) {
+        (CreateError::Status(ForgeStatus::Offline), Some(maybe)) => {
+            format!("{maybe} ({NO_ANSWER})")
         }
-        CreateError::Status(ForgeStatus::Failed) if post => {
-            format!("{MAYBE_POSTED} ({NO_USABLE})")
+        (CreateError::Status(ForgeStatus::Failed), Some(maybe)) => {
+            format!("{maybe} ({NO_USABLE})")
         }
-        CreateError::Status(ForgeStatus::Offline) => OFFLINE.to_string(),
-        other => other.message(),
+        (CreateError::Status(ForgeStatus::Offline), None) => OFFLINE.to_string(),
+        (other, _) => other.message(),
     }
 }
 
@@ -195,6 +200,7 @@ impl AppState {
             Ok((host, repo, number, write)) => {
                 let notice = match write {
                     DiscussionWrite::Reply { .. } => "Posting reply…",
+                    DiscussionWrite::SubmitReview { .. } => "Submitting review…",
                     _ => "Posting comment…",
                 };
                 self.send_write(host, repo, number, write, notice)
@@ -235,6 +241,9 @@ impl AppState {
                 }
                 *number
             }
+            ComposerKind::Review { number, event } => {
+                return self.submit_write(*number, *event, &composer.text.text());
+            }
             ComposerKind::Line { .. } => return Err(GONE.into()),
         };
         let (host, repo) = self.review_forge_target()?;
@@ -244,7 +253,7 @@ impl AppState {
         let write = match composer.kind {
             ComposerKind::Reply { thread, .. } => DiscussionWrite::Reply { thread, body },
             ComposerKind::General { subject, .. } => DiscussionWrite::Comment { subject, body },
-            ComposerKind::Line { .. } => return Err(GONE.into()),
+            ComposerKind::Line { .. } | ComposerKind::Review { .. } => return Err(GONE.into()),
         };
         Ok((host, repo, number, write))
     }
@@ -276,8 +285,9 @@ impl AppState {
     }
 
     /// GitHub answered a write. A post closes the composer and reads the
-    /// discussion again, once; a resolve is applied where it is shown. A
-    /// failure keeps the composer and its text. An answer to any other
+    /// discussion again, once; a submitted review also leaves the pending
+    /// review; a resolve is applied where it is shown. A failure keeps the
+    /// composer, its text and every pending comment. An answer to any other
     /// write changes nothing.
     pub(crate) fn discussion_written(
         &mut self,
@@ -314,7 +324,9 @@ impl AppState {
                 Ok(Written::Resolved(now))
             }
             (
-                DiscussionWrite::Reply { .. } | DiscussionWrite::Comment { .. },
+                DiscussionWrite::Reply { .. }
+                | DiscussionWrite::Comment { .. }
+                | DiscussionWrite::SubmitReview { .. },
                 Ok(Written::Posted),
             ) => Ok(Written::Posted),
             // An answer of the wrong kind is no answer.
@@ -343,6 +355,9 @@ impl AppState {
                 if n == number
         );
         match write {
+            DiscussionWrite::SubmitReview { event, threads, .. } => {
+                self.review_submitted(number, event, &threads, shown)
+            }
             DiscussionWrite::Resolve { thread, resolved } => {
                 self.notice = Some(
                     if resolved {

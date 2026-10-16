@@ -14,6 +14,7 @@ use super::comment_pick::{CommentPick, live_pick};
 use super::files::{PrFiles, ReviewView};
 use super::pending::{CommentTarget, PendingSlot, lines_label};
 use super::state::ReviewState;
+use super::submit::comments_label;
 use super::threads_view::{CommentMarks, clip_line, dim};
 use crate::model::AppState;
 use crate::view::{centered, elide_left, width_of};
@@ -99,7 +100,8 @@ pub fn render_pending(review: &ReviewState, frame: &mut Frame, area: Rect) {
         render_list(slot, cursor, frame, area);
     }
     if let Some(composer) = &review.composer {
-        render_composer(composer, review.composer_posting(), frame, area);
+        let comments = review.pending_count();
+        render_composer(composer, comments, review.composer_posting(), frame, area);
     }
 }
 
@@ -125,12 +127,13 @@ const MIN_LABEL: usize = 8;
 const EDITOR_CUE: &str = " · ctrl-e editor ";
 
 /// The composer's title for a box `room` columns inside: what is written
-/// and where it goes, then the editor cue. The editor cue gives way first;
-/// for a post the cue that it goes to GitHub, or that it is on its way, is
-/// kept whole and the label gives way next. While posting there is no
-/// editor cue, since the text may not change.
-fn composer_title(composer: &Composer, posting: bool, room: usize) -> String {
-    let (title, whole) = base_title(composer, posting, room);
+/// and where it goes, then the editor cue; a review's summary also counts
+/// the `comments` it carries. The editor cue gives way first; for a post
+/// the cue that it goes to GitHub, or that it is on its way, is kept whole
+/// and the label gives way next. While posting there is no editor cue,
+/// since the text may not change.
+fn composer_title(composer: &Composer, comments: usize, posting: bool, room: usize) -> String {
+    let (title, whole) = base_title(composer, comments, posting, room);
     if !whole || posting {
         return title;
     }
@@ -144,7 +147,7 @@ fn composer_title(composer: &Composer, posting: bool, room: usize) -> String {
 
 /// The title without the editor cue, and whether it kept its head, which
 /// the editor cue only ever follows.
-fn base_title(composer: &Composer, posting: bool, room: usize) -> (String, bool) {
+fn base_title(composer: &Composer, comments: usize, posting: bool, room: usize) -> (String, bool) {
     let head = match &composer.kind {
         ComposerKind::Line {
             target,
@@ -165,6 +168,11 @@ fn base_title(composer: &Composer, posting: bool, room: usize) -> (String, bool)
             }
         }
         ComposerKind::General { number, .. } => format!(" Comment on #{number}"),
+        ComposerKind::Review { number, event } => format!(
+            " Review summary: {} #{number} ({})",
+            event.label(),
+            comments_label(comments)
+        ),
     };
     let cues: &[&str] = if posting { &POSTING_CUES } else { &POSTS_CUES };
     let (with_head, alone) = cues
@@ -181,11 +189,17 @@ fn base_title(composer: &Composer, posting: bool, room: usize) -> (String, bool)
     (title.to_string(), false)
 }
 
-fn render_composer(composer: &Composer, posting: bool, frame: &mut Frame, area: Rect) {
+fn render_composer(
+    composer: &Composer,
+    comments: usize,
+    posting: bool,
+    frame: &mut Frame,
+    area: Rect,
+) {
     let popup = box_area(area);
     let room = usize::from(popup.width).saturating_sub(2);
     let block = frame_block(clip_title(
-        &composer_title(composer, posting, room),
+        &composer_title(composer, comments, posting, room),
         popup.width,
     ));
     let inner = block.inner(popup);
@@ -481,7 +495,7 @@ mod tests {
             editing: Some(1),
         });
         assert_eq!(
-            composer_title(&edit, false, 80),
+            composer_title(&edit, 0, false, 80),
             " Edit comment on src/cache.rs:R1 · ctrl-e editor "
         );
         let general = Composer::new(ComposerKind::General {
@@ -489,19 +503,19 @@ mod tests {
             subject: "PR_1".into(),
         });
         let full = " Comment on #12 · ctrl-s posts to GitHub · ctrl-e editor ";
-        assert_eq!(composer_title(&general, false, width_of(full)), full);
+        assert_eq!(composer_title(&general, 0, false, width_of(full)), full);
         // One column short: the editor cue goes before anything else.
         assert_eq!(
-            composer_title(&general, false, width_of(full) - 1),
+            composer_title(&general, 0, false, width_of(full) - 1),
             " Comment on #12 · ctrl-s posts to GitHub "
         );
         // Without the head it never shows, nor while posting.
         assert_eq!(
-            composer_title(&general, false, 30),
+            composer_title(&general, 0, false, 30),
             " ctrl-s posts to GitHub "
         );
         assert_eq!(
-            composer_title(&general, true, 80),
+            composer_title(&general, 0, true, 80),
             " Comment on #12 · posting… "
         );
     }
