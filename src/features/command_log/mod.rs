@@ -12,7 +12,9 @@
 //! free function [`update`]; the handlers `command_logged`,
 //! `open_command_log`, `move_command_log` and `command_log_page` on
 //! `AppState`; the chunks
-//! `keys::{COMMAND_LOG_WORKSPACE, COMMAND_LOG_KEYS}`; and `view::render`.
+//! `keys::{COMMAND_LOG_WORKSPACE, COMMAND_LOG_KEYS}`; and
+//! `view::{render, log_box}`, the second the layout the mouse finds rows
+//! in.
 //!
 //! Kept cross-feature reads: none. It reads only core state (`popups`,
 //! `size`, `command_log`).

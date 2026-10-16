@@ -22,7 +22,8 @@
 //!   reload in `reload.rs`, `refs_loaded` and `test_support` call it), and
 //!   `files_open`;
 //! - `effects::{load, load_files}` and `view::render_stash_panel`, and the
-//!   mouse's queries `stash_list_shown` and `stash_step_to` (`view.rs`).
+//!   mouse's queries `stash_list_shown`, `stash_step_to`,
+//!   `stash_files_shown` and `stash_files_step_to` (`view.rs`).
 //!
 //! Kept cross-feature reads:
 //! - stashing from the Files panel reads `files` and `files_marked()`,

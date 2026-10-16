@@ -28,6 +28,27 @@ impl AppState {
             && !list.visible().is_empty()
     }
 
+    /// Whether the Stash panel lists an opened entry's files, expanded:
+    /// what a click or the wheel can move through.
+    pub(crate) fn stash_files_shown(&self) -> bool {
+        self.expanded == SidePanel::Stash
+            && self.stash.open.as_ref().is_some_and(|open| {
+                open.list.loaded && open.list.error.is_none() && !open.list.rows.is_empty()
+            })
+    }
+
+    /// The move from the cursor to the file drawn on `line` of the listed
+    /// panel's `rows` inner lines, as `render_stash_files` scrolls them;
+    /// `None` below the last file or when no files are listed.
+    pub(crate) fn stash_files_step_to(&self, line: usize, rows: usize) -> Option<isize> {
+        let list = &self.stash.open.as_ref()?.list;
+        if !self.stash_files_shown() || line >= rows {
+            return None;
+        }
+        let pos = files_start(list.selected, rows) + line;
+        (pos < list.rows.len()).then(|| pos as isize - list.selected as isize)
+    }
+
     /// The move from the cursor to the entry drawn on `line` of the
     /// listed panel's `rows` inner lines; `None` below the last entry or
     /// when the panel lists no entries.
@@ -120,6 +141,12 @@ fn error_paragraph(error: &str, hint: Option<&str>) -> Paragraph<'static> {
     Paragraph::new(lines).wrap(Wrap { trim: false })
 }
 
+/// The first of an entry's files drawn in `height` lines, scrolled just
+/// enough to keep the `selected` one in view. Shared with the mouse.
+fn files_start(selected: usize, height: usize) -> usize {
+    (selected + 1).saturating_sub(height.max(1))
+}
+
 /// An entry's files in place of the list, as a commit's are: a
 /// placeholder until they load, then one row per file. Untracked files
 /// show as added.
@@ -136,7 +163,7 @@ fn render_stash_files(open: &StashFilesList, look: &PanelLook, frame: &mut Frame
             Style::new().fg(look.palette.dim),
         )),
         None => {
-            let start = (list.selected + 1).saturating_sub(height.max(1));
+            let start = files_start(list.selected, height);
             let end = (start + height).min(list.rows.len());
             Paragraph::new(
                 (start..end)

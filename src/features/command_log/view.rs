@@ -7,6 +7,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::log::{CommandLog, CommandLogView, LogEntry, row_text};
+use crate::popup_view::ListBox;
 use crate::theme::Palette;
 use crate::view::{clip, elide_right, pad, width_of};
 use kika_git::recording::CommandOutcome;
@@ -29,34 +30,33 @@ pub fn render(
     let shown = usize::from(area.height.saturating_sub(2)).max(1);
     let entries = log.entries();
     let visible = view.visible(log);
-    let hidden = view.selected_hidden(log);
-    // Where the cursor sits among the shown rows. A hidden one scrolls
-    // from the top; one past the end, as in an empty log, is on the last.
-    let at = match visible.iter().position(|&i| i == view.cursor) {
-        Some(at) => at,
-        None if hidden => 0,
-        None => visible.len().saturating_sub(1),
-    };
-    let place = (!hidden && !visible.is_empty()).then_some(at);
-    let title = title(&view.filter, visible.len(), log.len(), place, shown, room);
+    let window = log_box(log, view, area);
+    let title = title(
+        &view.filter,
+        visible.len(),
+        log.len(),
+        window.cursor,
+        shown,
+        room,
+    );
     let lines: Vec<Line> = if log.is_empty() {
         vec![Line::raw(" No git commands yet.")]
     } else if visible.is_empty() {
         vec![Line::raw(" No matches ")]
     } else {
-        let first = at.saturating_sub(shown - 1);
         visible
             .iter()
-            .skip(first)
+            .enumerate()
+            .skip(window.first)
             .take(shown)
-            .map(|&i| {
+            .map(|(at, &i)| {
                 let entry = &entries[i];
                 let mut style = if failed(entry) {
                     Style::new().fg(palette.error)
                 } else {
                     Style::new()
                 };
-                if top && !hidden && i == visible[at] {
+                if top && window.cursor == Some(at) {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
                 // Padded, so the cursor's reversed bar fills the row.
@@ -68,6 +68,29 @@ pub fn render(
         Paragraph::new(lines).block(Block::bordered().title(title)),
         area,
     );
+}
+
+/// Where the log's rows are drawn in `area`, which it fills: the first
+/// shown row is the one that keeps the cursor in view. Shared with the
+/// mouse, so a click lands on the row drawn under it.
+pub(crate) fn log_box(log: &CommandLog, view: &CommandLogView, area: Rect) -> ListBox {
+    let shown = usize::from(area.height.saturating_sub(2)).max(1);
+    let visible = view.visible(log);
+    let hidden = view.selected_hidden(log);
+    // Where the cursor sits among the shown rows. A hidden one scrolls
+    // from the top; one past the end, as in an empty log, is on the last.
+    let at = match visible.iter().position(|&i| i == view.cursor) {
+        Some(at) => at,
+        None if hidden => 0,
+        None => visible.len().saturating_sub(1),
+    };
+    ListBox {
+        rect: area,
+        first: at.saturating_sub(shown - 1),
+        header: 0,
+        len: visible.len(),
+        cursor: (!hidden && !visible.is_empty()).then_some(at),
+    }
 }
 
 /// ` Command log `, or with a filter ` Command log · /<filter> <n> of

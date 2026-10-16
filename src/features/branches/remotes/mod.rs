@@ -21,7 +21,8 @@
 //!   change_remote_disabled, rename_remote_disabled}`;
 //! - `effects::load`;
 //! - `git::{track_command, add_command, rename_command, remove_command}`;
-//! - `view::{list_body, render_remote}`.
+//! - `view::{list_body, render_remote}`, and the mouse's queries
+//!   `remotes_list_shown` and `remotes_step_to` (`view.rs`).
 //!
 //! Kept cross-feature reads and calls:
 //! - `bisect_refuses` on `AppState` and `bisect::head_move_disabled`

@@ -1110,6 +1110,25 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn move_by_moves_the_file_cursor_clamped_with_one_diff_load() {
+        let (mut state, _) = ready();
+        let by = |delta| AppIntent::Review(ReviewIntent::MoveBy(delta));
+        let effects = state.update(by(9));
+        assert_eq!(
+            streamed(&effects).0.path,
+            "logo.png".into(),
+            "clamped at the end"
+        );
+        assert_eq!(state.update(by(1)), vec![], "no move, no load");
+        state.update(by(-9));
+        assert_eq!(
+            state.review.files.as_ref().unwrap().cursor,
+            0,
+            "clamped at the start"
+        );
+    }
+
+    #[test]
     fn j_and_k_pick_a_file_and_tab_gives_the_diff_the_keys() {
         let (mut state, _) = ready();
         let effects = type_char(&mut state, 'j');

@@ -11,6 +11,9 @@ pub(crate) enum ReflogIntent {
     /// Move the Reflog tab's selection down or up.
     Next,
     Prev,
+    /// Move the cursor by this many rows, clamped at both ends: a click
+    /// or a wheel notch.
+    MoveBy(isize),
     /// `HEAD`'s reflog was read; `tag` says which load.
     Loaded {
         tag: Tag,

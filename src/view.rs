@@ -1063,11 +1063,13 @@ fn dimmed_if(palette: &Palette, disabled: bool) -> Style {
     }
 }
 
-/// A popup over `area` listing every key the focused panel answers to,
-/// the user's own commands after the built-in ones, below a rule. A list
-/// taller than the screen scrolls; `▲`/`▼` on the border say rows are cut,
-/// and the bottom one says which key scrolls.
-fn render_help(state: &AppState, frame: &mut Frame, area: Rect) {
+/// What help says about the mouse, last, while it is captured.
+const MOUSE_HELP: &str = " Mouse: click selects a row, the wheel scrolls ";
+
+/// Help's title and lines, as drawn: every key the focused panel answers
+/// to, the user's own commands after the built-in ones below a rule, and
+/// the mouse's line below another while it is captured.
+fn help_content(state: &AppState) -> (String, Vec<Line<'static>>) {
     let focus = state.panel_focus();
     let labels = |keys: &[KeyPattern]| {
         let labels: Vec<String> = keys.iter().map(KeyPattern::label).collect();
@@ -1094,7 +1096,7 @@ fn render_help(state: &AppState, frame: &mut Frame, area: Rect) {
         .map(|(k, _, _)| width_of(k))
         .max()
         .unwrap_or(0);
-    let mut lines: Vec<Line> = entries
+    let mut lines: Vec<Line<'static>> = entries
         .iter()
         .map(|(keys, description, disabled)| {
             let pad = key_width - width_of(keys);
@@ -1104,27 +1106,54 @@ fn render_help(state: &AppState, frame: &mut Frame, area: Rect) {
             )
         })
         .collect();
+    let dim = Style::new().fg(state.palette.dim);
     let title = format!(" Keys: {} ", help_name(state));
     let content_width = lines
         .iter()
         .map(Line::width)
         .chain([width_of(&title)])
+        .chain(state.mouse.then(|| width_of(MOUSE_HELP)))
         .max()
         .unwrap_or(0);
+    let rule = || Line::styled("─".repeat(content_width), dim);
     if entries.len() > builtin_count {
-        lines.insert(
-            builtin_count,
-            Line::styled(
-                "─".repeat(content_width),
-                Style::new().fg(state.palette.dim),
-            ),
-        );
+        lines.insert(builtin_count, rule());
     }
-    let popup = centered(
+    if state.mouse {
+        lines.push(rule());
+        lines.push(Line::styled(MOUSE_HELP, dim));
+    }
+    debug_assert_eq!(lines.len(), state.help_lines());
+    (title, lines)
+}
+
+/// Where help is drawn over `area`, sized to its lines. Shared with the
+/// mouse, so the wheel scrolls it only over it.
+pub(crate) fn help_box(state: &AppState, area: Rect) -> Rect {
+    let (title, lines) = help_content(state);
+    help_rect(area, &title, &lines)
+}
+
+fn help_rect(area: Rect, title: &str, lines: &[Line]) -> Rect {
+    let content_width = lines
+        .iter()
+        .map(Line::width)
+        .chain([width_of(title)])
+        .max()
+        .unwrap_or(0);
+    centered(
         area,
         u16::try_from(content_width + 2).unwrap_or(u16::MAX),
         u16::try_from(lines.len() + 2).unwrap_or(u16::MAX),
-    );
+    )
+}
+
+/// A popup over `area` listing what `help_content` lists. A list taller
+/// than the screen scrolls; `▲`/`▼` on the border say rows are cut, and
+/// the bottom one says which key scrolls.
+fn render_help(state: &AppState, frame: &mut Frame, area: Rect) {
+    let (title, lines) = help_content(state);
+    let popup = help_rect(area, &title, &lines);
     let rows = help_rows(frame.area());
     let total = lines.len();
     let first = state.help_scroll.min(total.saturating_sub(rows));
@@ -3076,6 +3105,47 @@ mod tests {
         assert!(contains(&rows, "Quit Kika"), "{rows:#?}");
         assert!(contains(&rows, "▲"), "{rows:#?}");
         assert!(!contains(&rows, "more ▼"), "{rows:#?}");
+    }
+
+    const MOUSE_LINE: &str = "Mouse: click selects a row, the wheel scrolls";
+
+    #[test]
+    fn help_says_what_the_mouse_does_only_while_it_is_captured() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.files.selected = 0;
+        state.help_open = true;
+        let rows = draw(&state, 100, 60);
+        assert!(contains(&rows, "Quit Kika"), "{rows:#?}");
+        assert!(!contains(&rows, MOUSE_LINE), "{rows:#?}");
+
+        state.mouse = true;
+        let buffer = draw_buffer(&state, 100, 60);
+        let rows = buffer_rows(&buffer);
+        let (x, y) = find(&buffer, MOUSE_LINE);
+        assert_eq!(buffer[(x, y)].style().fg, Some(Color::DarkGray), "dim");
+        // The last line inside the box, below a rule.
+        assert!(rows[usize::from(y) - 1].contains("────"), "{rows:#?}");
+        assert!(rows[usize::from(y) + 1].contains('└'), "{rows:#?}");
+    }
+
+    #[test]
+    fn scrolling_help_to_its_end_shows_the_mouse_line() {
+        use crate::intent::{AppIntent, Scroll};
+        for (width, height) in [(80, 8), (80, 24), (60, 14)] {
+            let mut state = loaded(vec![file("a.rs")]);
+            state.files.selected = 0;
+            state.mouse = true;
+            state.update(AppIntent::Resize { width, height });
+            state.update(AppIntent::OpenHelp);
+            let mut last = usize::MAX;
+            while state.help_scroll != last {
+                last = state.help_scroll;
+                state.update(AppIntent::ScrollHelp(Scroll::LineDown));
+            }
+            let rows = draw(&state, width, height);
+            assert!(contains(&rows, "Mouse: click selects"), "{rows:#?}");
+            assert!(!contains(&rows, "more ▼"), "{rows:#?}");
+        }
     }
 
     // --- List filters, ranges and the diff search ---

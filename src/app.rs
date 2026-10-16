@@ -79,6 +79,7 @@ pub async fn run(
     spawn_input_listener(tx.clone(), Arc::clone(&input));
     // Read once by `main`, which turned capture on to match.
     let mouse = config.mouse;
+    state.mouse = mouse;
     state.watch.fetch_enabled = config.watch.fetch.is_some();
     state.commit_hooks_detached = config.commit_hooks_detached;
     // Read by `main` for this repository, so it always applies.

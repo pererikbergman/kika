@@ -47,6 +47,9 @@ pub(crate) enum PullRequestsIntent {
     /// Move the pick list's cursor down or up.
     PickNext,
     PickPrev,
+    /// Move the pick list's cursor by this many rows, clamped at both
+    /// ends: a click or a wheel notch. It never picks.
+    PickMoveBy(isize),
     /// Take the row under the pick list's cursor.
     PickSelect,
     /// The title the pull request prompt was accepted with.

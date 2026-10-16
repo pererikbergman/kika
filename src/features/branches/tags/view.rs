@@ -5,9 +5,35 @@ use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
 use super::TagsList;
+use crate::features::branches::BranchesTab;
+use crate::layout::SidePanel;
+use crate::model::AppState;
 use crate::theme::Palette;
-use crate::view::{elide_right, no_matches, range_row, scrolled};
+use crate::view::{elide_right, no_matches, range_row, scrolled, scrolled_step_to};
 use kika_git::tags::TagRef;
+
+impl AppState {
+    /// Whether the Branches panel lists its tags, expanded: what a click
+    /// or the wheel can move through.
+    pub(crate) fn tags_list_shown(&self) -> bool {
+        let list = &self.branches.tags;
+        self.expanded == SidePanel::Branches
+            && self.branches.tab == BranchesTab::Tags
+            && list.error.is_none()
+            && list.loaded
+            && !list.visible().is_empty()
+    }
+
+    /// The move from the cursor to the tag drawn on `line` of the listed
+    /// panel's `rows` inner lines, as `list_body` scrolls them; `None`
+    /// below the last tag or when the tab lists none.
+    pub(crate) fn tags_step_to(&self, line: usize, rows: usize) -> Option<isize> {
+        let list = &self.branches.tags;
+        self.tags_list_shown()
+            .then(|| scrolled_step_to(&list.visible(), list.selected, rows, line))
+            .flatten()
+    }
+}
 
 /// What the tab shows when there are no tags.
 const NO_TAGS: &str = "No tags";

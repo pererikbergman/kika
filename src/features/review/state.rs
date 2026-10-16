@@ -1130,6 +1130,22 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn move_by_moves_the_queue_cursor_over_shown_rows_clamped() {
+        let mut state = in_queues();
+        let number = |state: &AppState| state.review.rows()[state.review.cursor].number;
+        assert_eq!(number(&state), 12);
+        let by = |delta| AppIntent::Review(ReviewIntent::MoveBy(delta));
+        assert_eq!(
+            state.update(by(9)),
+            vec![],
+            "as `Next`, moving loads nothing"
+        );
+        assert_eq!(number(&state), 7, "clamped at the end");
+        state.update(by(-9));
+        assert_eq!(number(&state), 12, "clamped at the start");
+    }
+
+    #[test]
     fn the_queue_keys_cycle_filter_open_and_come_back_to_the_same_row() {
         let mut state = in_queues();
         assert_eq!(state.panel_focus(), crate::keymap::KeyScope::Review);

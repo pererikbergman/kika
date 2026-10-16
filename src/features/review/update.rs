@@ -25,6 +25,7 @@ pub(crate) fn update(state: &mut AppState, intent: ReviewIntent) -> Vec<Effect> 
         } => return state.pull_request_merged(tag, number, result),
         ReviewIntent::Next => return state.review_move(1),
         ReviewIntent::Prev => return state.review_move(-1),
+        ReviewIntent::MoveBy(delta) => return state.review_move(delta),
         ReviewIntent::OpenFiles => return state.open_review_files(),
         ReviewIntent::ToggleFilesFocus => state.toggle_review_files_focus(),
         ReviewIntent::ObjectsChecked { tag, result } => {
