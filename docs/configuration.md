@@ -809,7 +809,12 @@ theme, and `[theme.colors]` changes single roles on top of it. Without a
 
 A non-empty `NO_COLOR` environment variable (no-color.org) turns off all
 colour, an external diff pager's or tool's included, and wins over
-`[theme]` and `[theme.colors]`.
+`[theme]` and `[theme.colors]`. Kika reads it once at startup, like
+`[theme]`, so setting or clearing it needs a restart.
+
+```sh
+NO_COLOR=1 kika
+```
 
 ```toml
 [theme]
