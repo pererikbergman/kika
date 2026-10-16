@@ -1,0 +1,4 @@
+HTTP/2.0 201 Created
+Content-Type: application/json
+
+{"id":101,"author_id":3,"merge_request_id":4242,"resolve_discussion":false,"discussion_id":null,"note":"\u001b[31mred\u001b[0m note","commit_id":null,"line_code":null,"position":null}

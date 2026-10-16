@@ -67,14 +67,15 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
 }
 
 /// What a problem says, and what to do about it when there is a next step.
-pub fn problem_text(problem: ReviewProblem, words: &Words) -> (String, Option<&'static str>) {
+pub fn problem_text(problem: ReviewProblem, words: &Words) -> (String, Option<String>) {
+    let Words { name, cli, .. } = words;
     match problem {
         ReviewProblem::NoForgeHost => (
             NO_FORGE.to_string(),
-            Some("Add its host to [forge] github, or its owner to [forge.allow]."),
+            Some("Add its host to [forge] github, or its owner to [forge.allow].".into()),
         ),
         ReviewProblem::Limited(until) => (
-            format!("GitHub is rate limited until {} UTC", clock(until)),
+            format!("{name} is rate limited until {} UTC", clock(until)),
             None,
         ),
         ReviewProblem::Missing(number) => {
@@ -89,24 +90,24 @@ pub fn problem_text(problem: ReviewProblem, words: &Words) -> (String, Option<&'
                     return (what.trim_end_matches('.').to_string(), None);
                 }
                 ForgeStatus::NotLoggedIn => (
-                    "gh is not logged in to this host",
-                    Some("Run gh auth login."),
+                    format!("{cli} is not logged in to this host"),
+                    Some(format!("Run {cli} auth login.")),
                 ),
                 ForgeStatus::Offline => (
-                    "GitHub could not be reached",
-                    Some("Check the network, then press r."),
+                    format!("{name} could not be reached"),
+                    Some("Check the network, then press r.".into()),
                 ),
                 ForgeStatus::NoAccess => (
-                    "No access to the repository with gh's login",
-                    Some("Check gh auth status."),
+                    format!("No access to the repository with {cli}'s login"),
+                    Some(format!("Check {cli} auth status.")),
                 ),
-                ForgeStatus::RateLimited => ("GitHub is rate limiting this account", None),
+                ForgeStatus::RateLimited => (format!("{name} is rate limiting this account"), None),
                 ForgeStatus::Failed => (
-                    "GitHub gave no usable answer",
-                    Some("Press r to try again."),
+                    format!("{name} gave no usable answer"),
+                    Some("Press r to try again.".into()),
                 ),
             };
-            (what.to_string(), next)
+            (what, next)
         }
     }
 }
@@ -122,7 +123,7 @@ fn problem_lines(
     let (what, next) = problem_text(problem, words);
     let mut lines = markdown::wrap_text(&what, Style::new().fg(palette.error), width);
     if let Some(next) = next {
-        lines.extend(markdown::wrap_text(next, Style::new(), width));
+        lines.extend(markdown::wrap_text(&next, Style::new(), width));
     }
     lines
 }
@@ -996,6 +997,47 @@ mod tests {
     }
 
     #[test]
+    fn on_gitlab_a_problem_names_gitlab_and_glab() {
+        let mut state = on_gitlab(reviewing(ReviewScreen::Detail(42)));
+        state.review.detail_fetch.error = Some(ReviewProblem::Limited(1_700_003_600));
+        let rows = draw(&state, 80, 8);
+        assert!(
+            contains(&rows, "GitLab is rate limited until 23:13 UTC"),
+            "{rows:#?}"
+        );
+        state.review.detail_fetch.error = Some(ReviewProblem::Status(ForgeStatus::Offline));
+        let rows = draw(&state, 80, 8);
+        assert!(contains(&rows, "GitLab could not be reached"), "{rows:#?}");
+        assert!(!rows.iter().any(|r| r.contains("GitHub")), "{rows:#?}");
+        let gitlab = kika_forge::forge::words(kika_forge::url::ForgeKind::GitLab);
+        let text = |status| problem_text(ReviewProblem::Status(status), gitlab);
+        assert_eq!(
+            text(ForgeStatus::NotLoggedIn),
+            (
+                "glab is not logged in to this host".to_string(),
+                Some("Run glab auth login.".to_string())
+            )
+        );
+        assert_eq!(
+            text(ForgeStatus::NoAccess),
+            (
+                "No access to the repository with glab's login".to_string(),
+                Some("Check glab auth status.".to_string())
+            )
+        );
+        assert_eq!(
+            text(ForgeStatus::RateLimited).0,
+            "GitLab is rate limiting this account"
+        );
+        assert_eq!(text(ForgeStatus::Failed).0, "GitLab gave no usable answer");
+        // GitHub keeps its own.
+        assert_eq!(
+            problem_text(ReviewProblem::Status(ForgeStatus::NotLoggedIn), GITHUB).1,
+            Some("Run gh auth login.".to_string())
+        );
+    }
+
+    #[test]
     fn a_missing_pull_request_and_loading_are_one_line() {
         let mut state = reviewing(ReviewScreen::Detail(999));
         let rows = draw(&state, 80, 8);
@@ -1105,7 +1147,7 @@ mod tests {
                 let words: Vec<&str> = text.split_whitespace().collect();
                 let want: Vec<&str> = what
                     .split_whitespace()
-                    .chain(next.into_iter().flat_map(str::split_whitespace))
+                    .chain(next.iter().flat_map(|n| n.split_whitespace()))
                     .collect();
                 assert_eq!(words, want, "{problem:?} at {width}");
                 for line in &lines {
@@ -1365,15 +1407,7 @@ mod tests {
         );
     }
 
-    /// `state` reviewing a repository on a `gitlab_ask` host.
-    fn on_gitlab(mut state: AppState) -> AppState {
-        state.forge.hosts = vec![ForgeHost::parse_gitlab("gitlab.example.com").unwrap()];
-        state.review.repo = Some(kika_forge::ForgeRepo {
-            host: "gitlab.example.com".into(),
-            ..repo()
-        });
-        state
-    }
+    use crate::features::review::state::tests::on_gitlab;
 
     #[test]
     fn a_gitlab_repository_shows_merge_requests_by_bang_number() {

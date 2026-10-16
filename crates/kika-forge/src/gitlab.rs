@@ -1,4 +1,5 @@
-//! Merge requests from GitLab, read through `glab api graphql`. `glab`
+//! Merge requests from GitLab, read through `glab api graphql`, and the
+//! few REST calls a review submit makes (`glab api <path>`). `glab`
 //! holds the login (its own config, or `GITLAB_TOKEN` in the environment
 //! it inherits), so Kika never sees a token: it passes none, stores none
 //! and draws none. `glab`'s stderr is only matched against fixed markers,
@@ -16,10 +17,10 @@ use serde_json::json;
 use super::cli::CliStatus;
 use super::github::{
     Answer, BATCH, Fetched, GhOutput, MAX_BACKOFF, MAX_BRANCHES, MIN_BACKOFF, OFFLINE_MARKERS,
-    Refusal, TIMEOUT, logged, run_piped, split_include_reading,
+    Refusal, TIMEOUT, logged, refusal, run_piped, split_include_reading,
 };
 use super::head::Head;
-use super::{CiState, ForgeHost, ForgeRepo, ForgeStatus, PrBadge, PrState};
+use super::{CiState, CreateError, ForgeHost, ForgeRepo, ForgeStatus, PrBadge, PrState};
 use kika_git::recording::{CommandOutcome, CommandSink};
 
 /// Set on every call: no prompt, no pager, no colour, no update check,
@@ -51,9 +52,62 @@ pub enum GlabCall {
     /// A GraphQL query; `body` is the JSON for stdin, so no branch name
     /// or project path ever reaches argv.
     Graphql { body: Vec<u8> },
+    /// A REST call on a merge request. The path is made of decimal ids
+    /// only, and the body, when there is one, travels on stdin.
+    Rest {
+        method: RestMethod,
+        path: RestPath,
+        body: Option<Vec<u8>>,
+    },
     /// `glab --version`: local, with no host and no stdin, to learn that
     /// `glab` is installed and usable.
     Version,
+}
+
+/// The HTTP method of a [`GlabCall::Rest`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestMethod {
+    Get,
+    Post,
+    Delete,
+}
+
+impl RestMethod {
+    fn as_str(self) -> &'static str {
+        match self {
+            RestMethod::Get => "GET",
+            RestMethod::Post => "POST",
+            RestMethod::Delete => "DELETE",
+        }
+    }
+}
+
+/// Where a [`GlabCall::Rest`] goes: a merge request's draft notes, one
+/// of them, their bulk publish, or its approval. Built from numbers only,
+/// so no name from the repository or the answer reaches argv.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestPath {
+    DraftNotes { project: u64, iid: u64 },
+    DraftNote { project: u64, iid: u64, note: u64 },
+    BulkPublish { project: u64, iid: u64 },
+    Approve { project: u64, iid: u64 },
+}
+
+impl RestPath {
+    /// The path as `glab api` takes it, relative to the host's API root.
+    pub fn render(self) -> String {
+        let mr = |project: u64, iid: u64| format!("projects/{project}/merge_requests/{iid}");
+        match self {
+            RestPath::DraftNotes { project, iid } => format!("{}/draft_notes", mr(project, iid)),
+            RestPath::DraftNote { project, iid, note } => {
+                format!("{}/draft_notes/{note}", mr(project, iid))
+            }
+            RestPath::BulkPublish { project, iid } => {
+                format!("{}/draft_notes/bulk_publish", mr(project, iid))
+            }
+            RestPath::Approve { project, iid } => format!("{}/approve", mr(project, iid)),
+        }
+    }
 }
 
 /// One `glab api` call: the host, and what it asks.
@@ -84,6 +138,25 @@ impl GlabCommand {
             ]
             .map(OsString::from)
             .into(),
+            GlabCall::Rest { method, path, body } => {
+                let mut args: Vec<OsString> = [
+                    "api",
+                    &path.render(),
+                    "--method",
+                    method.as_str(),
+                    "--include",
+                    "--hostname",
+                    self.host.as_str(),
+                    "--header",
+                    "Content-Type: application/json",
+                ]
+                .map(OsString::from)
+                .into();
+                if body.is_some() {
+                    args.extend(["--input", "-"].map(OsString::from));
+                }
+                args
+            }
             GlabCall::Version => vec!["--version".into()],
         }
     }
@@ -95,6 +168,13 @@ impl GlabCommand {
                 "glab api graphql --include --hostname {} --input -",
                 self.host
             ),
+            GlabCall::Rest { .. } => self.args().iter().map(|a| a.to_string_lossy()).fold(
+                "glab".to_string(),
+                |line, arg| match arg.contains(' ') {
+                    true => format!("{line} '{arg}'"),
+                    false => format!("{line} {arg}"),
+                },
+            ),
             GlabCall::Version => "glab --version".to_string(),
         }
     }
@@ -103,6 +183,7 @@ impl GlabCommand {
     pub fn stdin(&self) -> Vec<u8> {
         match &self.kind {
             GlabCall::Graphql { body } => body.clone(),
+            GlabCall::Rest { body, .. } => body.clone().unwrap_or_default(),
             GlabCall::Version => Vec::new(),
         }
     }
@@ -181,6 +262,36 @@ impl Glab<'_> {
             }
         }
         Ok(fetched)
+    }
+
+    /// One REST call, shown in the Command log under its own id: the body
+    /// of a 2xx answer (empty for a 204), or why not. GitLab's own reason
+    /// for a refusal is kept, terminal-safe and cut short.
+    pub(crate) fn rest(
+        &self,
+        method: RestMethod,
+        path: RestPath,
+        body: Option<Vec<u8>>,
+    ) -> Result<Vec<u8>, CreateError> {
+        let cmd = GlabCommand {
+            host: self.host.as_str().to_string(),
+            kind: GlabCall::Rest { method, path, body },
+            cwd: self.cwd.clone(),
+            timeout: TIMEOUT,
+        };
+        let now = self.now;
+        logged(
+            self.sink,
+            cmd.display_line(),
+            || classify_rest(self.runner.run(&cmd), now),
+            |result| match result {
+                Ok(_) => CommandOutcome::Ok,
+                Err(CreateError::Status(ForgeStatus::Cli(CliStatus::NotInstalled))) => {
+                    CommandOutcome::NotStarted
+                }
+                Err(_) => CommandOutcome::Failed(None),
+            },
+        )
     }
 
     /// Run one call, shown in the Command log under its own id, and read
@@ -299,8 +410,21 @@ struct Probe {
 
 #[derive(Deserialize)]
 struct ProbeData {
-    /// Null when the project does not exist or the login cannot see it.
-    project: Option<serde::de::IgnoredAny>,
+    /// Null when the project does not exist or the login cannot see it;
+    /// absent from a query not asked through a project, whose reader then
+    /// judges what it holds.
+    #[serde(default, deserialize_with = "present")]
+    project: Option<Option<serde::de::IgnoredAny>>,
+}
+
+/// A field that is there, even as null, as `Some`; serde's `default`
+/// leaves an absent one `None`.
+fn present<'de, D, T>(de: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(de).map(Some)
 }
 
 /// The only headers read; the rest are dropped unseen.
@@ -311,23 +435,77 @@ const READ_HEADERS: [&str; 3] = ["ratelimit-remaining", "ratelimit-reset", "retr
 /// and a 2xx body must be a GraphQL answer naming the project. `now` is
 /// only used to place `until`.
 pub fn classify(output: io::Result<GhOutput>, now: i64) -> Answer {
+    let Screened { status, exit, body } = match screen(output, now) {
+        Ok(read) => read,
+        Err(answer) => return answer,
+    };
+    let success = match status {
+        Some(code) => (200..300).contains(&code),
+        None => exit == Some(0),
+    };
+    if !success {
+        return Answer::Failed(ForgeStatus::Failed);
+    }
+    let Ok(response) = serde_json::from_slice::<Probe>(&body) else {
+        return Answer::Failed(ForgeStatus::Failed);
+    };
+    if response.errors.is_some_and(|e| !e.is_empty()) {
+        return Answer::Failed(ForgeStatus::Failed);
+    }
+    match response.data {
+        None => Answer::Failed(ForgeStatus::Failed),
+        Some(ProbeData {
+            project: Some(None),
+        }) => Answer::Failed(ForgeStatus::NoAccess),
+        Some(ProbeData { .. }) => Answer::Body { etag: None, body },
+    }
+}
+
+/// What a REST call came to: judged as [`classify`] judges any call,
+/// then any 2xx (a 201 or a 204 too) is success and its body, maybe
+/// empty, is the caller's to read. Another status keeps GitLab's
+/// `message` when it gave one.
+pub fn classify_rest(output: io::Result<GhOutput>, now: i64) -> Result<Vec<u8>, CreateError> {
+    let Screened { status, exit, body } = match screen(output, now) {
+        Ok(read) => read,
+        Err(Answer::Limited { until }) => return Err(CreateError::RateLimited { until }),
+        Err(Answer::Failed(status)) => return Err(CreateError::Status(status)),
+        Err(_) => return Err(CreateError::Status(ForgeStatus::Failed)),
+    };
+    match status {
+        Some(code) if (200..300).contains(&code) => Ok(body),
+        Some(_) => Err(refusal(&body).map_or(
+            CreateError::Status(ForgeStatus::Failed),
+            CreateError::Refused,
+        )),
+        // No status line: nothing says what was done.
+        None if exit == Some(0) && body.is_empty() => Ok(body),
+        None => Err(CreateError::Status(ForgeStatus::Failed)),
+    }
+}
+
+/// What every answer is judged by first: a missing `glab`, a timeout,
+/// the login, the network, rate limits and access. What is left to read
+/// is the status, the exit code and the body. Rate limits are checked
+/// before a 403 is taken to mean no access.
+fn screen(output: io::Result<GhOutput>, now: i64) -> Result<Screened, Answer> {
     let output = match output {
         Ok(output) => output,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Answer::Failed(ForgeStatus::Cli(CliStatus::NotInstalled));
+            return Err(Answer::Failed(ForgeStatus::Cli(CliStatus::NotInstalled)));
         }
-        Err(_) => return Answer::Failed(ForgeStatus::Failed),
+        Err(_) => return Err(Answer::Failed(ForgeStatus::Failed)),
     };
     if output.timed_out {
-        return Answer::Failed(ForgeStatus::Offline);
+        return Err(Answer::Failed(ForgeStatus::Offline));
     }
     let (status, headers, body) = split_include_reading(&output.stdout, &READ_HEADERS);
     if status == Some(401) {
-        return Answer::Failed(ForgeStatus::NotLoggedIn);
+        return Err(Answer::Failed(ForgeStatus::NotLoggedIn));
     }
     let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
     if OFFLINE_MARKERS.iter().any(|m| stderr.contains(m)) {
-        return Answer::Failed(ForgeStatus::Offline);
+        return Err(Answer::Failed(ForgeStatus::Offline));
     }
     let header = |name: &str| {
         headers
@@ -341,34 +519,26 @@ pub fn classify(output: io::Result<GhOutput>, now: i64) -> Answer {
         let until = number("ratelimit-reset")
             .or_else(|| number("retry-after").map(|wait| now.saturating_add(wait)))
             .unwrap_or(now + MIN_BACKOFF);
-        return Answer::Limited {
+        return Err(Answer::Limited {
             until: until.clamp(now + MIN_BACKOFF, now + MAX_BACKOFF),
-        };
+        });
     }
     if matches!(status, Some(403 | 404)) {
-        return Answer::Failed(ForgeStatus::NoAccess);
+        return Err(Answer::Failed(ForgeStatus::NoAccess));
     }
-    let success = match status {
-        Some(code) => (200..300).contains(&code),
-        None => output.exit == Some(0),
-    };
-    if !success {
-        return Answer::Failed(ForgeStatus::Failed);
-    }
-    let Ok(response) = serde_json::from_slice::<Probe>(body) else {
-        return Answer::Failed(ForgeStatus::Failed);
-    };
-    if response.errors.is_some_and(|e| !e.is_empty()) {
-        return Answer::Failed(ForgeStatus::Failed);
-    }
-    match response.data {
-        None => Answer::Failed(ForgeStatus::Failed),
-        Some(ProbeData { project: None }) => Answer::Failed(ForgeStatus::NoAccess),
-        Some(ProbeData { project: Some(_) }) => Answer::Body {
-            etag: None,
-            body: body.to_vec(),
-        },
-    }
+    Ok(Screened {
+        status,
+        exit: output.exit,
+        body: body.to_vec(),
+    })
+}
+
+/// What [`screen`] leaves to read: the status line's code, the exit code
+/// and the body.
+struct Screened {
+    status: Option<u16>,
+    exit: Option<i32>,
+    body: Vec<u8>,
 }
 
 /// The badge for each of `batch`'s aliases in order, from a GraphQL body
@@ -643,6 +813,166 @@ mod tests {
         assert!(argv.iter().all(|a| !a.contains("evil")), "{argv:?}");
         assert!(!cmd.display_line().contains("evil"));
         assert_eq!(body(&cmd)["variables"]["b0"], "--hostname=evil");
+    }
+
+    #[test]
+    fn a_rest_argv_is_the_fixed_line_with_the_host_and_decimal_ids_only() {
+        let runner = FakeGlab::new()
+            .reply(answer("HTTP/2.0 200 OK\r\n\r\n[]"))
+            .reply(answer("HTTP/2.0 201 Created\r\n\r\n{\"id\":5}"))
+            .reply(answer("HTTP/2.0 204 No Content\r\n\r\n"))
+            .reply(answer("HTTP/2.0 204 No Content\r\n\r\n"));
+        let sink = CommandSink::new();
+        let host = host();
+        let glab = glab(&runner, &sink, &host);
+        let (project, iid) = (17, 42);
+        let secret = b"{\"note\":\"--hostname=evil acme/widgets\"}".to_vec();
+        assert_eq!(
+            glab.rest(RestMethod::Get, RestPath::DraftNotes { project, iid }, None),
+            Ok(b"[]".to_vec())
+        );
+        assert_eq!(
+            glab.rest(
+                RestMethod::Post,
+                RestPath::DraftNotes { project, iid },
+                Some(secret.clone())
+            ),
+            Ok(b"{\"id\":5}".to_vec())
+        );
+        assert_eq!(
+            glab.rest(
+                RestMethod::Delete,
+                RestPath::DraftNote {
+                    project,
+                    iid,
+                    note: 5
+                },
+                None
+            ),
+            Ok(Vec::new())
+        );
+        assert_eq!(
+            glab.rest(
+                RestMethod::Post,
+                RestPath::BulkPublish { project, iid },
+                Some(b"{}".to_vec())
+            ),
+            Ok(Vec::new())
+        );
+        let calls = runner.calls();
+        let argv = |cmd: &GlabCommand| -> Vec<String> {
+            cmd.args()
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let fixed = |path: &str, method: &str| -> Vec<String> {
+            [
+                "api",
+                path,
+                "--method",
+                method,
+                "--include",
+                "--hostname",
+                "gitlab.example.com",
+                "--header",
+                "Content-Type: application/json",
+            ]
+            .map(String::from)
+            .into()
+        };
+        let input = |mut v: Vec<String>| {
+            v.extend(["--input".to_string(), "-".to_string()]);
+            v
+        };
+        assert_eq!(
+            argv(&calls[0]),
+            fixed("projects/17/merge_requests/42/draft_notes", "GET")
+        );
+        assert!(calls[0].stdin().is_empty());
+        assert_eq!(
+            argv(&calls[1]),
+            input(fixed("projects/17/merge_requests/42/draft_notes", "POST"))
+        );
+        assert_eq!(calls[1].stdin(), secret);
+        assert_eq!(
+            argv(&calls[2]),
+            fixed("projects/17/merge_requests/42/draft_notes/5", "DELETE")
+        );
+        assert_eq!(
+            argv(&calls[3]),
+            input(fixed(
+                "projects/17/merge_requests/42/draft_notes/bulk_publish",
+                "POST"
+            ))
+        );
+        assert_eq!(
+            RestPath::Approve { project, iid }.render(),
+            "projects/17/merge_requests/42/approve"
+        );
+        for cmd in &calls {
+            let line = cmd.display_line();
+            assert!(!line.contains("evil") && !line.contains("acme"), "{line}");
+            assert!(argv(cmd).iter().all(|a| !a.contains("evil")));
+            assert!(
+                line.starts_with("glab api projects/17/merge_requests/42/"),
+                "{line}"
+            );
+        }
+        assert_eq!(
+            calls[1].display_line(),
+            "glab api projects/17/merge_requests/42/draft_notes --method POST --include \
+             --hostname gitlab.example.com --header 'Content-Type: application/json' --input -"
+        );
+    }
+
+    #[test]
+    fn a_rest_answer_is_judged_like_any_and_keeps_gitlabs_reason() {
+        let rest = |stdout: &str| classify_rest(Ok(answer(stdout)), NOW);
+        assert_eq!(rest("HTTP/2.0 201 Created\r\n\r\n{}"), Ok(b"{}".to_vec()));
+        assert_eq!(rest("HTTP/2.0 204 No Content\r\n\r\n"), Ok(Vec::new()));
+        assert_eq!(
+            rest(UNAUTHORIZED_401),
+            Err(CreateError::Status(ForgeStatus::NotLoggedIn))
+        );
+        assert_eq!(
+            rest(RATE_LIMITED_429),
+            Err(CreateError::RateLimited { until: NOW + 1200 })
+        );
+        assert_eq!(
+            rest(SERVER_ERROR),
+            Err(CreateError::Status(ForgeStatus::Failed))
+        );
+        assert_eq!(
+            rest("HTTP/2.0 409 Conflict\r\n\r\n{\"message\":\"SHA \\u001b[31mdoes not match\"}"),
+            Err(CreateError::Refused(
+                "SHA \u{fffd}[31mdoes not match".into()
+            ))
+        );
+        assert_eq!(
+            classify_rest(Err(io::ErrorKind::NotFound.into()), NOW),
+            Err(CreateError::Status(ForgeStatus::Cli(
+                CliStatus::NotInstalled
+            )))
+        );
+        assert_eq!(
+            classify_rest(
+                Ok(failure(
+                    1,
+                    "dial tcp: lookup gitlab.example.com: no such host"
+                )),
+                NOW
+            ),
+            Err(CreateError::Status(ForgeStatus::Offline))
+        );
+        // A GraphQL answer through a merge request id, with no project in
+        // it, is left for its reader.
+        assert!(matches!(
+            classify_ok(answer(
+                "HTTP/2.0 200 OK\r\n\r\n{\"data\":{\"mergeRequest\":null}}"
+            )),
+            Answer::Body { .. }
+        ));
     }
 
     #[test]

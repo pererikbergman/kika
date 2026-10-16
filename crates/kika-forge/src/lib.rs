@@ -24,6 +24,7 @@ pub mod gitlab;
 pub mod gitlab_discussion;
 mod gitlab_forge;
 pub mod gitlab_review;
+pub mod gitlab_submit;
 pub mod head;
 pub mod merge;
 pub mod pending;
@@ -207,23 +208,34 @@ pub enum CreateError {
 impl CreateError {
     /// What the error popup says.
     pub fn message(&self) -> String {
+        self.message_in(forge::words_or_default(None))
+    }
+
+    /// What the error popup says, naming the forge and its CLI in
+    /// `words`.
+    pub fn message_in(&self, words: &forge::Words) -> String {
+        let forge::Words {
+            name,
+            cli: tool,
+            request,
+            ..
+        } = words;
         match self {
             CreateError::Status(ForgeStatus::Cli(status)) => cli::problem_text(*status),
             CreateError::Status(ForgeStatus::NotLoggedIn) => {
-                "gh is not logged in to this host; run gh auth login.".into()
+                format!("{tool} is not logged in to this host; run {tool} auth login.")
             }
-            CreateError::Status(ForgeStatus::Offline) => {
-                "GitHub could not be reached, or did not answer in time. If it timed out, \
-                 the pull request may still have been made: fetch to read the badges again."
-                    .into()
-            }
+            CreateError::Status(ForgeStatus::Offline) => format!(
+                "{name} could not be reached, or did not answer in time. If it timed out, \
+                 the {request} may still have been made: fetch to read the badges again."
+            ),
             CreateError::Status(ForgeStatus::NoAccess) => {
-                "No access to the repository with gh's login.".into()
+                format!("No access to the repository with {tool}'s login.")
             }
             CreateError::Status(ForgeStatus::RateLimited) | CreateError::RateLimited { .. } => {
-                "GitHub is rate limiting this account.".into()
+                format!("{name} is rate limiting this account.")
             }
-            CreateError::Status(ForgeStatus::Failed) => "GitHub gave no usable answer.".into(),
+            CreateError::Status(ForgeStatus::Failed) => format!("{name} gave no usable answer."),
             CreateError::Refused(message) => message.clone(),
             CreateError::Unsupported(unsupported) => unsupported.message(),
         }
@@ -537,6 +549,39 @@ pub(crate) mod tests {
 
     fn github() -> Vec<ForgeHost> {
         vec![ForgeHost::parse("github.com").unwrap()]
+    }
+
+    #[test]
+    fn an_error_names_the_forge_and_cli_it_came_from() {
+        let gitlab = forge::words(url::ForgeKind::GitLab);
+        let say = |e: CreateError| (e.message(), e.message_in(gitlab));
+        assert_eq!(
+            say(CreateError::Status(ForgeStatus::NotLoggedIn)),
+            (
+                "gh is not logged in to this host; run gh auth login.".into(),
+                "glab is not logged in to this host; run glab auth login.".into()
+            )
+        );
+        assert_eq!(
+            say(CreateError::RateLimited { until: 1 }),
+            (
+                "GitHub is rate limiting this account.".into(),
+                "GitLab is rate limiting this account.".into()
+            )
+        );
+        assert_eq!(
+            say(CreateError::Status(ForgeStatus::Failed)).1,
+            "GitLab gave no usable answer."
+        );
+        assert_eq!(
+            say(CreateError::Status(ForgeStatus::NoAccess)).1,
+            "No access to the repository with glab's login."
+        );
+        assert!(
+            say(CreateError::Status(ForgeStatus::Offline))
+                .1
+                .contains("the merge request may still")
+        );
     }
 
     fn widgets() -> ForgeRepo {

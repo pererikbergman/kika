@@ -10,7 +10,8 @@ use super::pending::{CommentTarget, comment_disabled};
 use crate::diff_search::reveal;
 use crate::effect::Effect;
 use crate::model::AppState;
-use kika_forge::anchor::{GhLine, GhSide, RowNumber, row_numbers};
+use kika_forge::anchor::{GhLine, GhSide, RowNumber, row_numbers, row_positions};
+use kika_forge::pending::RowPos;
 use kika_git::diff::LineKind;
 
 pub(super) const ACROSS_HUNKS: &str = "A range must stay inside one hunk";
@@ -176,13 +177,26 @@ impl AppState {
             return None;
         }
         let (start, end) = (gh_line(numbers[first])?, gh_line(numbers[last])?);
+        let positions = row_positions(&self.diff.lines);
+        let pos = |row: usize| {
+            let (old, new) = positions[row]?;
+            let (o, n) = numbers[row];
+            Some(RowPos {
+                old,
+                new,
+                both: o.is_some() && n.is_some(),
+            })
+        };
+        let range = first != last;
         let target = self.review.files.as_ref().and_then(|files| {
             let path = std::str::from_utf8(files.selected()?.file.path.as_bytes()).ok()?;
             Some(CommentTarget {
                 path: path.to_string(),
-                start: (first != last).then_some(start),
+                start: range.then_some(start),
                 end,
                 head: files.head.as_str().to_string(),
+                start_pos: pos(first).filter(|_| range),
+                end_pos: pos(last),
             })
         });
         if target.is_none() {
@@ -263,6 +277,38 @@ mod tests {
         let (_, review) = saved(&ctrl(&mut state, 's'));
         assert_eq!(review.comments[0].end, left(2));
         assert_eq!(review.comments[0].start, None);
+    }
+
+    fn positions(state: &AppState) -> (Option<RowPos>, Option<RowPos>) {
+        let composer = state.review.composer.as_ref().expect("a composer");
+        let ComposerKind::Line { target, .. } = &composer.kind else {
+            panic!("{composer:?}");
+        };
+        (target.start_pos, target.end_pos)
+    }
+
+    #[test]
+    fn each_end_keeps_both_line_counters_of_its_row() {
+        let pos = |old, new, both| Some(RowPos { old, new, both });
+        // `+fn new() {}` alone: added, the old counter the next old line.
+        let mut state = commenting();
+        type_char(&mut state, 'a');
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(positions(&state), (None, pos(1, 1, false)));
+        // From the context row to `+fn newer() {}`.
+        press(&mut state, KeyCode::Esc);
+        type_char(&mut state, 'a');
+        type_char(&mut state, 'j');
+        type_char(&mut state, 'v');
+        type_char(&mut state, 'j');
+        type_char(&mut state, 'j');
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(target(&state), (Some(right(2)), right(3)));
+        assert_eq!(positions(&state), (pos(1, 2, true), pos(3, 3, false)));
+        type_text(&mut state, "range");
+        let (_, review) = saved(&ctrl(&mut state, 's'));
+        assert_eq!(review.comments[0].start_pos, pos(1, 2, true));
+        assert_eq!(review.comments[0].end_pos, pos(3, 3, false));
     }
 
     #[test]

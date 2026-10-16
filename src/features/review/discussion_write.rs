@@ -1,4 +1,4 @@
-//! Answering on GitHub from review mode: a reply to the thread the reader
+//! Answering on the forge from review mode: a reply to the thread the reader
 //! shows (`a`), resolving or unresolving it (`R`), and a general comment
 //! from the conversation (`a`). A reply or a comment is typed in the
 //! composer and posted only on the `y` of a question; `R` is sent at once,
@@ -14,22 +14,37 @@ use crate::effect::{Effect, Tag};
 use crate::keymap::Reason;
 use crate::model::AppState;
 use kika_forge::discussion_write::{DiscussionWrite, Written};
+use kika_forge::forge::Words;
 use kika_forge::review::node_id_ok;
 use kika_forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
 
 pub(super) const POSTING: &str = "Already posting";
-pub(super) const WAIT: &str = "Wait for GitHub to answer";
 const NO_THREAD: &str = "Open a review thread first";
 const NO_THREAD_ID: &str = "GitHub sent no id for this thread; refresh with r";
-const NO_PR_ID: &str = "GitHub sent no pull request id; refresh with r";
 const NOT_CONVERSATION: &str = "Open the conversation first (C)";
 const GONE: &str = "That thread is no longer shown; refresh with r";
-const OFFLINE: &str = "GitHub could not be reached, or did not answer in time";
 // The warning leads, so a narrow bar keeps it.
 const MAYBE_POSTED: &str = "May have been posted - check before posting again";
 const MAYBE_SUBMITTED: &str = "May have been posted - check before submitting again";
-const NO_ANSWER: &str = "GitHub did not answer";
-const NO_USABLE: &str = "GitHub gave no usable answer";
+
+/// Why nothing may change while a write is on its way to the forge.
+pub(super) fn wait(words: &Words) -> String {
+    format!("Wait for {} to answer", words.name)
+}
+
+pub(super) fn no_pr_id(words: &Words) -> String {
+    format!(
+        "{} sent no {} id; refresh with r",
+        words.name, words.request
+    )
+}
+
+fn offline(words: &Words) -> String {
+    format!(
+        "{} could not be reached, or did not answer in time",
+        words.name
+    )
+}
 
 /// The one write in flight: its sequence, the pull request it is on and
 /// what was sent.
@@ -64,7 +79,8 @@ pub(crate) fn general_comment_disabled(state: &AppState) -> Option<Reason> {
 
 /// What the user is told when a write failed. A post that timed out or
 /// had no usable answer may still have been made.
-fn failure_notice(error: &CreateError, write: &DiscussionWrite) -> String {
+fn failure_notice(error: &CreateError, write: &DiscussionWrite, words: &Words) -> String {
+    let name = words.name;
     let maybe = match write {
         DiscussionWrite::Resolve { .. } => None,
         DiscussionWrite::SubmitReview { .. } => Some(MAYBE_SUBMITTED),
@@ -72,13 +88,13 @@ fn failure_notice(error: &CreateError, write: &DiscussionWrite) -> String {
     };
     match (error, maybe) {
         (CreateError::Status(ForgeStatus::Offline), Some(maybe)) => {
-            format!("{maybe} ({NO_ANSWER})")
+            format!("{maybe} ({name} did not answer)")
         }
         (CreateError::Status(ForgeStatus::Failed), Some(maybe)) => {
-            format!("{maybe} ({NO_USABLE})")
+            format!("{maybe} ({name} gave no usable answer)")
         }
-        (CreateError::Status(ForgeStatus::Offline), None) => OFFLINE.to_string(),
-        (other, _) => other.message(),
+        (CreateError::Status(ForgeStatus::Offline), None) => offline(words),
+        (other, _) => other.message_in(words),
     }
 }
 
@@ -127,7 +143,7 @@ impl AppState {
             .as_ref()
             .filter(|d| d.number == number)
             .and_then(|d| d.node_id.clone())
-            .ok_or(NO_PR_ID)?;
+            .ok_or_else(|| no_pr_id(self.review_words()))?;
         Ok((number, subject))
     }
 
@@ -237,7 +253,7 @@ impl AppState {
             }
             ComposerKind::General { number, subject } => {
                 if self.general_subject()? != (*number, subject.clone()) {
-                    return Err(NO_PR_ID.into());
+                    return Err(no_pr_id(self.review_words()).into());
                 }
                 *number
             }
@@ -329,19 +345,39 @@ impl AppState {
                 | DiscussionWrite::SubmitReview { .. },
                 Ok(Written::Posted),
             ) => Ok(Written::Posted),
+            // The comments went out without the approval: posted all the
+            // same, as they are public now.
+            (DiscussionWrite::SubmitReview { .. }, Ok(Written::PostedApprovalFailed)) => {
+                Ok(Written::PostedApprovalFailed)
+            }
             // An answer of the wrong kind is no answer.
             (_, Ok(_)) => Err(CreateError::Status(ForgeStatus::Failed)),
             (_, Err(error)) => Err(error),
         };
         match result {
-            Ok(_) => self.take_write(number, write),
+            Ok(written) => {
+                let effects = self.take_write(number, write);
+                if written == Written::PostedApprovalFailed {
+                    let words = self.review_words();
+                    self.notice = Some(
+                        format!(
+                            "Comments posted to {}{number}, but {} did not take the approval; \
+                             approve with S",
+                            words.sign, words.name
+                        )
+                        .into(),
+                    );
+                }
+                effects
+            }
             Err(error) => {
                 // Remembered against the host it went to, so the next
                 // write asks nobody until it resets.
                 if let CreateError::RateLimited { until } = error {
                     self.forge.record_rate_limit(host, until);
                 }
-                self.notice = Some(failure_notice(&error, &write).into());
+                let words = self.review_words();
+                self.notice = Some(failure_notice(&error, &write, words).into());
                 vec![]
             }
         }
@@ -428,6 +464,13 @@ pub(crate) mod tests {
     use crate::popup::Popup;
     use kika_forge::REFRESH_LIMITED;
     use kika_forge::discussion::PrDiscussion;
+
+    /// The texts as GitHub words them.
+    pub(crate) const WAIT: &str = "Wait for GitHub to answer";
+    pub(crate) const NO_PR_ID: &str = "GitHub sent no pull request id; refresh with r";
+    const OFFLINE: &str = "GitHub could not be reached, or did not answer in time";
+    const NO_ANSWER: &str = "GitHub did not answer";
+    const NO_USABLE: &str = "GitHub gave no usable answer";
 
     const NOW: i64 = 1_700_000_000;
 
@@ -843,6 +886,8 @@ pub(crate) mod tests {
                 start: None,
                 end: right(1),
                 head: HEAD.into(),
+                start_pos: None,
+                end_pos: None,
             },
             editing: None,
         }));

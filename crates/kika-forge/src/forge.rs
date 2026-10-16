@@ -15,7 +15,7 @@ pub use super::gitlab_forge::GitLabForge;
 use super::cache::Cached;
 use super::cli::CliStatus;
 use super::discussion::PrDiscussion;
-use super::discussion_write::{DiscussionWrite, Written};
+use super::discussion_write::{DiscussionWrite, ReviewEvent, Written};
 use super::github::{Fetched, Refusal};
 use super::head::Head;
 use super::review::{MergeMethod, PrDetail, Queues};
@@ -167,6 +167,8 @@ pub fn supports(kind: ForgeKind, capability: Capability) -> Result<(), Unsupport
 /// user text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Words {
+    /// The forge's own name.
+    pub name: &'static str,
     /// The CLI that holds the login, as the user runs it.
     pub cli: &'static str,
     /// What one of its pull requests is called.
@@ -185,6 +187,15 @@ pub fn words(kind: ForgeKind) -> &'static Words {
     match kind {
         ForgeKind::GitHub => &GitHubForge::WORDS,
         ForgeKind::GitLab => &GitLabForge::WORDS,
+    }
+}
+
+/// The kinds of review a `kind` forge takes, in the order they are
+/// offered; GitHub's while no kind is known yet, as [`words_or_default`].
+pub fn review_events(kind: Option<ForgeKind>) -> &'static [ReviewEvent] {
+    match kind {
+        None | Some(ForgeKind::GitHub) => GitHubForge::EVENTS,
+        Some(ForgeKind::GitLab) => GitLabForge::EVENTS,
     }
 }
 
@@ -259,6 +270,7 @@ mod tests {
         assert_eq!(
             *words(ForgeKind::GitHub),
             Words {
+                name: "GitHub",
                 cli: "gh",
                 request: "pull request",
                 requests: "pull requests",
@@ -269,6 +281,7 @@ mod tests {
         assert_eq!(
             *words(ForgeKind::GitLab),
             Words {
+                name: "GitLab",
                 cli: "glab",
                 request: "merge request",
                 requests: "merge requests",
@@ -281,6 +294,17 @@ mod tests {
             words_or_default(Some(ForgeKind::GitLab)),
             words(ForgeKind::GitLab)
         );
+    }
+
+    #[test]
+    fn each_kind_offers_its_own_review_events() {
+        use ReviewEvent::{Approve, Comment, RequestChanges};
+        assert_eq!(
+            review_events(Some(ForgeKind::GitHub)),
+            [Approve, RequestChanges, Comment]
+        );
+        assert_eq!(review_events(None), review_events(Some(ForgeKind::GitHub)));
+        assert_eq!(review_events(Some(ForgeKind::GitLab)), [Approve, Comment]);
     }
 
     #[test]
@@ -525,6 +549,7 @@ fn fixture() {}
                     "gitlab.rs",
                     "gitlab_review.rs",
                     "gitlab_discussion.rs",
+                    "gitlab_submit.rs",
                     "github.rs",
                     "review.rs",
                 ],

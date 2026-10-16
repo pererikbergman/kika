@@ -61,6 +61,15 @@ pub fn gitlab_id_ok(id: &str) -> bool {
         && key.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
+/// Whether `id` is a merge request's GitLab global id, as a write
+/// names it: `gid://gitlab/MergeRequest/<n>`, `n` decimal.
+pub fn merge_request_id_ok(id: &str) -> bool {
+    gitlab_id_ok(id)
+        && id
+            .strip_prefix("gid://gitlab/MergeRequest/")
+            .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()))
+}
+
 #[derive(Deserialize)]
 struct DiscussionData {
     project: Option<DiscussionProject>,

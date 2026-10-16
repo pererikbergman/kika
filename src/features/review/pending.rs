@@ -7,7 +7,7 @@
 //! request are then off, and nothing is written. Nothing reaches GitHub.
 
 use super::comment_pick::numbered_in_view;
-use super::discussion_write::WAIT;
+use super::discussion_write::wait;
 use super::files::{FilesStage, ReviewView, files_screen};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
@@ -19,20 +19,33 @@ use crate::popup::Popup;
 use std::path::{Path, PathBuf};
 
 use kika_forge::anchor::{GhLine, GhSide};
+use kika_forge::forge::Words;
 use kika_forge::pending::{
-    MAX_BODY, MAX_COMMENTS, PendingComment, PendingError, PendingKey, PendingReview,
+    MAX_BODY, MAX_COMMENTS, PendingComment, PendingError, PendingKey, PendingReview, RowPos,
 };
 
-const FILES_NOT_READY: &str = "Wait for the pull request's files to list";
-const IN_COMMIT: &str = "Comments are made on the whole pull request: press c to go back";
 const LOADING: &str = "The pending review is still loading";
 const NO_PLACE: &str = "No place to keep a pending review for this repository";
 const NOT_UTF8: &str = "Comments need a file name that is UTF-8";
 const NO_ROW: &str = "No line of the diff in view to comment on";
 const NO_COMMENTS: &str = "No pending comments";
-pub(super) const NOT_FILES: &str = "Open the pull request's files first (f)";
 const GONE: &str = "That comment is no longer in the pending review";
 pub(super) const BLANK: &str = "Write something first";
+
+fn files_not_ready(words: &Words) -> String {
+    format!("Wait for the {}'s files to list", words.request)
+}
+
+fn in_commit(words: &Words) -> String {
+    format!(
+        "Comments are made on the whole {}: press c to go back",
+        words.request
+    )
+}
+
+pub(super) fn not_files(words: &Words) -> String {
+    format!("Open the {}'s files first (f)", words.request)
+}
 
 fn full() -> String {
     format!("A pending review holds at most {MAX_COMMENTS} comments")
@@ -80,6 +93,10 @@ pub struct CommentTarget {
     pub start: Option<GhLine>,
     pub end: GhLine,
     pub head: String,
+    /// Both line counters at `start` and `end`, kept for a forge that
+    /// names a line by both sides.
+    pub start_pos: Option<RowPos>,
+    pub end_pos: Option<RowPos>,
 }
 
 impl CommentTarget {
@@ -89,6 +106,8 @@ impl CommentTarget {
             start: comment.start,
             end: comment.end,
             head: comment.head.clone(),
+            start_pos: comment.start_pos,
+            end_pos: comment.end_pos,
         }
     }
 }
@@ -137,20 +156,21 @@ pub(super) fn slot_disabled(state: &AppState) -> Result<&PendingReview, Reason> 
 /// ready, the file's name is not UTF-8, no numbered row is in view, or
 /// the review is full.
 pub(crate) fn comment_disabled(state: &AppState) -> Option<Reason> {
+    let words = state.review_words();
     let Some(files) =
         files_screen(state).filter(|f| f.stage == FilesStage::Ready && state.review_files_shown())
     else {
-        return Some(FILES_NOT_READY.into());
+        return Some(files_not_ready(words).into());
     };
     if matches!(files.view, ReviewView::Commit(_)) {
-        return Some(IN_COMMIT.into());
+        return Some(in_commit(words).into());
     }
     let review = match slot_disabled(state) {
         Ok(review) => review,
         Err(reason) => return Some(reason),
     };
     if state.review.submitting() {
-        return Some(WAIT.into());
+        return Some(wait(words).into());
     }
     let utf8 = files
         .selected()
@@ -167,7 +187,7 @@ pub(crate) fn comment_disabled(state: &AppState) -> Option<Reason> {
 /// Why `P` cannot list the pending comments.
 pub(crate) fn pending_list_disabled(state: &AppState) -> Option<Reason> {
     if files_screen(state).is_none() || !state.review_files_shown() {
-        return Some(NOT_FILES.into());
+        return Some(not_files(state.review_words()).into());
     }
     match slot_disabled(state) {
         Err(reason) => Some(reason),
@@ -306,7 +326,7 @@ impl AppState {
         };
         // The review on its way to GitHub was made from these comments.
         if self.review.submitting() {
-            return Some(WAIT.into());
+            return Some(wait(self.review_words()).into());
         }
         match editing {
             Some(id) => (!review.comments.iter().any(|c| c.id == id)).then(|| GONE.into()),
@@ -347,6 +367,8 @@ impl AppState {
             end: target.end,
             body,
             head: target.head,
+            start_pos: target.start_pos,
+            end_pos: target.end_pos,
         });
         self.save_pending()
     }
@@ -389,7 +411,7 @@ impl AppState {
     fn refused_while_submitting(&mut self) -> bool {
         let submitting = self.review.submitting();
         if submitting {
-            self.notice = Some(WAIT.into());
+            self.notice = Some(wait(self.review_words()).into());
         }
         submitting
     }
@@ -655,6 +677,8 @@ pub(crate) mod tests {
             end,
             body: body.into(),
             head: HEAD.into(),
+            start_pos: None,
+            end_pos: None,
         }
     }
 
@@ -664,6 +688,21 @@ pub(crate) mod tests {
         assert_eq!(press(state, KeyCode::Enter), []);
         type_text(state, text);
         ctrl(state, 's')
+    }
+
+    #[test]
+    fn on_gitlab_the_reasons_say_merge_request() {
+        let mut state = crate::features::review::state::tests::on_gitlab(commenting());
+        state.review.files.as_mut().unwrap().view = ReviewView::Commit(0);
+        assert_eq!(
+            comment_disabled(&state).map(String::from).as_deref(),
+            Some("Comments are made on the whole merge request: press c to go back")
+        );
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(
+            pending_list_disabled(&state).map(String::from).as_deref(),
+            Some("Open the merge request's files first (f)")
+        );
     }
 
     #[test]
@@ -715,6 +754,13 @@ pub(crate) mod tests {
             end: right(1),
             body: "hi".into(),
             head: HEAD.into(),
+            start_pos: None,
+            // The added row's counters: the old one is the next old line.
+            end_pos: Some(RowPos {
+                old: 1,
+                new: 1,
+                both: false,
+            }),
         };
         assert_eq!(review.comments, std::slice::from_ref(&want));
         assert_eq!(comments(&state), [want]);
@@ -854,6 +900,8 @@ pub(crate) mod tests {
             start: None,
             end: right(1),
             head: HEAD.into(),
+            start_pos: None,
+            end_pos: None,
         };
         assert_eq!(state.add_pending(target, "x".into()), []);
         assert_eq!(state.update_pending(1, "x".into()), []);
@@ -976,11 +1024,17 @@ pub(crate) mod tests {
         // Files not listed yet.
         let mut state = crate::features::review::state::tests::in_detail(Vec::new());
         type_char(&mut state, 'f');
-        assert_eq!(notice(&mut state).as_deref(), Some(FILES_NOT_READY));
+        assert_eq!(
+            notice(&mut state).as_deref(),
+            Some("Wait for the pull request's files to list")
+        );
         // A commit view.
         let mut state = commenting();
         state.review.files.as_mut().unwrap().view = ReviewView::Commit(0);
-        assert_eq!(notice(&mut state).as_deref(), Some(IN_COMMIT));
+        assert_eq!(
+            notice(&mut state).as_deref(),
+            Some("Comments are made on the whole pull request: press c to go back")
+        );
         // Still loading.
         let (mut state, _) = loading();
         assert_eq!(notice(&mut state).as_deref(), Some(LOADING));
