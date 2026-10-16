@@ -77,10 +77,11 @@ pub fn problem_text(problem: ReviewProblem) -> (String, Option<&'static str>) {
         ReviewProblem::Unsupported(unsupported) => (unsupported.message(), None),
         ReviewProblem::Status(status) => {
             let (what, next) = match status {
-                ForgeStatus::NoGh => (
-                    "The gh command is not installed",
-                    Some("Install the GitHub CLI."),
-                ),
+                // No forge kind is at hand here, so the words name none.
+                ForgeStatus::Cli(cli) => {
+                    let what = kika_forge::cli::problem_text(cli);
+                    return (what.trim_end_matches('.').to_string(), None);
+                }
                 ForgeStatus::NotLoggedIn => (
                     "gh is not logged in to this host",
                     Some("Run gh auth login."),
@@ -712,6 +713,7 @@ mod tests {
     use crate::model::Context;
     use crate::view::buffer_rows;
     use kika_forge::ForgeHost;
+    use kika_forge::cli::CliStatus;
     use kika_forge::review::fixtures::hostile_detail;
 
     fn draw(state: &AppState, width: u16, height: u16) -> Vec<String> {
@@ -1030,7 +1032,8 @@ mod tests {
                 kind: kika_forge::url::ForgeKind::GitLab,
                 capability: kika_forge::forge::Capability::Review,
             }),
-            ReviewProblem::Status(ForgeStatus::NoGh),
+            ReviewProblem::Status(ForgeStatus::Cli(CliStatus::NotInstalled)),
+            ReviewProblem::Status(ForgeStatus::Cli(CliStatus::Unusable)),
             ReviewProblem::Status(ForgeStatus::NotLoggedIn),
             ReviewProblem::Status(ForgeStatus::Offline),
             ReviewProblem::Status(ForgeStatus::NoAccess),

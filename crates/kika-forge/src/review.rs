@@ -8,6 +8,8 @@
 use serde::Deserialize;
 use serde_json::json;
 
+use super::cli::CliStatus;
+use super::client::Shut;
 use super::forge::Forge;
 use super::github::{Answer, Gh, GhCall, GhOutput, MAX_URL, Refusal, classify, split_include};
 use super::remote::{allowed, matches, parse_remote, segment_ok};
@@ -365,7 +367,9 @@ pub(crate) fn pull_request_answer<T>(
 pub(crate) fn outcome<T>(result: &Result<T, Refusal>) -> CommandOutcome {
     match result {
         Ok(_) => CommandOutcome::Ok,
-        Err(Refusal::Status(ForgeStatus::NoGh)) => CommandOutcome::NotStarted,
+        Err(Refusal::Status(ForgeStatus::Cli(CliStatus::NotInstalled))) => {
+            CommandOutcome::NotStarted
+        }
         Err(_) => CommandOutcome::Failed(None),
     }
 }
@@ -1093,9 +1097,16 @@ pub fn run<T>(
     if let Some(until) = limited_until(load.limited, &host, load.now) {
         return (Some(repo), Err(ReviewError::Limited { until }));
     }
-    // `resolve` applied the same allow gate; this is its answer.
-    let Some(forge) = ctx.forge(&host, &repo, load.now) else {
-        return (None, Err(ReviewError::NoForgeHost));
+    // `resolve` applied the same allow gate; `Outside` is its answer.
+    let forge = match ctx.forge(&host, &repo, load.now) {
+        Ok(forge) => forge,
+        Err(Shut::Outside) => return (None, Err(ReviewError::NoForgeHost)),
+        Err(Shut::Cli(status)) => {
+            return (
+                Some(repo),
+                Err(ReviewError::Status(ForgeStatus::Cli(status))),
+            );
+        }
     };
     let result = fetch(forge.as_ref(), &repo).map_err(ReviewError::from);
     (Some(repo), result)
@@ -1606,7 +1617,10 @@ pub(crate) mod tests {
         );
         assert_eq!(runner.calls().len(), 1);
         let runner = FakeGh::new().missing();
-        assert_eq!(queues(&runner), Err(Refusal::Status(ForgeStatus::NoGh)));
+        assert_eq!(
+            queues(&runner),
+            Err(Refusal::Status(ForgeStatus::Cli(CliStatus::NotInstalled)))
+        );
         let runner = FakeGh::new().reply(answer("{\"data\":null}"));
         assert_eq!(queues(&runner), Err(Refusal::Status(ForgeStatus::Failed)));
     }
@@ -1982,6 +1996,7 @@ pub(crate) mod tests {
             glab: Arc::new(crate::gitlab::FakeGlab::new()),
             sink: CommandSink::new(),
             cache_dir: None,
+            cli: crate::cli::CliGate::default(),
         }
     }
 

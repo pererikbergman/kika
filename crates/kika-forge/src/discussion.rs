@@ -613,7 +613,9 @@ pub(crate) mod tests {
         );
         assert_eq!(
             fetch(&FakeGh::new().missing(), 42),
-            Err(Refusal::Status(ForgeStatus::NoGh))
+            Err(Refusal::Status(ForgeStatus::Cli(
+                crate::cli::CliStatus::NotInstalled
+            )))
         );
         assert_eq!(
             fetch(&FakeGh::new().reply(answer("{\"data\":null}")), 42),

@@ -13,6 +13,7 @@ pub(crate) use super::github_forge::reusable;
 pub use super::gitlab_forge::GitLabForge;
 
 use super::cache::Cached;
+use super::cli::CliStatus;
 use super::discussion::PrDiscussion;
 use super::discussion_write::{DiscussionWrite, Written};
 use super::github::{Fetched, Refusal};
@@ -30,6 +31,10 @@ use kika_git::commit_files::CommitId;
 pub trait Forge {
     /// Which forge kind the adapter talks to, for display.
     fn kind(&self) -> ForgeKind;
+
+    /// Whether the adapter's CLI is installed and usable, from its version
+    /// command alone: local, with no host, no network and no token.
+    fn check(&self) -> CliStatus;
 
     /// The pull request of each of `heads` in `repo`. `cached` is the
     /// last answer kept, which an adapter may reuse when the forge says
@@ -179,6 +184,28 @@ pub fn words(kind: ForgeKind) -> &'static Words {
     }
 }
 
+/// The Branches panel's row about a `kind` CLI's `status`: what is wrong,
+/// and what to do, in that forge's own words.
+pub fn cli_text(kind: ForgeKind, status: CliStatus) -> (String, Option<String>) {
+    let name = kind.name();
+    let Words { cli, requests, .. } = words(kind);
+    match status {
+        CliStatus::Ready => (format!("{name}: {cli} ready"), None),
+        CliStatus::NotInstalled => (
+            format!("{name}: {cli} not installed"),
+            Some(format!("install the {name} CLI to see {requests}")),
+        ),
+        CliStatus::Unusable => (
+            format!("{name}: {cli} not working"),
+            Some(format!("check that {cli} --version runs")),
+        ),
+        CliStatus::TooOld { found, needed } => (
+            format!("{name}: {cli} {found} is too old"),
+            Some(format!("update to {cli} {needed} or newer")),
+        ),
+    }
+}
+
 /// The adapter for `host`'s forge kind. The caller has already checked
 /// the repository is on `host` and allowed: this is the one place a
 /// forge kind picks the code that runs.
@@ -246,6 +273,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_cli_row_is_worded_per_forge() {
+        use crate::cli::CliVersion;
+        let v = |major, minor| CliVersion {
+            major,
+            minor,
+            patch: 0,
+        };
+        let row = |kind, status| {
+            let (what, hint) = cli_text(kind, status);
+            (what, hint.unwrap_or_default())
+        };
+        let own = |what: &str, hint: &str| (what.to_string(), hint.to_string());
+        assert_eq!(
+            row(ForgeKind::GitLab, CliStatus::NotInstalled),
+            own(
+                "GitLab: glab not installed",
+                "install the GitLab CLI to see merge requests"
+            )
+        );
+        assert_eq!(
+            row(ForgeKind::GitHub, CliStatus::NotInstalled),
+            own(
+                "GitHub: gh not installed",
+                "install the GitHub CLI to see pull requests"
+            )
+        );
+        assert_eq!(
+            row(ForgeKind::GitLab, CliStatus::Unusable),
+            own("GitLab: glab not working", "check that glab --version runs")
+        );
+        assert_eq!(
+            row(
+                ForgeKind::GitLab,
+                CliStatus::TooOld {
+                    found: v(1, 2),
+                    needed: v(1, 5)
+                }
+            ),
+            own(
+                "GitLab: glab 1.2.0 is too old",
+                "update to glab 1.5.0 or newer"
+            )
+        );
+    }
+
     /// The `.rs` files under `dir`, recursively.
     fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(dir).unwrap() {
@@ -292,6 +365,36 @@ mod tests {
         assert!(
             found.is_empty(),
             "a forge kind decides behaviour outside the adapters:\n{}",
+            found.join("\n")
+        );
+    }
+
+    #[test]
+    fn forge_cli_calls_go_through_the_gate() {
+        let forge_src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let app_src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src");
+        let mut files = Vec::new();
+        sources(&forge_src, &mut files);
+        sources(&app_src, &mut files);
+        assert!(files.len() > 20, "the scan found the sources: {files:?}");
+        // Only `adapter` builds a CLI's calls, and only `ForgeContext::forge`
+        // and `check_cli` reach it, past the host, allow and CLI gates.
+        let mut found = Vec::new();
+        for path in files.iter().filter(|p| **p != forge_src.join("forge.rs")) {
+            let text = std::fs::read_to_string(path).unwrap();
+            let live = text.split("#[cfg(test)]").next().unwrap_or_default();
+            for (n, line) in live.lines().enumerate() {
+                if [".gh(", ".glab(", ".gh.run(", ".glab.run("]
+                    .iter()
+                    .any(|call| line.contains(call))
+                {
+                    found.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "a forge CLI is reached around the gate:\n{}",
             found.join("\n")
         );
     }

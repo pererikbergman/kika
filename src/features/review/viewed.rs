@@ -446,11 +446,17 @@ mod tests {
         answer(
             &mut state,
             &sent,
-            Err(CreateError::Status(ForgeStatus::NoGh)),
+            Err(CreateError::Status(ForgeStatus::Cli(
+                kika_forge::cli::CliStatus::NotInstalled,
+            ))),
         );
         assert_eq!(
             state.notice.as_deref(),
-            Some(CreateError::Status(ForgeStatus::NoGh).message().as_str())
+            Some(
+                CreateError::Status(ForgeStatus::Cli(kika_forge::cli::CliStatus::NotInstalled))
+                    .message()
+                    .as_str()
+            )
         );
     }
 

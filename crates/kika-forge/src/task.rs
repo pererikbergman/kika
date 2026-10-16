@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::cache::{self, CacheKey, Cached};
+use super::cli::CliGate;
+use super::client::Shut;
 use super::forge::Badges;
 use super::github::{GhRunner, MAX_BRANCHES, Refusal};
 use super::gitlab::GlabRunner;
@@ -29,6 +31,9 @@ pub struct ForgeContext {
     pub sink: CommandSink,
     /// `None` when no cache directory is known: nothing is cached.
     pub cache_dir: Option<PathBuf>,
+    /// Each forge kind's last CLI check, shared by every clone: a kind
+    /// whose CLI is missing, broken or too old gets no call.
+    pub cli: CliGate,
 }
 
 /// What one load found, in the order it is found.
@@ -120,10 +125,12 @@ pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn
         return limited(until);
     }
     let branches = &load.branches[..load.branches.len().min(MAX_BRANCHES)];
-    // The client applies the same allow gate as above, so a `None` is the
-    // allow-list miss's answer should the two ever disagree.
-    let Some(forge) = ctx.forge(host, &repo, load.now) else {
-        return send(LoadEvent::RepoNone);
+    // The client applies the same allow gate as above, so `Outside` is
+    // the allow-list miss's answer should the two ever disagree.
+    let forge = match ctx.forge(host, &repo, load.now) {
+        Ok(forge) => forge,
+        Err(Shut::Outside) => return send(LoadEvent::RepoNone),
+        Err(Shut::Cli(status)) => return fetched(Err(ForgeStatus::Cli(status)), None),
     };
     let heads = heads(branches, &read_upstreams(git), &repo);
     let (found, etag) = match forge.badges(&repo, &heads, cached.as_ref()) {
@@ -216,6 +223,7 @@ mod tests {
             glab: Arc::new(crate::gitlab::FakeGlab::new()),
             sink: CommandSink::new(),
             cache_dir,
+            cli: crate::cli::CliGate::default(),
         }
     }
 
@@ -250,6 +258,36 @@ mod tests {
                 } => forge.fetched(seq, result, limited_until),
             }
         }
+    }
+
+    #[test]
+    fn a_shut_cli_answers_a_refresh_without_any_call() {
+        use crate::cli::CliStatus;
+        use crate::url::ForgeKind;
+
+        let tmp = TempDir::new("forge-load-cli-shut");
+        let gh = Arc::new(FakeGh::new());
+        let ctx = context(gh.clone(), None);
+        ctx.cli.set(ForgeKind::GitHub, CliStatus::NotInstalled);
+        let hosts = hosts();
+        let branches: Vec<BranchName> = vec!["main".into()];
+        let git = origin(b"https://github.com/acme/widgets");
+        let events = sent(&git, &ctx, &refresh(&hosts, &branches, tmp.path()));
+        git.assert_done();
+        assert_eq!(
+            events,
+            [
+                LoadEvent::Cached {
+                    repo: repo(),
+                    badges: None,
+                },
+                LoadEvent::Fetched {
+                    result: Err(ForgeStatus::Cli(CliStatus::NotInstalled)),
+                    limited_until: None,
+                },
+            ]
+        );
+        assert!(gh.calls().is_empty());
     }
 
     /// Run `load` for the known repository, no branch with an upstream;
@@ -546,6 +584,7 @@ mod tests {
         let gh = Arc::new(FakeGh::new().reply(answer(PROBE_304)));
         let ctx = context(Arc::clone(&gh), Some(dir.clone()));
         let mut forge = ForgeState::new(hosts.clone());
+        forge.cli_checked([]);
         forge.set_branches(&branches);
         let seq = LoadSeq(3);
         assert!(forge.load(seq).is_some_and(|request| request.refresh));
@@ -797,10 +836,12 @@ mod tests {
             glab: Arc::new(crate::gitlab::FakeGlab::new()),
             sink,
             cache_dir: Some(cache_dir.clone()),
+            cli: crate::cli::CliGate::default(),
         };
         let branches: Vec<BranchName> = vec!["main".into()];
         let hosts = hosts();
         let mut forge = ForgeState::new(hosts.clone());
+        forge.cli_checked([]);
         forge.set_branches(&branches);
         for seq in [LoadSeq(1), LoadSeq(2)] {
             forge.want_refresh();
@@ -972,6 +1013,7 @@ mod tests {
                 glab: glab.clone(),
                 sink: CommandSink::new(),
                 cache_dir: dir,
+                cli: crate::cli::CliGate::default(),
             }
         }
 
@@ -1184,6 +1226,7 @@ mod tests {
             let branches: Vec<BranchName> = vec!["topic-0".into()];
             let hosts = hosts();
             let mut forge = ForgeState::new(hosts.clone());
+            forge.cli_checked([]);
             forge.set_branches(&branches);
             let mut events = Vec::new();
             for seq in [LoadSeq(1), LoadSeq(2)] {

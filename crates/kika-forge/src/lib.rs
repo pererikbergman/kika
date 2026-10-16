@@ -13,6 +13,7 @@
 pub mod allow;
 pub mod anchor;
 pub mod cache;
+pub mod cli;
 pub mod client;
 pub mod discussion;
 pub mod discussion_write;
@@ -33,6 +34,7 @@ pub mod viewed;
 use std::collections::HashMap;
 
 use allow::AllowRule;
+use cli::CliStatus;
 use kika_git::branches::BranchName;
 use url::ForgeKind;
 
@@ -174,8 +176,9 @@ pub enum CiState {
 /// forge or `gh` says is ever kept or drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForgeStatus {
-    /// The forge's CLI (`gh` or `glab`) is missing.
-    NoGh,
+    /// The forge's CLI (`gh` or `glab`) is missing, broken or too old;
+    /// never `Ready`. No call is made for its forge kind meanwhile.
+    Cli(CliStatus),
     NotLoggedIn,
     Offline,
     NoAccess,
@@ -203,7 +206,7 @@ impl CreateError {
     /// What the error popup says.
     pub fn message(&self) -> String {
         match self {
-            CreateError::Status(ForgeStatus::NoGh) => "The gh command is not installed.".into(),
+            CreateError::Status(ForgeStatus::Cli(status)) => cli::problem_text(*status),
             CreateError::Status(ForgeStatus::NotLoggedIn) => {
                 "gh is not logged in to this host; run gh auth login.".into()
             }
@@ -299,6 +302,12 @@ pub struct ForgeState {
     /// and over answers to loads started before them; each with the first
     /// load sequence number that knows of it.
     pub created: HashMap<BranchName, (PrBadge, u64)>,
+    /// Each opted-in forge kind's CLI check; `None` until the first one
+    /// answers, and until then no refresh asks the forge. Kept across
+    /// repositories, as the CLI is the machine's.
+    pub cli: Option<HashMap<ForgeKind, CliStatus>>,
+    /// A CLI check runs.
+    pub checking: bool,
 }
 
 impl Default for ForgeState {
@@ -322,6 +331,8 @@ impl ForgeState {
             limited: HashMap::new(),
             limited_until: None,
             created: HashMap::new(),
+            cli: None,
+            checking: false,
         }
     }
 
@@ -335,12 +346,30 @@ impl ForgeState {
         remote::matches(self.repo.as_ref()?, &self.hosts).map(ForgeHost::kind)
     }
 
-    /// Back to nothing known, for another repository. The hosts and
-    /// their rate limits stay.
+    /// Back to nothing known, for another repository. The hosts, their
+    /// rate limits and the CLI checks stay.
     pub fn reset(&mut self) {
         let limited = std::mem::take(&mut self.limited);
+        let cli = self.cli.take();
+        let checking = self.checking;
         *self = Self::new(std::mem::take(&mut self.hosts));
         self.limited = limited;
+        self.cli = cli;
+        self.checking = checking;
+    }
+
+    /// The CLI check answered: a held-back refresh may now run.
+    pub fn cli_checked(&mut self, statuses: impl IntoIterator<Item = (ForgeKind, CliStatus)>) {
+        self.cli = Some(statuses.into_iter().collect());
+        self.checking = false;
+    }
+
+    /// What is wrong with the CLI of the current repository's forge kind,
+    /// when its last check was not `Ready`.
+    pub fn cli_problem(&self) -> Option<CliStatus> {
+        let kind = self.kind()?;
+        let status = *self.cli.as_ref()?.get(&kind)?;
+        (status != CliStatus::Ready).then_some(status)
     }
 
     /// Remember the listed branches; names that are not UTF-8 cannot be
@@ -354,15 +383,18 @@ impl ForgeState {
     }
 
     /// The load to start as `seq`, or none: when off, or while a call
-    /// runs (a wanted refresh then waits for it to end).
+    /// runs (a wanted refresh then waits for it to end). Until the first
+    /// CLI check answers, a load only reads the cache and the wanted
+    /// refresh waits for the check.
     pub fn load(&mut self, seq: impl Into<LoadSeq>) -> Option<LoadRequest> {
         // A repository on no configured host has nothing cached either;
         // only a refresh looks at its remote again.
         if !self.enabled() || self.in_flight || (self.unmatched && !self.refresh_wanted) {
             return None;
         }
-        let refresh = std::mem::take(&mut self.refresh_wanted);
+        let refresh = self.refresh_wanted && self.cli.is_some();
         if refresh {
+            self.refresh_wanted = false;
             self.in_flight = true;
             self.status = ForgeView::Updating;
         }
@@ -510,6 +542,7 @@ pub(crate) mod tests {
     #[test]
     fn a_load_asks_for_what_the_state_knows_and_drops_stale_answers() {
         let mut forge = ForgeState::new(github());
+        forge.cli_checked([]);
         forge.set_branches([&BranchName::from("main")]);
         forge.limited.insert("github.com".into(), 99);
 
@@ -559,6 +592,38 @@ pub(crate) mod tests {
         );
         forge.fetched(LoadSeq(1), Err(ForgeStatus::Failed), Some(5));
         assert_eq!(forge, before);
+    }
+
+    #[test]
+    fn until_the_first_cli_check_answers_a_load_only_reads_the_cache() {
+        let mut forge = ForgeState::new(github());
+        let request = forge.load(LoadSeq(1)).unwrap();
+        assert!(!request.refresh);
+        assert!(forge.refresh_wanted && !forge.in_flight);
+        assert_eq!(forge.status, ForgeView::Off);
+
+        forge.checking = true;
+        forge.cli_checked([(ForgeKind::GitHub, CliStatus::NotInstalled)]);
+        assert!(!forge.checking);
+        // Not known until a repository matched a host.
+        assert_eq!(forge.cli_problem(), None);
+        forge.repo = Some(widgets());
+        assert_eq!(forge.cli_problem(), Some(CliStatus::NotInstalled));
+        // The refresh it held back runs now; the client's gate answers it.
+        assert!(forge.load(LoadSeq(2)).unwrap().refresh);
+
+        // Another repository keeps the check, as the CLI is the machine's.
+        forge.reset();
+        assert_eq!(
+            forge.cli,
+            Some(HashMap::from([(
+                ForgeKind::GitHub,
+                CliStatus::NotInstalled
+            )]))
+        );
+        forge.cli_checked([(ForgeKind::GitHub, CliStatus::Ready)]);
+        forge.repo = Some(widgets());
+        assert_eq!(forge.cli_problem(), None);
     }
 
     #[test]

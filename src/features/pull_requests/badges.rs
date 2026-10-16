@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use super::create::refresh_disabled;
 use crate::effect::{Effect, Tag};
 use crate::model::{AppState, Context};
+use kika_forge::cli::CliStatus;
+use kika_forge::url::ForgeKind;
 use kika_forge::{ForgeHost, ForgeState, ForgeStatus, LoadRequest, PrBadge};
 use kika_git::branches::BranchName;
 
@@ -68,7 +70,35 @@ impl AppState {
             self.notice = Some(reason);
             return vec![];
         }
+        // The CLI is checked again first, so one installed since start is
+        // found; the refresh runs once the check answers.
         self.forge.want_refresh();
+        self.check_forge_clis()
+    }
+
+    /// Check each opted-in forge kind's CLI in the background, unless a
+    /// check already runs: its answer starts the wanted refresh.
+    pub(crate) fn check_forge_clis(&mut self) -> Vec<Effect> {
+        if !self.forge.enabled() || self.forge.checking {
+            return vec![];
+        }
+        self.forge.checking = true;
+        vec![Effect::CheckForgeClis {
+            hosts: self.forge.hosts.clone(),
+        }]
+    }
+
+    /// The CLI check answered: keep it, and run the refresh it held back.
+    /// Before the first branch list no load has run, and that list's own
+    /// load will refresh.
+    pub(crate) fn forge_clis_checked(
+        &mut self,
+        statuses: Vec<(ForgeKind, CliStatus)>,
+    ) -> Vec<Effect> {
+        self.forge.cli_checked(statuses);
+        if self.forge.seq.is_none() {
+            return vec![];
+        }
         self.load_pull_requests()
     }
 
@@ -194,11 +224,21 @@ mod tests {
         effects
     }
 
-    /// A workspace in a repository, so remote operations may run.
+    /// A workspace in a repository, so remote operations may run, whose
+    /// CLI check answered with every kind open.
     fn in_repo(hosts: Vec<ForgeHost>) -> AppState {
-        AppState::new(Context::Workspace)
+        let mut state = AppState::new(Context::Workspace)
             .with_location(Some("/r".into()), "/r".into())
-            .with_forge_hosts(hosts)
+            .with_forge_hosts(hosts);
+        state.forge.cli_checked([]);
+        state
+    }
+
+    /// A workspace on `hosts` whose CLI check answered with every kind open.
+    fn checked(hosts: Vec<ForgeHost>) -> AppState {
+        let mut state = AppState::new(Context::Workspace).with_forge_hosts(hosts);
+        state.forge.cli_checked([]);
+        state
     }
 
     #[test]
@@ -233,7 +273,7 @@ mod tests {
 
     #[test]
     fn the_first_branch_list_refreshes_and_later_ones_read_the_cache() {
-        let mut state = AppState::new(Context::Workspace).with_forge_hosts(github());
+        let mut state = checked(github());
         let effects = list_branches(&mut state, &["main", "topic"]);
         let [(first, true)] = loads(&effects)[..] else {
             panic!("{effects:?}");
@@ -309,7 +349,7 @@ mod tests {
 
     #[test]
     fn another_repository_starts_over_with_a_refresh_and_drops_old_answers() {
-        let mut state = AppState::new(Context::Workspace).with_forge_hosts(github());
+        let mut state = checked(github());
         let [(old, true)] = loads(&list_branches(&mut state, &["main"]))[..] else {
             panic!()
         };
@@ -453,7 +493,7 @@ mod tests {
 
     #[test]
     fn a_remote_on_no_configured_host_shows_nothing() {
-        let mut state = AppState::new(Context::Workspace).with_forge_hosts(github());
+        let mut state = checked(github());
         let [(tag, true)] = loads(&list_branches(&mut state, &["main"]))[..] else {
             panic!()
         };
@@ -574,6 +614,7 @@ mod tests {
         state.forge.repo = Some(repo());
         state.forge.refresh_wanted = false;
         state.forge.status = ForgeView::Fresh;
+        state.forge.seq = Some(0);
         state
     }
 
@@ -585,10 +626,48 @@ mod tests {
         state.update(AppIntent::Key(key))
     }
 
+    /// Answer the CLI check with every configured kind ready.
+    fn cli_ready(state: &mut AppState) -> Vec<Effect> {
+        let statuses = state
+            .forge
+            .hosts
+            .iter()
+            .map(|host| (host.kind(), CliStatus::Ready))
+            .collect();
+        state.update(AppIntent::PullRequests(PullRequestsIntent::CliChecked {
+            statuses,
+        }))
+    }
+
+    /// `effects` is the CLI check alone; answer it as ready, and give what
+    /// that answer starts.
+    fn after_check(state: &mut AppState, effects: Vec<Effect>) -> Vec<Effect> {
+        assert!(
+            matches!(effects[..], [Effect::CheckForgeClis { .. }]),
+            "{effects:?}"
+        );
+        cli_ready(state)
+    }
+
+    /// Ask for a refresh as `B` does, and answer the check it starts.
+    fn refreshed(state: &mut AppState) -> Vec<Effect> {
+        let effects = state.update(AppIntent::PullRequests(PullRequestsIntent::Refresh));
+        after_check(state, effects)
+    }
+
     #[test]
-    fn the_refresh_key_asks_the_forge_again_once() {
+    fn the_refresh_key_checks_the_cli_again_and_then_asks_the_forge_once() {
         let mut state = loaded();
         let effects = state.update(AppIntent::PullRequests(PullRequestsIntent::Refresh));
+        assert_eq!(effects, [Effect::CheckForgeClis { hosts: github() }]);
+        assert!(state.forge.checking && state.forge.refresh_wanted);
+        assert!(!state.forge.in_flight);
+        // Again while the check runs: nothing more starts.
+        assert_eq!(press_refresh(&mut state), []);
+        assert_eq!(state.notice, None);
+
+        let effects = cli_ready(&mut state);
+        assert!(!state.forge.checking);
         let [(tag, true)] = loads(&effects)[..] else {
             panic!("{effects:?}")
         };
@@ -636,9 +715,7 @@ mod tests {
         );
 
         let mut unmatched = loaded();
-        let [(tag, true)] =
-            loads(&unmatched.update(AppIntent::PullRequests(PullRequestsIntent::Refresh)))[..]
-        else {
+        let [(tag, true)] = loads(&refreshed(&mut unmatched))[..] else {
             panic!()
         };
         unmatched.update(AppIntent::PullRequests(PullRequestsIntent::RepoNone {
@@ -675,6 +752,7 @@ mod tests {
         state.now = T;
         state.notice = None;
         let effects = press_refresh(&mut state);
+        let effects = after_check(&mut state, effects);
         assert!(matches!(loads(&effects)[..], [(_, true)]), "{effects:?}");
         assert_eq!(state.notice, None);
     }
@@ -713,7 +791,7 @@ mod tests {
 
         // Asking again does call the forge.
         let mut state = limited();
-        let effects = state.update(AppIntent::PullRequests(PullRequestsIntent::Refresh));
+        let effects = refreshed(&mut state);
         assert_eq!(refreshes(&effects), 1, "{effects:?}");
     }
 
@@ -759,6 +837,7 @@ mod tests {
         state.focus = Focus::Branches;
         state.files.loaded = true;
         let effects = press_refresh(&mut state);
+        let effects = after_check(&mut state, effects);
         assert_eq!(load_hosts(&effects), [(gitlab(), true)]);
         answer(&mut state, &effects);
         // A finished fetch, pull or push.
@@ -803,5 +882,102 @@ mod tests {
             []
         );
         assert!(!state.forge.in_flight);
+    }
+
+    fn checks(effects: &[Effect]) -> Vec<Vec<ForgeHost>> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::CheckForgeClis { hosts } => Some(hosts.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn start_checks_the_clis_only_when_a_host_is_opted_in() {
+        let both = vec![github()[0].clone(), gitlab()[0].clone()];
+        let mut state = AppState::new(Context::Workspace)
+            .with_location(Some("/r".into()), "/r".into())
+            .with_forge_hosts(both.clone());
+        let effects = state.update(AppIntent::Start);
+        assert_eq!(checks(&effects), [both]);
+        assert!(state.forge.checking);
+        assert_eq!(state.forge.cli, None);
+
+        let mut off = AppState::new(Context::Workspace)
+            .with_location(Some("/r".into()), "/r".into())
+            .with_forge_hosts(vec![]);
+        let effects = off.update(AppIntent::Start);
+        assert_eq!(checks(&effects), Vec::<Vec<ForgeHost>>::new());
+        assert!(!off.forge.checking);
+    }
+
+    #[test]
+    fn no_refresh_asks_the_forge_before_the_first_check_answers() {
+        let mut state = AppState::new(Context::Workspace)
+            .with_location(Some("/r".into()), "/r".into())
+            .with_forge_hosts(github());
+        assert!(!checks(&state.update(AppIntent::Start)).is_empty());
+        // The first branch list only reads the cache, and the refresh it
+        // wanted waits.
+        let effects = list_branches(&mut state, &["main"]);
+        let [(tag, false)] = loads(&effects)[..] else {
+            panic!("{effects:?}")
+        };
+        assert!(state.forge.refresh_wanted);
+        assert!(!state.forge.in_flight);
+        state.update(AppIntent::PullRequests(PullRequestsIntent::Cached {
+            tag,
+            repo: repo(),
+            badges: None,
+        }));
+        // `B` while the check runs only asks for the refresh.
+        assert_eq!(press_refresh(&mut state), []);
+
+        // The check answers: now the refresh runs.
+        let effects = cli_ready(&mut state);
+        assert!(matches!(loads(&effects)[..], [(_, true)]), "{effects:?}");
+        assert!(state.forge.in_flight);
+        assert_eq!(
+            state.forge.cli,
+            Some(HashMap::from([(
+                kika_forge::url::ForgeKind::GitHub,
+                CliStatus::Ready
+            )]))
+        );
+    }
+
+    #[test]
+    fn a_check_answered_before_any_branch_list_leaves_the_refresh_to_it() {
+        let mut state = AppState::new(Context::Workspace).with_forge_hosts(github());
+        state.forge.checking = true;
+        assert_eq!(cli_ready(&mut state), []);
+        assert!(state.forge.refresh_wanted);
+        let effects = list_branches(&mut state, &["main"]);
+        assert!(matches!(loads(&effects)[..], [(_, true)]), "{effects:?}");
+    }
+
+    #[test]
+    fn a_missing_cli_is_drawn_before_any_call_and_kept_across_repositories() {
+        let mut state = loaded();
+        state
+            .forge
+            .cli_checked([(kika_forge::url::ForgeKind::GitHub, CliStatus::NotInstalled)]);
+        assert_eq!(state.forge.cli_problem(), Some(CliStatus::NotInstalled));
+        let rows = crate::test_support::draw_branches(&state, 80, 12);
+        assert!(
+            rows.iter().any(|r| r.contains("GitHub: gh not installed")),
+            "{rows:#?}"
+        );
+        state.generation += 1;
+        state.forge.reset();
+        assert_eq!(
+            state.forge.cli,
+            Some(HashMap::from([(
+                kika_forge::url::ForgeKind::GitHub,
+                CliStatus::NotInstalled
+            )]))
+        );
     }
 }

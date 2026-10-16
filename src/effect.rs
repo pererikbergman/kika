@@ -304,6 +304,14 @@ pub enum Effect {
         known: Option<ForgeRepo>,
         limited: Vec<(ForgeHost, i64)>,
     },
+    /// Check the CLI of each forge kind among `hosts` (the first host of
+    /// each kind), locally: no network, no token. The answers go into the
+    /// forge client's gate first, then come back as one
+    /// `PullRequestsIntent::CliChecked`. A kind with no host is never run;
+    /// with no forge client nothing answers.
+    CheckForgeClis {
+        hosts: Vec<ForgeHost>,
+    },
     /// Start the browser the global config names: `argv` is its argv with
     /// the URL last, run without a shell and never waited on here. Only
     /// a failure to start answers, with `PullRequestsIntent::OpenUrlFailed`.
@@ -1370,6 +1378,9 @@ impl Runtime {
                 path,
             } => review::effects::read_suggestion_lines(runner, tx, tag, target, head, path),
             Effect::RemoveCommentFile(file) => review::effects::remove_comment_file(tx, file),
+            Effect::CheckForgeClis { hosts } => {
+                pull_requests::effects::check_clis(self.forge.clone(), tx, hosts)
+            }
             Effect::LoadPullRequests {
                 tag,
                 hosts,
@@ -1524,6 +1535,7 @@ mod tests {
             glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
             sink,
             cache_dir: Some(tmp.path().join("forge")),
+            cli: kika_forge::cli::CliGate::default(),
         }));
         let branches: Vec<BranchName> = (0..60).map(|i| format!("b{i}").as_str().into()).collect();
         runtime.spawn(Effect::LoadPullRequests {

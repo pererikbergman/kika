@@ -8,6 +8,7 @@ use std::io;
 use serde::Deserialize;
 use serde_json::json;
 
+use super::cli::CliStatus;
 use super::github::{Answer, Gh, GhCall, GhOutput, classify, refusal, split_include};
 use super::review::{MAX_PATH, node_id_ok};
 use super::{CreateError, ForgeStatus};
@@ -45,7 +46,9 @@ impl Gh<'_> {
             |output| read_set(output, now, field),
             |result| match result {
                 Ok(()) => CommandOutcome::Ok,
-                Err(CreateError::Status(ForgeStatus::NoGh)) => CommandOutcome::NotStarted,
+                Err(CreateError::Status(ForgeStatus::Cli(CliStatus::NotInstalled))) => {
+                    CommandOutcome::NotStarted
+                }
                 Err(_) => CommandOutcome::Failed(None),
             },
         )
@@ -250,7 +253,10 @@ mod tests {
             Err(CreateError::RateLimited { .. })
         ));
         let cases = [
-            (FakeGh::new().missing(), ForgeStatus::NoGh),
+            (
+                FakeGh::new().missing(),
+                ForgeStatus::Cli(CliStatus::NotInstalled),
+            ),
             (
                 FakeGh::new().reply(failure(1, HTTP_401_STDERR)),
                 ForgeStatus::NotLoggedIn,
@@ -282,7 +288,9 @@ mod tests {
         assert_eq!(set_with(&runner, &sink, ID, PATH, true), Ok(()));
         assert_eq!(
             set_with(&runner, &sink, ID, PATH, true),
-            Err(CreateError::Status(ForgeStatus::NoGh))
+            Err(CreateError::Status(ForgeStatus::Cli(
+                CliStatus::NotInstalled
+            )))
         );
         let events = events.lock().unwrap();
         let line = "gh api graphql --include --hostname github.com --input -";

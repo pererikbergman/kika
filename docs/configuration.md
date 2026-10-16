@@ -323,9 +323,28 @@ github = ["github.com", "github.example.com"]
   it.
 - When GitHub cannot be reached, a line at the bottom of the Branches panel
   says why (`GitHub: offline`, `GitHub: not logged in`, `GitHub: gh not
-  found`, …), and the badges already shown stay, marked `· cached`. Where
-  the panel is wide enough, the line also says what to do, such as
+  installed`, …), and the badges already shown stay, marked `· cached`.
+  Where the panel is wide enough, the line also says what to do, such as
   `run gh auth login --hostname github.com`. Nothing else waits on it.
+- When Kika starts, it checks once, in the background, that `gh` is
+  installed and works, by running `gh --version`. This runs locally: it
+  names no host, reaches no network and reads no token. Your login is not
+  checked here; the first real call says when you are not logged in.
+  Before the check answers, only the cache is read. When `gh` is not
+  ready, the line says so before anything is asked, and no `gh` call is
+  made for GitHub until it is:
+  - `GitHub: gh not installed · install the GitHub CLI to see pull
+    requests`: `gh` is not on `PATH`.
+  - `GitHub: gh not working · check that gh --version runs`: it exited
+    with an error, did not answer within 5 seconds, or printed no version.
+  - `GitHub: gh 1.2.0 is too old · update to gh 1.5.0 or newer`: older than
+    a version Kika needs. No minimum is set yet, so this does not show
+    today.
+
+  `B` runs the check again before it refreshes, so a `gh` installed after
+  Kika started is picked up without a restart. The check is only run for a
+  forge whose hosts you opted in: with no `[forge] github` host, `gh` is
+  never run.
 - When GitHub rate limits you, the line says `GitHub: rate limited`, and,
   where it fits, `until HH:MM UTC` (the badges shown are the cached ones,
   though the line leaves out `· cached` to keep room for the time). Kika then runs no `gh` call to that
@@ -416,10 +435,15 @@ gitlab_ask = ["gitlab.example.com"]
   Its pipeline shows `✓` passed, `✗` failed or cancelled, `●` running,
   pending or scheduled, and nothing for a manual pipeline (it waits for a
   person), a skipped one, an unknown status, or none.
+- `glab` is checked at start the same way, with `glab --version`, and only
+  when a `gitlab_ask` host is set: `GitLab: glab not installed · install
+  the GitLab CLI to see merge requests`, `GitLab: glab not working · check
+  that glab --version runs`, or `GitLab: glab 1.2.0 is too old · update to
+  glab 1.5.0 or newer`. While it shows, no `glab` call is made; `B` checks
+  again.
 - Problems show on the Branches panel's bottom line in GitLab's words:
   `GitLab: updating…`, `GitLab: not logged in · run glab auth login
-  --hostname <host>`, `GitLab: glab not found · install the GitLab CLI to
-  see merge requests`, `GitLab: offline`, `GitLab: repository not found or
+  --hostname <host>`, `GitLab: offline`, `GitLab: repository not found or
   no access`, `GitLab: could not load merge requests`, and `GitLab: rate
   limited · until HH:MM UTC` or `GitLab: rate limit over · fetch to retry`.
   `B` during a rate limit says `GitLab is rate limited; refresh after the

@@ -13,6 +13,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::json;
 
+use super::cli::CliStatus;
 use super::github::{
     Answer, BATCH, Fetched, GhOutput, MAX_BACKOFF, MAX_BRANCHES, MIN_BACKOFF, OFFLINE_MARKERS,
     Refusal, TIMEOUT, logged, run_piped, split_include_reading,
@@ -50,6 +51,9 @@ pub enum GlabCall {
     /// A GraphQL query; `body` is the JSON for stdin, so no branch name
     /// or project path ever reaches argv.
     Graphql { body: Vec<u8> },
+    /// `glab --version`: local, with no host and no stdin, to learn that
+    /// `glab` is installed and usable.
+    Version,
 }
 
 /// One `glab api` call: the host, and what it asks.
@@ -80,6 +84,7 @@ impl GlabCommand {
             ]
             .map(OsString::from)
             .into(),
+            GlabCall::Version => vec!["--version".into()],
         }
     }
 
@@ -90,13 +95,15 @@ impl GlabCommand {
                 "glab api graphql --include --hostname {} --input -",
                 self.host
             ),
+            GlabCall::Version => "glab --version".to_string(),
         }
     }
 
-    /// What goes on stdin: the JSON body.
+    /// What goes on stdin: the JSON body, or nothing.
     pub fn stdin(&self) -> Vec<u8> {
         match &self.kind {
             GlabCall::Graphql { body } => body.clone(),
+            GlabCall::Version => Vec::new(),
         }
     }
 }
@@ -196,7 +203,9 @@ impl Glab<'_> {
             || read(classify(self.runner.run(&cmd), now)),
             |result| match result {
                 Ok(_) => CommandOutcome::Ok,
-                Err(Refusal::Status(ForgeStatus::NoGh)) => CommandOutcome::NotStarted,
+                Err(Refusal::Status(ForgeStatus::Cli(CliStatus::NotInstalled))) => {
+                    CommandOutcome::NotStarted
+                }
                 Err(_) => CommandOutcome::Failed(None),
             },
         )
@@ -291,7 +300,9 @@ const READ_HEADERS: [&str; 3] = ["ratelimit-remaining", "ratelimit-reset", "retr
 pub fn classify(output: io::Result<GhOutput>, now: i64) -> Answer {
     let output = match output {
         Ok(output) => output,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Answer::Failed(ForgeStatus::NoGh),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Answer::Failed(ForgeStatus::Cli(CliStatus::NotInstalled));
+        }
         Err(_) => return Answer::Failed(ForgeStatus::Failed),
     };
     if output.timed_out {
@@ -747,7 +758,7 @@ mod tests {
         let cases = [
             (
                 Err(io::ErrorKind::NotFound.into()),
-                failed(ForgeStatus::NoGh),
+                failed(ForgeStatus::Cli(CliStatus::NotInstalled)),
             ),
             (
                 Err(io::ErrorKind::Other.into()),
@@ -936,7 +947,7 @@ mod tests {
         let runner = FakeGlab::new().missing();
         assert_eq!(
             fetch(&runner, &names(1)),
-            Err(Refusal::Status(ForgeStatus::NoGh))
+            Err(Refusal::Status(ForgeStatus::Cli(CliStatus::NotInstalled)))
         );
     }
 
@@ -949,7 +960,10 @@ mod tests {
         let runner = FakeGlab::new().reply(answer(STATES)).missing();
         let host = host();
         let result = glab(&runner, &sink, &host).fetch_badges(&repo(), &own(&names(60)));
-        assert_eq!(result, Err(Refusal::Status(ForgeStatus::NoGh)));
+        assert_eq!(
+            result,
+            Err(Refusal::Status(ForgeStatus::Cli(CliStatus::NotInstalled)))
+        );
         let events = events.lock().unwrap();
         let line = "glab api graphql --include --hostname gitlab.example.com --input -";
         match events.as_slice() {
