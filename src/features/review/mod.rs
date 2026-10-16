@@ -62,7 +62,8 @@
 //! - the chunks `keys::{REVIEW_KEYS, REVIEW_COMMENT_KEYS,
 //!   REVIEW_MERGE_CONFIRM, REVIEW_CHECKOUT_CONFIRM, REVIEW_COMMENT_CONFIRM}`,
 //!   and `keys::HIDDEN_WHEN_OFF`, the bar hints left out while refused;
-//! - `view::render`;
+//! - `view::render`, and the query `review_words` (`state.rs`) it names
+//!   requests by;
 //! - `effects::{load_queues, load_detail, load_discussion, check_commits,
 //!   fetch_commits, load_files, load_commits, load_range_files,
 //!   set_file_viewed, write_discussion, plan_checkout, merge, load_pending,

@@ -1,0 +1,8 @@
+HTTP/2.0 200 OK
+Content-Type: application/json; charset=utf-8
+Ratelimit-Limit: 2000
+Ratelimit-Observed: 3
+Ratelimit-Remaining: 1997
+Ratelimit-Reset: 1700000060
+
+{"data":{"currentUser":{"assignedMergeRequests":{"nodes":[{"iid":"12","title":"Cache widget lookups","draft":false,"updatedAt":"2023-11-14T20:00:00Z","author":{"username":"octocat"}},{"iid":"7","title":"Fix the widget border","draft":false,"updatedAt":"2023-11-10T08:30:00Z","author":{"username":"hubot"}}]},"reviewRequestedMergeRequests":{"nodes":[{"iid":"15","title":"Draft: new gadget API","draft":true,"updatedAt":"2023-11-14T21:00:00Z","author":{"username":"alice"}},{"iid":"12","title":"Cache widget lookups","draft":false,"updatedAt":"2023-11-14T20:00:00Z","author":{"username":"octocat"}}]},"authoredMergeRequests":{"nodes":[]}},"project":{"mergeRequests":{"nodes":[{"iid":"15","title":"Draft: new gadget API","draft":true,"updatedAt":"2023-11-14T21:00:00Z","author":{"username":"alice"}},{"iid":"12","title":"Cache widget lookups","draft":false,"updatedAt":"2023-11-14T20:00:00Z","author":{"username":"octocat"}},{"iid":"9","title":"Bump serde","draft":false,"updatedAt":"2023-11-12T10:00:00Z","author":{"username":"renovate"}},{"iid":"7","title":"Fix the widget border","draft":false,"updatedAt":"2023-11-10T08:30:00Z","author":{"username":"hubot"}}]}}}}

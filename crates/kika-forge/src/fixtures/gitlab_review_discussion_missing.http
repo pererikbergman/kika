@@ -1,0 +1,8 @@
+HTTP/2.0 200 OK
+Content-Type: application/json; charset=utf-8
+Ratelimit-Limit: 2000
+Ratelimit-Observed: 3
+Ratelimit-Remaining: 1997
+Ratelimit-Reset: 1700000060
+
+{"data":{"project":{"mergeRequest":null}}}

@@ -1,6 +1,8 @@
 //! Review mode on screen: the queue tabs and rows, or one pull request's
 //! header, checks and description. Reads state only; every string in it
-//! was made terminal-safe when GitHub's answer was parsed.
+//! was made terminal-safe when the forge's answer was parsed. Its fixed
+//! text names requests in the forge's own [`Words`]: `#N` pull requests
+//! on GitHub, `!N` merge requests on GitLab.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -21,6 +23,7 @@ use crate::rows::{clock, drawn_path, status_colour};
 use crate::theme::Palette;
 use crate::view::{self, elide_right};
 use kika_forge::anchor::row_numbers;
+use kika_forge::forge::Words;
 use kika_forge::merge::{MergeBlock, merge_options};
 use kika_forge::review::{
     CheckStatus, Mergeability, PrDetail, PrSummary, QueueKind, ReviewVerdict, ViewedState,
@@ -29,6 +32,7 @@ use kika_forge::{ForgeStatus, PrState};
 
 pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
     let review = &state.review;
+    let words = state.review_words();
     let repo = review
         .repo
         .as_ref()
@@ -37,7 +41,7 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
     let number = match review.screen {
         ReviewScreen::Detail(number)
         | ReviewScreen::Files(number)
-        | ReviewScreen::Conversation(number) => format!(" #{number}"),
+        | ReviewScreen::Conversation(number) => format!(" {}{number}", words.sign),
         ReviewScreen::Queue => String::new(),
     };
     let title = format!(" Review{repo}{number} ");
@@ -45,8 +49,8 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let lines = match review.screen {
-        ReviewScreen::Queue => queue_lines(&state.palette, review, inner),
-        ReviewScreen::Detail(number) => detail_screen(&state.palette, review, number, inner),
+        ReviewScreen::Queue => queue_lines(&state.palette, review, words, inner),
+        ReviewScreen::Detail(number) => detail_screen(&state.palette, review, words, number, inner),
         ReviewScreen::Files(_) => match &review.files {
             Some(files) => return files_screen(state, files, frame, inner),
             None => Vec::new(),
@@ -55,7 +59,7 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
             let lines = super::conversation_view::conversation_view(review, inner);
             frame.render_widget(Paragraph::new(lines), inner);
             // A general comment is typed over it.
-            super::pending_view::render_pending(&state.palette, review, frame, inner);
+            super::pending_view::render_pending(&state.palette, review, words, frame, inner);
             return;
         }
     };
@@ -63,7 +67,7 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
 }
 
 /// What a problem says, and what to do about it when there is a next step.
-pub fn problem_text(problem: ReviewProblem) -> (String, Option<&'static str>) {
+pub fn problem_text(problem: ReviewProblem, words: &Words) -> (String, Option<&'static str>) {
     match problem {
         ReviewProblem::NoForgeHost => (
             NO_FORGE.to_string(),
@@ -73,7 +77,9 @@ pub fn problem_text(problem: ReviewProblem) -> (String, Option<&'static str>) {
             format!("GitHub is rate limited until {} UTC", clock(until)),
             None,
         ),
-        ReviewProblem::Missing(number) => (format!("No pull request #{number}"), None),
+        ReviewProblem::Missing(number) => {
+            (format!("No {} {}{number}", words.request, words.sign), None)
+        }
         ReviewProblem::Unsupported(unsupported) => (unsupported.message(), None),
         ReviewProblem::Status(status) => {
             let (what, next) = match status {
@@ -106,8 +112,13 @@ pub fn problem_text(problem: ReviewProblem) -> (String, Option<&'static str>) {
 
 /// The problem in red and its next step below it, each wrapped to
 /// `width` so neither is cut off.
-fn problem_lines(palette: &Palette, problem: ReviewProblem, width: usize) -> Vec<Line<'static>> {
-    let (what, next) = problem_text(problem);
+fn problem_lines(
+    palette: &Palette,
+    problem: ReviewProblem,
+    words: &Words,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let (what, next) = problem_text(problem, words);
     let mut lines = markdown::wrap_text(&what, Style::new().fg(palette.error), width);
     if let Some(next) = next {
         lines.extend(markdown::wrap_text(next, Style::new(), width));
@@ -116,7 +127,12 @@ fn problem_lines(palette: &Palette, problem: ReviewProblem, width: usize) -> Vec
 }
 
 /// The tab line, then the rows the filter keeps, scrolled to the cursor.
-fn queue_lines(palette: &Palette, review: &ReviewState, inner: Rect) -> Vec<Line<'static>> {
+fn queue_lines(
+    palette: &Palette,
+    review: &ReviewState,
+    words: &Words,
+    inner: Rect,
+) -> Vec<Line<'static>> {
     let mut tabs: Vec<Span<'static>> = Vec::new();
     for (i, kind) in QueueKind::ALL.into_iter().enumerate() {
         if i > 0 {
@@ -145,20 +161,25 @@ fn queue_lines(palette: &Palette, review: &ReviewState, inner: Rect) -> Vec<Line
     }
     let mut lines = vec![Line::from(tabs)];
     if let Some(problem) = review.queues_fetch.error {
-        lines.extend(problem_lines(palette, problem, usize::from(inner.width)));
+        lines.extend(problem_lines(
+            palette,
+            problem,
+            words,
+            usize::from(inner.width),
+        ));
         return lines;
     }
     if review.queues_fetch.loading && review.queues.is_none() {
-        lines.push(Line::raw("Loading pull requests…"));
+        lines.push(Line::raw(format!("Loading {}…", words.requests)));
         return lines;
     }
     let rows = review.rows();
     let visible = review.visible();
     if visible.is_empty() {
         lines.push(Line::raw(if rows.is_empty() {
-            "No pull requests in this queue"
+            format!("No {} in this queue", words.requests)
         } else {
-            "No pull request matches the filter"
+            format!("No {} matches the filter", words.request)
         }));
         return lines;
     }
@@ -175,7 +196,13 @@ fn queue_lines(palette: &Palette, review: &ReviewState, inner: Rect) -> Vec<Line
         .max()
         .unwrap_or(1);
     for &i in visible.iter().skip(skip).take(room) {
-        lines.push(queue_row(&rows[i], i == review.cursor, digits, width));
+        lines.push(queue_row(
+            &rows[i],
+            words,
+            i == review.cursor,
+            digits,
+            width,
+        ));
     }
     lines
 }
@@ -186,14 +213,20 @@ const AUTHOR_COLS: usize = 20;
 /// One queue row, exactly `width` wide: a cursor mark, the number, the
 /// title cut with `…` to leave room for the author and the draft mark,
 /// then those. The cursor row is a full-width bar.
-fn queue_row(pr: &PrSummary, cursor: bool, digits: usize, width: usize) -> Line<'static> {
+fn queue_row(
+    pr: &PrSummary,
+    words: &Words,
+    cursor: bool,
+    digits: usize,
+    width: usize,
+) -> Line<'static> {
     let style = if cursor {
         Style::new().add_modifier(Modifier::REVERSED)
     } else {
         Style::new()
     };
     let mark = if cursor { "▸ " } else { "  " };
-    let number = format!("#{:<digits$}  ", pr.number);
+    let number = format!("{}{:<digits$}  ", words.sign, pr.number);
     let author = format!("  {}", elide_right(&pr.author, AUTHOR_COLS));
     let draft = if pr.draft { "  draft" } else { "" };
     let fixed = width_of(mark) + width_of(&number) + width_of(&author) + width_of(draft);
@@ -225,11 +258,12 @@ fn width_of(text: &str) -> usize {
 fn detail_screen(
     palette: &Palette,
     review: &ReviewState,
+    words: &Words,
     number: u64,
     inner: Rect,
 ) -> Vec<Line<'static>> {
     if let Some(problem) = review.detail_fetch.error {
-        return problem_lines(palette, problem, usize::from(inner.width));
+        return problem_lines(palette, problem, words, usize::from(inner.width));
     }
     match &review.detail {
         Some(detail) => {
@@ -244,15 +278,18 @@ fn detail_screen(
                     &fresh
                 }
             };
-            let threads = super::threads_view::thread_summary(review);
-            let lines = detail_lines(palette, detail, body, threads.as_deref(), width);
+            let threads = super::threads_view::thread_summary(review, words);
+            let lines = detail_lines(palette, detail, words, body, threads.as_deref(), width);
             let max = lines.len().saturating_sub(usize::from(inner.height));
             lines
                 .into_iter()
                 .skip(review.detail_scroll.min(max))
                 .collect()
         }
-        None => vec![Line::raw(format!("Loading pull request #{number}…"))],
+        None => vec![Line::raw(format!(
+            "Loading {} {}{number}…",
+            words.request, words.sign
+        ))],
     }
 }
 
@@ -274,18 +311,19 @@ pub fn files_diff_rows(main: Rect) -> usize {
 /// as the workspace frames its focused panel.
 fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rect) {
     let [list, diff] = files_areas(inner);
+    let words = state.review_words();
     let pending = state
         .review
         .pending
         .as_ref()
         .and_then(|slot| slot.review())
         .map_or(0, |review| review.comments.len());
-    let title = files_title(files, pending, usize::from(list.width));
+    let title = files_title(files, words, pending, usize::from(list.width));
     let block = view::panel_block(&state.palette, title, files.focus == FilesFocus::List);
     let list_inner = block.inner(list);
     frame.render_widget(block, list);
     frame.render_widget(
-        Paragraph::new(file_lines(&state.palette, files, list_inner)),
+        Paragraph::new(file_lines(&state.palette, files, words, list_inner)),
         list_inner,
     );
 
@@ -358,12 +396,12 @@ fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rec
         let discussion = state.review.discussion.as_ref();
         super::reader_view::render_reader(&state.palette, files, discussion, reader, frame, inner);
     }
-    super::pending_view::render_pending(&state.palette, &state.review, frame, inner);
+    super::pending_view::render_pending(&state.palette, &state.review, words, frame, inner);
 }
 
 /// What the list shows, long and short: `whole pull request` or
 /// `commit k/N <7-hex>`.
-fn view_labels(files: &PrFiles) -> (String, String) {
+fn view_labels(files: &PrFiles, words: &Words) -> (String, String) {
     let commit = match files.view {
         ReviewView::Whole => None,
         ReviewView::Commit(i) => files.commits.as_ref().and_then(|(commits, _)| {
@@ -372,7 +410,7 @@ fn view_labels(files: &PrFiles) -> (String, String) {
         }),
     };
     match commit {
-        None => ("whole pull request".into(), "whole".into()),
+        None => (format!("whole {}", words.request), "whole".into()),
         Some((k, n, oid)) => {
             let hex = view::short_hash(oid);
             (format!("commit {k}/{n} {hex}"), format!("{k}/{n} {hex}"))
@@ -380,11 +418,12 @@ fn view_labels(files: &PrFiles) -> (String, String) {
     }
 }
 
-/// ` PR #N · files (viewed/listed) · K pending · <view> ` for a list
+/// ` PR #N · files (viewed/listed) · K pending · <view> ` (in the forge's
+/// words) for a list
 /// `width` wide, the pending count only when there is one: the number
 /// goes first, then the view's long label, so which commit is shown
 /// stays as long as it can.
-fn files_title(files: &PrFiles, pending: usize, width: usize) -> String {
+fn files_title(files: &PrFiles, words: &Words, pending: usize, width: usize) -> String {
     let count = format!("files ({}/{})", files.viewed_count(), files.rows.len());
     // The pending review's count gives way only to the view's short label.
     let pending = if pending > 0 {
@@ -392,10 +431,13 @@ fn files_title(files: &PrFiles, pending: usize, width: usize) -> String {
     } else {
         String::new()
     };
-    let (long, short) = view_labels(files);
+    let (long, short) = view_labels(files, words);
     let room = width.saturating_sub(2);
     let candidates = [
-        format!(" PR #{} · {count}{pending} · {long} ", files.number),
+        format!(
+            " {} {}{} · {count}{pending} · {long} ",
+            words.short, words.sign, files.number
+        ),
         format!(" {count}{pending} · {long} "),
         format!(" {count}{pending} · {short} "),
         format!(" {short}{pending} "),
@@ -422,11 +464,17 @@ fn diff_title(path: &str, tail: &str, width: usize) -> String {
 }
 
 /// The list's rows, scrolled so the cursor shows, or what it waits for.
-fn file_lines(palette: &Palette, files: &PrFiles, inner: Rect) -> Vec<Line<'static>> {
+fn file_lines(
+    palette: &Palette,
+    files: &PrFiles,
+    words: &Words,
+    inner: Rect,
+) -> Vec<Line<'static>> {
     let width = usize::from(inner.width);
+    let fetching = format!("Fetching {} head…", words.short);
     let waiting = match &files.stage {
         FilesStage::Checking | FilesStage::Listing => Some("Loading files…"),
-        FilesStage::Fetching => Some("Fetching PR head…"),
+        FilesStage::Fetching => Some(fetching.as_str()),
         FilesStage::Failed(message) => {
             // Git's words were made safe when they were read.
             return markdown::wrap_text(message, Style::new().fg(palette.error), width);
@@ -435,7 +483,7 @@ fn file_lines(palette: &Palette, files: &PrFiles, inner: Rect) -> Vec<Line<'stat
         FilesStage::Ready => None,
     };
     if let Some(text) = waiting {
-        return vec![Line::raw(text)];
+        return vec![Line::raw(text.to_string())];
     }
     let height = usize::from(inner.height).max(1);
     let start = (files.cursor + 1).saturating_sub(height);
@@ -523,6 +571,7 @@ pub fn detail_area(main: Rect) -> Rect {
 /// description.
 pub fn detail_max_scroll(
     detail: &PrDetail,
+    words: &Words,
     body: &[Line<'static>],
     threads: Option<&str>,
     inner: Rect,
@@ -531,6 +580,7 @@ pub fn detail_max_scroll(
     detail_lines(
         &Palette::DEFAULT,
         detail,
+        words,
         body,
         threads,
         usize::from(inner.width),
@@ -553,12 +603,13 @@ fn dim() -> Style {
 pub fn detail_lines(
     palette: &Palette,
     detail: &PrDetail,
+    words: &Words,
     body: &[Line<'static>],
     threads: Option<&str>,
     width: usize,
 ) -> Vec<Line<'static>> {
     let mut lines = markdown::wrap_text(&detail.title, bold(), width);
-    let by = format!("#{} by ", detail.number);
+    let by = format!("{}{} by ", words.sign, detail.number);
     lines.push(Line::from(vec![
         Span::raw(by.clone()),
         Span::styled(
@@ -703,6 +754,8 @@ fn check_look(palette: &Palette, status: CheckStatus) -> (&'static str, &'static
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    const GITHUB: &Words = &kika_forge::forge::GitHubForge::WORDS;
 
     use super::*;
     use crate::features::review::ReviewIntent;
@@ -998,7 +1051,7 @@ mod tests {
         let mut detail = fixture_detail();
         detail.title = "A title that is far too long for a narrow screen".into();
         detail.head = "feature/a-branch-name-that-goes-on".into();
-        let lines = detail_lines(&Palette::DEFAULT, &detail, &[], None, 28);
+        let lines = detail_lines(&Palette::DEFAULT, &detail, GITHUB, &[], None, 28);
         let text: Vec<String> = lines
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
@@ -1038,9 +1091,9 @@ mod tests {
             ReviewProblem::Status(ForgeStatus::Failed),
         ];
         for problem in problems {
-            let (what, next) = problem_text(problem);
+            let (what, next) = problem_text(problem, GITHUB);
             for width in [20, 40, 60] {
-                let lines = problem_lines(&Palette::DEFAULT, problem, width);
+                let lines = problem_lines(&Palette::DEFAULT, problem, GITHUB, width);
                 let text: String = lines
                     .iter()
                     .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
@@ -1309,12 +1362,96 @@ mod tests {
         );
     }
 
+    /// `state` reviewing a repository on a `gitlab_ask` host.
+    fn on_gitlab(mut state: AppState) -> AppState {
+        state.forge.hosts = vec![ForgeHost::parse_gitlab("gitlab.example.com").unwrap()];
+        state.review.repo = Some(kika_forge::ForgeRepo {
+            host: "gitlab.example.com".into(),
+            ..repo()
+        });
+        state
+    }
+
+    #[test]
+    fn a_gitlab_repository_shows_merge_requests_by_bang_number() {
+        let mut queue = on_gitlab(reviewing(ReviewScreen::Queue));
+        queue.review.queues = Some(fixture_queues());
+        queue.review.queue = QueueKind::AllOpen;
+        let rows = draw(&queue, 80, 12);
+        assert!(
+            rows.iter()
+                .any(|r| r.starts_with("│▸ !15  Draft: new gadget API ")),
+            "{rows:#?}"
+        );
+        assert!(contains(&rows, "  !12  Cache widget lookups"), "{rows:#?}");
+        assert!(!rows.iter().any(|r| r.contains("#1")), "{rows:#?}");
+        queue.review.queue = QueueKind::Authored;
+        let rows = draw(&queue, 80, 12);
+        assert!(
+            contains(&rows, "No merge requests in this queue"),
+            "{rows:#?}"
+        );
+        queue.review.queues = None;
+        queue.review.queues_fetch.loading = true;
+        let rows = draw(&queue, 80, 12);
+        assert!(contains(&rows, "Loading merge requests…"), "{rows:#?}");
+
+        let mut detail = on_gitlab(reviewing(ReviewScreen::Detail(42)));
+        let rows = draw(&detail, 80, 8);
+        assert!(contains(&rows, "Loading merge request !42…"), "{rows:#?}");
+        detail.review.detail = Some(fixture_detail());
+        let rows = draw(&detail, 80, 30);
+        assert!(contains(&rows, "Review · acme/widgets !42 "), "{rows:#?}");
+        assert!(contains(&rows, "!42 by octocat"), "{rows:#?}");
+        assert!(!contains(&rows, "#42"), "{rows:#?}");
+        detail.review.detail = None;
+        detail.review.detail_fetch.error = Some(ReviewProblem::Missing(42));
+        let rows = draw(&detail, 80, 8);
+        assert!(contains(&rows, "No merge request !42"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_github_repository_still_shows_pull_requests_by_hash_number() {
+        let mut queue = reviewing(ReviewScreen::Queue);
+        queue.forge.hosts = vec![ForgeHost::parse("github.com").unwrap()];
+        queue.review.queues = Some(fixture_queues());
+        queue.review.queue = QueueKind::Authored;
+        let rows = draw(&queue, 80, 12);
+        assert!(
+            contains(&rows, "No pull requests in this queue"),
+            "{rows:#?}"
+        );
+        let mut detail = reviewing(ReviewScreen::Detail(42));
+        detail.forge.hosts = queue.forge.hosts.clone();
+        detail.review.detail = Some(fixture_detail());
+        let rows = draw(&detail, 80, 30);
+        assert!(contains(&rows, "Review · acme/widgets #42 "), "{rows:#?}");
+        assert!(contains(&rows, "#42 by octocat"), "{rows:#?}");
+        assert!(!contains(&rows, "!42"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_file_list_title_names_a_merge_request_on_gitlab() {
+        let state = files_state();
+        let files = state.review.files.as_ref().unwrap();
+        let gitlab = kika_forge::forge::words(kika_forge::url::ForgeKind::GitLab);
+        assert_eq!(
+            files_title(files, gitlab, 0, 200),
+            " MR !12 · files (1/5) · whole merge request "
+        );
+        assert_eq!(
+            files_title(files, GITHUB, 0, 200),
+            " PR #12 · files (1/5) · whole pull request "
+        );
+    }
+
     #[test]
     fn the_file_list_title_never_overflows_its_border() {
         let mut state = in_commit_view();
         for pending in [0, 1, 500] {
             for width in 0..70 {
-                let title = files_title(state.review.files.as_ref().unwrap(), pending, width);
+                let title =
+                    files_title(state.review.files.as_ref().unwrap(), GITHUB, pending, width);
                 assert!(
                     width_of(&title) <= width.saturating_sub(2) || width < 4,
                     "{pending} {width}: {title:?}"
@@ -1323,8 +1460,8 @@ mod tests {
         }
         // The count gives way only to the short view label.
         let files = state.review.files.as_ref().unwrap();
-        assert!(files_title(files, 3, 70).contains("· 3 pending"));
-        assert!(files_title(files, 3, 30).contains("3 pending"));
+        assert!(files_title(files, GITHUB, 3, 70).contains("· 3 pending"));
+        assert!(files_title(files, GITHUB, 3, 30).contains("3 pending"));
         for (width, height) in [(80, 24), (40, 10), (20, 5), (10, 3), (3, 2), (1, 1)] {
             state.size = (width, height);
             draw(&state, width, height);

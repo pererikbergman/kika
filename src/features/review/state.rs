@@ -16,7 +16,7 @@ use crate::model::{AppState, Context};
 use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::{MergePrConfirm, Popup};
 use kika_forge::discussion::PrDiscussion;
-use kika_forge::forge::Unsupported;
+use kika_forge::forge::{Unsupported, Words, words_or_default};
 use kika_forge::merge::MergeMethod;
 use kika_forge::remote::{allowed, matches};
 use kika_forge::review::{CheckStatus, PrDetail, PrSummary, QueueKind, Queues, ReviewError};
@@ -612,13 +612,26 @@ impl AppState {
         });
     }
 
+    /// How review mode names requests: the words of the forge kind the
+    /// badges found, or of the reviewed repository's host, and GitHub's
+    /// while neither is known.
+    pub(crate) fn review_words(&self) -> &'static Words {
+        let kind = self.forge.kind().or_else(|| {
+            let repo = self.review.repo.as_ref()?;
+            self.forge.kind_of(repo)
+        });
+        words_or_default(kind)
+    }
+
     /// The furthest the detail scrolls, with its last line at the bottom.
     pub(super) fn review_max_scroll(&self) -> usize {
         match (&self.review.detail, &self.review.body) {
             (Some(detail), Some(body)) => {
-                let threads = super::threads_view::thread_summary(&self.review);
+                let words = self.review_words();
+                let threads = super::threads_view::thread_summary(&self.review, words);
                 super::view::detail_max_scroll(
                     detail,
+                    words,
                     &body.lines,
                     threads.as_deref(),
                     self.review_area(),
