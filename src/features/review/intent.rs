@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use super::comment_external::{CommentEditError, ComposerStamp, EditedComment};
 use super::git::CheckoutPlan;
+use super::pending::CommentTarget;
 use super::{CommitsHere, PrCommit, PrFileRow};
 use crate::effect::Tag;
 use crate::intent::Scroll;
@@ -147,6 +148,16 @@ pub(crate) enum ReviewIntent {
     ToggleCommentRange,
     /// Write a comment on the rows picked.
     ConfirmCommentPick,
+    /// Write a code suggestion for the rows picked: read their lines at
+    /// the head first.
+    ConfirmSuggestionPick,
+    /// The picked lines of `target`'s file at the head, raw, or why they
+    /// could not be read.
+    SuggestionLinesRead {
+        tag: Tag,
+        target: CommentTarget,
+        result: Result<Vec<String>, String>,
+    },
     CancelCommentPick,
     /// A key the composer's bindings left: typed into the comment.
     TypeComment(KeyPress),

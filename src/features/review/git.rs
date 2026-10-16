@@ -1,8 +1,9 @@
 //! A pull request's commits in the local repository: whether they are
 //! here, fetching the missing ones from the forge's remote by id, the
 //! changed files between the merge base and the head, and the commits in
-//! between, each of which can be reviewed on its own. Ids reach argv only
-//! as [`CommitId`]s, hex digits, so nothing in it reads as an option; no
+//! between, each of which can be reviewed on its own, and a file's lines at
+//! the head for a code suggestion. Ids reach argv only as [`CommitId`]s,
+//! hex digits, so nothing in it reads as an option; no
 //! ref name from the server ever does. The one ref written is the local
 //! branch `pr/<number>` a checkout makes or moves (see [`plan_checkout`]
 //! and [`pr_checkout_commands`]), named from the number alone.
@@ -14,6 +15,7 @@ use kika_git::commit_files::{
     CommitFile, CommitId, CommitRange, LineCounts, commit_files, numstat,
 };
 use kika_git::error::GitError;
+use kika_git::path::{RepoPath, os_string};
 use kika_git::remote::{AskpassEnv, askpass_for, with_prompts};
 use kika_git::remotes::RemoteName;
 use kika_git::repo_state::{Operation, git_dir_command, git_dir_from, in_progress};
@@ -499,12 +501,62 @@ fn parse_commit(line: &[u8]) -> Result<PrCommit, String> {
     })
 }
 
+/// `git cat-file blob <head>:<path>`: a file as it is at the pull
+/// request's head. The argument is built from the path's raw bytes, so a
+/// name that is not UTF-8 still names its own file; it starts with hex,
+/// so it never reads as an option.
+pub fn blob_command(head: &CommitId, path: &RepoPath) -> GitCommand {
+    let mut spec = format!("{}:", head.as_str()).into_bytes();
+    spec.extend_from_slice(path.as_bytes());
+    query(
+        GitCommand::new("cat-file")
+            .arg("blob")
+            .arg(os_string(&spec)),
+    )
+}
+
+/// Lines `first..=last` (1-based) of `path` at `head`, each without its
+/// `\n` and one trailing `\r`, exactly as the file has them. A range past
+/// the end of the file, or lines that are not UTF-8, are an error.
+pub fn read_new_lines(
+    runner: &dyn GitRunner,
+    head: &CommitId,
+    path: &RepoPath,
+    first: u32,
+    last: u32,
+) -> Result<Vec<String>, String> {
+    let output = runner
+        .run_checked(&blob_command(head, path))
+        .map_err(|e| e.message_or("git cat-file failed"))?;
+    let text = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
+    let lines: Vec<&[u8]> = if output.stdout.is_empty() {
+        Vec::new()
+    } else {
+        text.split(|&b| b == b'\n').collect()
+    };
+    let (Some(from), Some(to)) = (first.checked_sub(1), last.checked_sub(1)) else {
+        return Err("Lines are counted from 1".into());
+    };
+    let picked = lines
+        .get(from as usize..=to as usize)
+        .filter(|_| from <= to)
+        .ok_or_else(|| format!("line {last} is past the end of the file"))?;
+    picked
+        .iter()
+        .map(|line| {
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            String::from_utf8(line.to_vec()).map_err(|_| "the lines are not UTF-8".to_string())
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{STANDARD_ENV, env_list};
     use kika_git::fake::{FakeRunner, fail, ok};
     use kika_git::runner::{EnvProfile, GitOutput};
+    use std::ffi::OsString;
 
     fn id(hex: &str) -> CommitId {
         CommitId::parse(hex).unwrap()
@@ -1234,5 +1286,44 @@ mod tests {
         std::fs::write(work.join(".git/BISECT_LOG"), "").unwrap();
         let plan = plan_checkout(&runner, &h2, &branch).unwrap();
         assert_eq!(plan.in_progress, [Operation::Bisect]);
+    }
+
+    #[test]
+    fn the_blob_is_read_from_the_raw_path_and_only_the_picked_lines_come_back() {
+        let path = RepoPath::from_bytes(b"src/caf\xe9.rs");
+        let cmd = blob_command(&id("a1"), &path);
+        assert_eq!(
+            cmd.args(),
+            [
+                OsString::from("cat-file"),
+                OsString::from("blob"),
+                kika_git::path::os_string(b"a1:src/caf\xe9.rs"),
+            ]
+        );
+        let query = env_list(&[STANDARD_ENV.as_slice(), &[("GIT_NO_LAZY_FETCH", "1")]].concat());
+        assert_eq!(cmd.process_env(), query);
+
+        let path = RepoPath::from_bytes(b"src/lib.rs");
+        let argv = ["cat-file", "blob", "a1:src/lib.rs"];
+        let blob = b"one\r\n\ttwo\r\nthree\n";
+        let fake = FakeRunner::new()
+            .expect(&argv, ok(blob))
+            .expect(&argv, ok(b"one\nlast"))
+            .expect(&argv, ok(blob))
+            .expect(&argv, ok(b"ok\n\xff\n"))
+            .expect(&argv, fail("fatal: bad object"));
+        assert_eq!(
+            read_new_lines(&fake, &id("a1"), &path, 2, 3),
+            Ok(vec!["\ttwo".to_string(), "three".to_string()])
+        );
+        // A last line with no newline is still a line.
+        assert_eq!(
+            read_new_lines(&fake, &id("a1"), &path, 2, 2),
+            Ok(vec!["last".to_string()])
+        );
+        assert!(read_new_lines(&fake, &id("a1"), &path, 3, 4).is_err());
+        assert!(read_new_lines(&fake, &id("a1"), &path, 1, 2).is_err());
+        assert!(read_new_lines(&fake, &id("a1"), &path, 1, 1).is_err());
+        fake.assert_done();
     }
 }

@@ -5969,6 +5969,7 @@ mod tests {
         "review_pick.up",
         "review_pick.range",
         "review_pick.confirm",
+        "review_pick.suggest",
         "review_pick.cancel",
         "review_pick.quit",
         "review_comment.save",

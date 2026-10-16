@@ -645,6 +645,16 @@ pub(crate) static REVIEW_COMMENT_KEYS: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "review_pick.suggest",
+        keys: &[KeyPattern::exact(KeyCode::Char('s'), NONE)],
+        scope: KeyScope::ReviewPick,
+        intent: AppIntent::Review(ReviewIntent::ConfirmSuggestionPick),
+        description: "Write a code suggestion for the line or range picked",
+        label: "suggest",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
         id: "review_pick.cancel",
         keys: &[KeyPattern::any(KeyCode::Esc)],
         scope: KeyScope::ReviewPick,
@@ -1025,6 +1035,10 @@ mod tests {
         assert_eq!(
             owner(KeyScope::ReviewPick, enter),
             Some("review_pick.confirm")
+        );
+        assert_eq!(
+            owner(KeyScope::ReviewPick, plain('s')),
+            Some("review_pick.suggest")
         );
         assert_eq!(
             owner(KeyScope::ReviewPending, plain('d')),
