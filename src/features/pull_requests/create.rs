@@ -14,8 +14,9 @@ use crate::keymap::{KeyScope, Reason, no_commit_selected};
 use crate::model::{AppState, Context};
 use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::{ErrorPopup, LineInput, Popup, PromptKind};
+use kika_forge::forge::{Capability, supports};
 use kika_forge::remote::{allowed, matches};
-use kika_forge::url::{ForgeKind, commit_url, forge_for, gitlab_mrs_url, pull_url, repo_of};
+use kika_forge::url::{ForgeKind, NoBranchPage, branch_page_url, commit_url, forge_for, repo_of};
 use kika_forge::{CreateError, ForgeHost, ForgeRepo, PrBadge, PrState, REFRESH_LIMITED, same_repo};
 use kika_git::branches::BranchName;
 use kika_git::commit_files::CommitId;
@@ -26,7 +27,6 @@ const NO_BRANCH: &str = "No branch selected";
 const NO_FORGE: &str = "The remote is on no forge host in the global config";
 const NO_BROWSER: &str = "Set forge.browser in the global config";
 const NO_PR: &str = "No pull request known for this branch";
-const NOT_GITHUB: &str = "Pull requests can only be created on GitHub";
 const NO_UPSTREAM: &str = "Push the branch first";
 const RATE_LIMITED: &str = "GitHub is rate limited; fetch after the limit resets";
 const CREATING: &str = "A pull request is being created";
@@ -85,14 +85,15 @@ fn forge_link(state: &AppState) -> Option<(ForgeKind, ForgeRepo)> {
 fn branch_page(state: &AppState) -> Result<String, Reason> {
     let branch = state.branches.selected_branch().ok_or(NO_BRANCH)?;
     let (kind, repo) = forge_link(state).ok_or(NO_FORGE)?;
-    let url = match kind {
-        ForgeKind::GitHub => {
-            let badge = state.forge.badges.get(&branch.name).ok_or(NO_PR)?;
-            pull_url(&repo, badge.number)
-        }
-        ForgeKind::GitLab => gitlab_mrs_url(&repo, &branch.name),
-    };
-    url.ok_or(NO_FORGE.into())
+    let pr = state
+        .forge
+        .badges
+        .get(&branch.name)
+        .map(|badge| badge.number);
+    branch_page_url(kind, &repo, &branch.name, pr).map_err(|gap| match gap {
+        NoBranchPage::NoPull => NO_PR.into(),
+        NoBranchPage::Unbuildable => NO_FORGE.into(),
+    })
 }
 
 /// The selected commit's page on the remote's forge, or why there is none.
@@ -126,11 +127,12 @@ pub(crate) fn create_disabled(state: &AppState) -> Option<Reason> {
     let Some(branch) = state.branches.selected_branch() else {
         return Some(NO_BRANCH.into());
     };
-    let repo = match forge_link(state) {
-        None => return Some(NO_FORGE.into()),
-        Some((ForgeKind::GitLab, _)) => return Some(NOT_GITHUB.into()),
-        Some((ForgeKind::GitHub, repo)) => repo,
+    let Some((kind, repo)) = forge_link(state) else {
+        return Some(NO_FORGE.into());
     };
+    if let Err(unsupported) = supports(kind, Capability::CreatePull) {
+        return Some(unsupported.message().into());
+    }
     if let Some(badge) = state.forge.badges.get(&branch.name) {
         return Some(Reason::from(format!(
             "The branch already has pull request #{}",
@@ -795,9 +797,13 @@ mod tests {
         );
         // No pull request number is needed there.
         assert_eq!(reason(&state, "Copy URL"), None);
+        let unsupported = kika_forge::forge::Unsupported {
+            kind: kika_forge::url::ForgeKind::GitLab,
+            capability: Capability::CreatePull,
+        };
         assert_eq!(
-            reason(&state, "Create pull request…").as_deref(),
-            Some(NOT_GITHUB)
+            reason(&state, "Create pull request…"),
+            Some(unsupported.message())
         );
     }
 
