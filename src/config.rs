@@ -79,7 +79,6 @@ use crate::keymap::{Keymap, KeysTable, Trust};
 use crate::theme::{self, ColourValue, Palette};
 use crate::watch::{DEFAULT_WATCH, WatchConfig};
 use kika_forge::ForgeHost;
-use kika_forge::allow::AllowRule;
 use kika_git::diff::EmojiZwj;
 
 /// Where the config files are. Either may be unknown.
@@ -464,7 +463,7 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
     };
     let hosts = |names: &[String], key: &str| parsed(names, key, ForgeHost::parse);
     let github = hosts(&file.forge.github, "github")?;
-    let forge_gitlab_hosts = hosts(&file.forge.gitlab, "gitlab")?;
+    let forge_gitlab_hosts = parsed(&file.forge.gitlab, "gitlab", ForgeHost::parse_gitlab)?;
     let gitlab_ask = parsed(
         &file.forge.gitlab_ask,
         "gitlab_ask",
@@ -577,14 +576,15 @@ fn attach_allow(
     let mut lists = BTreeMap::new();
     for (key, entries) in allow {
         let name = ForgeHost::parse(key)?;
-        if !hosts.iter().any(|h| h.as_str() == name.as_str()) {
+        let Some(host) = hosts.iter().find(|h| h.as_str() == name.as_str()) else {
             return Err(format!(
                 "{key:?} is not one of the forge.github or forge.gitlab_ask hosts"
             ));
-        }
+        };
+        // A GitLab entry may name nested groups; a GitHub one never.
         let rules = entries
             .iter()
-            .map(|entry| AllowRule::parse(entry))
+            .map(|entry| host.allow_rule(entry))
             .collect::<Result<Vec<_>, _>>()?;
         lists.insert(name.as_str().to_string(), rules);
     }
@@ -1457,8 +1457,8 @@ output = "none"
         assert_eq!(
             settings.forge_gitlab_hosts,
             [
-                ForgeHost::parse("gitlab.com").unwrap(),
-                ForgeHost::parse("git.example.org").unwrap()
+                ForgeHost::parse_gitlab("gitlab.com").unwrap(),
+                ForgeHost::parse_gitlab("git.example.org").unwrap()
             ]
         );
         // GitLab hosts never turn the pull-request load on.
@@ -1519,7 +1519,7 @@ output = "none"
         assert_ne!(host.kind(), ForgeHost::parse("github.com").unwrap().kind());
         assert_eq!(
             on.forge_gitlab_hosts,
-            [ForgeHost::parse("gitlab.example.com").unwrap()]
+            [ForgeHost::parse_gitlab("gitlab.example.com").unwrap()]
         );
         // `gitlab` alone only builds URLs.
         let off = global("[forge]\ngitlab = [\"gitlab.example.com\"]\n").unwrap();
@@ -1607,6 +1607,47 @@ output = "none"
             only_urls,
             "forge.allow: \"gitlab.example.com\" is not one of the forge.github or \
              forge.gitlab_ask hosts"
+        );
+    }
+
+    #[test]
+    fn a_gitlab_allow_entry_may_name_nested_groups_and_a_github_one_may_not() {
+        let global = |text: &str| apply_global(text, &Keymap::default(), DEFAULT_WATCH);
+        let [host] = global(
+            "[forge]\ngitlab = [\"gitlab.example.com\"]\n\
+             gitlab_ask = [\"gitlab.example.com\"]\n\
+             [forge.allow]\n\"gitlab.example.com\" = [\"acme/sub/x\", \"acme/team\"]\n",
+        )
+        .unwrap()
+        .forge_hosts
+        .try_into()
+        .unwrap();
+        let repo = |owner: &str, name: &str| ForgeRepo {
+            host: "gitlab.example.com".into(),
+            owner: owner.into(),
+            name: name.into(),
+        };
+        assert!(host.allows(&repo("acme/sub", "x")));
+        assert!(host.allows(&repo("acme/team", "y")));
+        assert!(!host.allows(&repo("acme/sub", "y")));
+        assert!(!host.allows(&repo("acme", "x")));
+        // The links-only list is GitLab too, so nested projects get links.
+        let links = global("[forge]\ngitlab = [\"gitlab.example.com\"]\n").unwrap();
+        let [lab] = links.forge_gitlab_hosts.try_into().unwrap();
+        assert_eq!(lab.kind(), kika_forge::url::ForgeKind::GitLab);
+
+        let files = Files::new("forge-allow-nested-github");
+        files.global(
+            "[keys]\n\"files.stage\" = [\"x\"]\n[forge]\ngithub = [\"github.com\"]\n\
+             [forge.allow]\n\"github.com\" = [\"acme/sub/x\"]\n",
+        );
+        let loaded = files.load();
+        assert_eq!(loaded.forge_hosts, []);
+        assert_eq!(loaded.keymap, Keymap::default());
+        let [error] = loaded.errors.try_into().unwrap();
+        assert!(
+            error.message.starts_with("forge.allow: \"acme/sub/x\" "),
+            "{error}"
         );
     }
 

@@ -102,6 +102,22 @@ impl ForgeHost {
         self.kind
     }
 
+    /// Whether a repository on this host may sit in nested groups
+    /// (`group/sub/project`): GitLab's may, GitHub's are `owner/repo`.
+    pub fn nests(&self) -> bool {
+        self.kind == ForgeKind::GitLab
+    }
+
+    /// `text` as one of this host's `[forge.allow]` entries: a group path
+    /// on a host that [`nests`](Self::nests), else an owner or `owner/repo`.
+    pub fn allow_rule(&self, text: &str) -> Result<AllowRule, String> {
+        if self.nests() {
+            AllowRule::parse_nested(text)
+        } else {
+            AllowRule::parse(text)
+        }
+    }
+
     /// The host limited to the repositories `rules` allow.
     pub fn with_allow(self, rules: Vec<AllowRule>) -> Self {
         Self {
@@ -128,7 +144,9 @@ impl ForgeHost {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForgeRepo {
     pub host: String,
+    /// The GitHub owner, or on GitLab the whole group path (`acme/sub`).
     pub owner: String,
+    /// The repository: the path's last part, never holding a `/`.
     pub name: String,
 }
 
@@ -645,6 +663,24 @@ pub(crate) mod tests {
         assert!(offline.merge_message().contains("refresh with r"));
         let refused = CreateError::Refused("Head branch was modified".into());
         assert_eq!(refused.merge_message(), "Head branch was modified");
+    }
+
+    #[test]
+    fn only_a_gitlab_host_nests_and_takes_group_paths_as_allow_entries() {
+        let lab = ForgeHost::parse_gitlab("gitlab.example.com").unwrap();
+        assert!(lab.nests() && !github()[0].nests());
+        assert!(lab.allow_rule("acme/sub/x").is_ok());
+        assert!(github()[0].allow_rule("acme/sub/x").is_err());
+        assert_eq!(github()[0].allow_rule("acme/x"), AllowRule::parse("acme/x"));
+        assert!(lab.allow_rule("-").is_err());
+        // A nested repository on that host gets its kind.
+        let mut forge = ForgeState::new(vec![github()[0].clone(), lab]);
+        forge.repo = Some(ForgeRepo {
+            host: "gitlab.example.com".into(),
+            owner: "acme/sub".into(),
+            name: "x".into(),
+        });
+        assert_eq!(forge.kind(), Some(ForgeKind::GitLab));
     }
 
     #[test]

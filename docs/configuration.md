@@ -379,9 +379,11 @@ github = ["github.com", "github.example.com"]
   allows every repository of the owner `acme`, `pererikbergman/kika` only
   that one. An empty list (`"github.com" = []`) allows none.
 - Names are compared ignoring case, as GitHub does: `acme` also allows
-  `ACME/widgets`. There are no patterns: `*`, a third `/` part, an empty
-  part, a part of dots only or a name ending in `.git` is an error, as is
-  any character other than letters, digits, `.`, `_` and `-`.
+  `ACME/widgets`. There are no patterns: `*`, a third `/` part (on a
+  GitHub host), an empty part, a part of dots only or a name ending in
+  `.git` is an error, as is any character other than letters, digits, `.`,
+  `_` and `-`. A GitLab host takes group paths too; see
+  [GitLab merge requests](#gitlab-merge-requests).
 - Each key must be one of the hosts in `github` or `gitlab_ask`. A key for
   a host that is only in `gitlab`, or for a host not listed, is an error.
   Any error ignores the whole file.
@@ -416,6 +418,33 @@ gitlab_ask = ["gitlab.example.com"]
   breaks a rule is an error, and the whole file is ignored.
 - `[forge.allow]` takes a `gitlab_ask` host as a key, and limits which of
   its repositories `glab` is asked about, as it does for `gh`.
+- A project may sit in nested groups, as `acme/sub/project`, up to 21
+  parts in all (GitLab's 20 group levels and the project). Its remote URL
+  is matched like any other (`https://host/acme/sub/project.git`,
+  `git@host:acme/sub/project.git`, …), on a host in `gitlab` or
+  `gitlab_ask`, and it gets the same badges, links and pages as a project
+  in a top-level group. A part that is only `-` is not a project path, as
+  GitLab keeps `/-/` for its own pages. A GitHub host never matches such a
+  URL: there a repository is always `owner/repo`.
+- An entry in a GitLab host's `[forge.allow]` list is a group or project
+  path of up to 21 parts, compared ignoring case:
+
+  ```toml
+  [forge.allow]
+  "gitlab.example.com" = ["acme", "acme/team", "acme/sub/project"]
+  ```
+
+  - `acme` allows the projects directly in the group `acme`, such as
+    `acme/widgets`, but not `acme/team/widgets`: a group does not allow its
+    subgroups. Name each subgroup you want.
+  - `acme/team` allows the projects directly in the group `acme/team`, and
+    the project `acme/team` should that be a project instead (GitLab never
+    lets a group and a project share a path).
+  - `acme/sub/project` allows that project (or, were it a group, the
+    projects directly in it).
+
+  The part rules are those above, and a part that is only `-` is an error
+  too.
 - Kika asks GitLab through the [GitLab CLI](https://gitlab.com/gitlab-org/cli),
   `glab`, found as `glab` on your `PATH`. It must be installed and logged in
   for the host (`glab auth login --hostname <host>`, or `GITLAB_TOKEN` in the
@@ -454,7 +483,6 @@ gitlab_ask = ["gitlab.example.com"]
   limited · until HH:MM UTC` or `GitLab: rate limit over · fetch to retry`.
   `B` during a rate limit says `GitLab is rate limited; refresh after the
   limit resets`.
-- A project in a subgroup (`group/sub/project`) gets no badge yet.
 - Review mode, creating and merging are GitHub only. On a GitLab host
   **Create pull request…** is off and says so, and the page `o` opens stays
   the filtered list of merge requests.

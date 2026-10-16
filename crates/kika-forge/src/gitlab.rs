@@ -390,7 +390,8 @@ fn read_answer(body: &[u8], batch: &[Head]) -> Result<Vec<Option<PrBadge>>, Forg
 }
 
 /// The first merge request under `alias` whose source project is in
-/// `head`'s namespace.
+/// `head`'s namespace: its whole group path, so `acme/sub` is neither
+/// `acme/other` nor `acme/sub/deep`.
 fn head_mr<'a>(
     aliases: &'a HashMap<String, Connection>,
     alias: &str,
@@ -400,7 +401,7 @@ fn head_mr<'a>(
         mr.source_project.as_ref().is_some_and(|project| {
             project
                 .full_path
-                .split_once('/')
+                .rsplit_once('/')
                 .is_some_and(|(owner, _)| owner.eq_ignore_ascii_case(&head.owner))
         })
     })
@@ -732,6 +733,42 @@ mod tests {
             assert_eq!(badges.get(&branches[i]).copied(), *want, "b{i}");
         }
         assert_eq!(badges.len(), 16);
+    }
+
+    #[test]
+    fn a_project_in_nested_groups_is_asked_by_its_full_path_and_matched_by_namespace() {
+        let nested = ForgeRepo {
+            owner: "acme/sub".into(),
+            ..repo()
+        };
+        let node = |iid: u32, source: &str| {
+            format!(
+                r#"{{"iid":"{iid}","state":"opened","draft":false,"sourceProject":{{"fullPath":"{source}"}},"headPipeline":null}}"#
+            )
+        };
+        let reply = format!(
+            "HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n\
+             {{\"data\":{{\"project\":{{\"b0\":{{\"nodes\":[{},{},{}]}},\
+             \"b1\":{{\"nodes\":[{},{}]}}}}}}}}",
+            node(3, "acme/other/widgets"),
+            node(2, "acme/sub/deep/widgets"),
+            node(1, "Acme/Sub/widgets"),
+            node(5, "acme/widgets"),
+            node(4, "acme/subx/widgets"),
+        );
+        let runner = FakeGlab::new().reply(answer(&reply));
+        let branches = names(2);
+        let heads = super::super::head::heads(&branches, &HashMap::new(), &nested);
+        let fetched = glab(&runner, &CommandSink::new(), &host())
+            .fetch_badges(&nested, &heads)
+            .unwrap();
+        assert_eq!(
+            body(&runner.calls()[0])["variables"]["path"],
+            "acme/sub/widgets"
+        );
+        // Only the head's own namespace counts, in any case.
+        assert_eq!(fetched.badges[&branches[0]].number, 1);
+        assert_eq!(fetched.badges.get(&branches[1]), None);
     }
 
     #[test]
