@@ -20,7 +20,9 @@ pub mod forge;
 pub mod github;
 mod github_forge;
 pub mod gitlab;
+pub mod gitlab_discussion;
 mod gitlab_forge;
+pub mod gitlab_review;
 pub mod head;
 pub mod merge;
 pub mod pending;
@@ -332,7 +334,13 @@ impl ForgeState {
     /// The kind of the host [`Self::repo`] is on, once a load found it:
     /// how its badges and status line are worded.
     pub fn kind(&self) -> Option<ForgeKind> {
-        remote::matches(self.repo.as_ref()?, &self.hosts).map(ForgeHost::kind)
+        self.kind_of(self.repo.as_ref()?)
+    }
+
+    /// The kind of the configured host `repo` is on, if any: for a
+    /// repository found by another load than the badges'.
+    pub fn kind_of(&self, repo: &ForgeRepo) -> Option<ForgeKind> {
+        remote::matches(repo, &self.hosts).map(ForgeHost::kind)
     }
 
     /// Back to nothing known, for another repository. The hosts and

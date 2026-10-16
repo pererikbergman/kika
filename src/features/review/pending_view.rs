@@ -21,6 +21,7 @@ use crate::theme::Palette;
 use crate::view::{centered, elide_left, width_of};
 use kika_forge::anchor::{RowNumber, row_in, to_line_id};
 use kika_forge::discussion::PrDiscussion;
+use kika_forge::forge::Words;
 use kika_forge::pending::PendingComment;
 use kika_git::safe_text::sanitize;
 
@@ -96,13 +97,26 @@ fn frame_block(title: String) -> Block<'static> {
 }
 
 /// Draw the pending list, then the composer over it, whichever is open.
-pub fn render_pending(palette: &Palette, review: &ReviewState, frame: &mut Frame, area: Rect) {
+pub fn render_pending(
+    palette: &Palette,
+    review: &ReviewState,
+    words: &Words,
+    frame: &mut Frame,
+    area: Rect,
+) {
     if let (Some(cursor), Some(slot)) = (review.pending_list, &review.pending) {
-        render_list(palette, slot, cursor, frame, area);
+        render_list(palette, slot, words, cursor, frame, area);
     }
     if let Some(composer) = &review.composer {
         let comments = review.pending_count();
-        render_composer(composer, comments, review.composer_posting(), frame, area);
+        render_composer(
+            composer,
+            words,
+            comments,
+            review.composer_posting(),
+            frame,
+            area,
+        );
     }
 }
 
@@ -133,8 +147,14 @@ const EDITOR_CUE: &str = " · ctrl-e editor ";
 /// the cue that it goes to GitHub, or that it is on its way, is kept whole
 /// and the label gives way next. While posting there is no editor cue,
 /// since the text may not change.
-fn composer_title(composer: &Composer, comments: usize, posting: bool, room: usize) -> String {
-    let (title, whole) = base_title(composer, comments, posting, room);
+fn composer_title(
+    composer: &Composer,
+    words: &Words,
+    comments: usize,
+    posting: bool,
+    room: usize,
+) -> String {
+    let (title, whole) = base_title(composer, words, comments, posting, room);
     if !whole || posting {
         return title;
     }
@@ -148,7 +168,14 @@ fn composer_title(composer: &Composer, comments: usize, posting: bool, room: usi
 
 /// The title without the editor cue, and whether it kept its head, which
 /// the editor cue only ever follows.
-fn base_title(composer: &Composer, comments: usize, posting: bool, room: usize) -> (String, bool) {
+fn base_title(
+    composer: &Composer,
+    words: &Words,
+    comments: usize,
+    posting: bool,
+    room: usize,
+) -> (String, bool) {
+    let sign = words.sign;
     let head = match &composer.kind {
         ComposerKind::Line {
             target,
@@ -168,9 +195,9 @@ fn base_title(composer: &Composer, comments: usize, posting: bool, room: usize) 
                 format!(" Reply to {}", elide_left(&label, cut))
             }
         }
-        ComposerKind::General { number, .. } => format!(" Comment on #{number}"),
+        ComposerKind::General { number, .. } => format!(" Comment on {sign}{number}"),
         ComposerKind::Review { number, event } => format!(
-            " Review summary: {} #{number} ({})",
+            " Review summary: {} {sign}{number} ({})",
             event.label(),
             comments_label(comments)
         ),
@@ -192,6 +219,7 @@ fn base_title(composer: &Composer, comments: usize, posting: bool, room: usize) 
 
 fn render_composer(
     composer: &Composer,
+    words: &Words,
     comments: usize,
     posting: bool,
     frame: &mut Frame,
@@ -200,7 +228,7 @@ fn render_composer(
     let popup = box_area(area);
     let room = usize::from(popup.width).saturating_sub(2);
     let block = frame_block(clip_title(
-        &composer_title(composer, comments, posting, room),
+        &composer_title(composer, words, comments, posting, room),
         popup.width,
     ));
     let inner = block.inner(popup);
@@ -271,6 +299,7 @@ fn editor_lines(editor: &CommentEditor, width: usize, rows: usize) -> Vec<Line<'
 fn render_list(
     palette: &Palette,
     slot: &PendingSlot,
+    words: &Words,
     cursor: usize,
     frame: &mut Frame,
     area: Rect,
@@ -293,7 +322,10 @@ fn render_list(
         String::new()
     };
     let block = frame_block(clip_title(
-        &format!(" Pending review #{} · {count}{at} ", slot.number),
+        &format!(
+            " Pending review {}{} · {count}{at} ",
+            words.sign, slot.number
+        ),
         popup.width,
     ));
     let inner = block.inner(popup);
@@ -348,6 +380,10 @@ mod tests {
     use crate::features::review::state::tests::{press, type_char};
     use crate::model::AppState;
     use crate::view::buffer_rows;
+
+    fn github() -> &'static Words {
+        kika_forge::forge::words(kika_forge::url::ForgeKind::GitHub)
+    }
     use kika_forge::pending::PendingReview;
 
     fn draw(state: &AppState) -> Buffer {
@@ -507,7 +543,7 @@ mod tests {
             editing: Some(1),
         });
         assert_eq!(
-            composer_title(&edit, 0, false, 80),
+            composer_title(&edit, github(), 0, false, 80),
             " Edit comment on src/cache.rs:R1 · ctrl-e editor "
         );
         let general = Composer::new(ComposerKind::General {
@@ -515,19 +551,22 @@ mod tests {
             subject: "PR_1".into(),
         });
         let full = " Comment on #12 · ctrl-s posts to GitHub · ctrl-e editor ";
-        assert_eq!(composer_title(&general, 0, false, width_of(full)), full);
+        assert_eq!(
+            composer_title(&general, github(), 0, false, width_of(full)),
+            full
+        );
         // One column short: the editor cue goes before anything else.
         assert_eq!(
-            composer_title(&general, 0, false, width_of(full) - 1),
+            composer_title(&general, github(), 0, false, width_of(full) - 1),
             " Comment on #12 · ctrl-s posts to GitHub "
         );
         // Without the head it never shows, nor while posting.
         assert_eq!(
-            composer_title(&general, 0, false, 30),
+            composer_title(&general, github(), 0, false, 30),
             " ctrl-s posts to GitHub "
         );
         assert_eq!(
-            composer_title(&general, 0, true, 80),
+            composer_title(&general, github(), 0, true, 80),
             " Comment on #12 · posting… "
         );
     }
