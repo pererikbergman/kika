@@ -117,7 +117,7 @@ pub(crate) fn render_hunk_view(
                         RowKind::Added => Style::new().fg(palette.added),
                         RowKind::Removed => Style::new().fg(palette.removed),
                         RowKind::Context => Style::new(),
-                        RowKind::NoNewline => Style::new().fg(palette.dim),
+                        RowKind::NoNewline => palette.dim_style(),
                     };
                     let mut spans = vec![Span::styled(gutter, Style::new().fg(palette.focused))];
                     if let Some(ids) = picked_ids {

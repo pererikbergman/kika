@@ -19,7 +19,7 @@ pub(crate) fn reflog_lines(
     height: usize,
     width: usize,
 ) -> Vec<Line<'static>> {
-    let dim = Style::new().fg(palette.dim);
+    let dim = palette.dim_style();
     let mut lines: Vec<Line<'static>> = Vec::new();
     if let Some(error) = &list.list.error {
         // Already terminal-safe: git's stderr through `terminal_safe`.
