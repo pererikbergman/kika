@@ -5,6 +5,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
 use super::TagsList;
+use crate::theme::Palette;
 use crate::view::{elide_right, no_matches, range_row, scrolled};
 use kika_git::tags::TagRef;
 
@@ -17,7 +18,12 @@ const ANNOTATED: &str = "◆ ";
 /// The tab's body in `rows` by `width`: why the load failed, a
 /// placeholder, or one row per tag the filter shows, the selection and
 /// the range reversed and scrolled into view.
-pub fn list_body(list: &TagsList, rows: usize, width: usize) -> Paragraph<'static> {
+pub fn list_body(
+    palette: &Palette,
+    list: &TagsList,
+    rows: usize,
+    width: usize,
+) -> Paragraph<'static> {
     if let Some(error) = &list.error {
         let mut lines: Vec<Line> = error.lines().map(|l| Line::from(l.to_string())).collect();
         lines.push(Line::from("Press r to retry"));
@@ -31,7 +37,7 @@ pub fn list_body(list: &TagsList, rows: usize, width: usize) -> Paragraph<'stati
     }
     let shown = list.visible();
     if shown.is_empty() {
-        return Paragraph::new(no_matches());
+        return Paragraph::new(no_matches(palette));
     }
     let range = list.range();
     let selected = Some(list.selected);

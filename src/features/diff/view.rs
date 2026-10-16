@@ -45,7 +45,7 @@ pub(crate) fn render_diff_pane(
     };
     let block = look.block(title);
     let inner = block.inner(area);
-    let pane = diff_pane_body(diff, inner);
+    let pane = diff_pane_body(&look.palette, diff, inner);
     frame.render_widget(pane.block(block), area);
 }
 

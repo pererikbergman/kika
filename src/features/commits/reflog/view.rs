@@ -2,18 +2,24 @@
 //! Every message is repository data, so it is drawn only through its
 //! sanitised display.
 
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use super::git::ReflogEntry;
 use super::list::{ReflogList, short_id};
+use crate::theme::Palette;
 use crate::view::{elide_right, no_matches, reversed, scrolled, width_of};
 
 /// The tab's lines for an inside of `height` by `width`: a placeholder
 /// until the first read, then the rows the filter shows around the cursor,
 /// any error first.
-pub(crate) fn reflog_lines(list: &ReflogList, height: usize, width: usize) -> Vec<Line<'static>> {
-    let dim = Style::new().fg(Color::DarkGray);
+pub(crate) fn reflog_lines(
+    palette: &Palette,
+    list: &ReflogList,
+    height: usize,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let dim = Style::new().fg(palette.dim);
     let mut lines: Vec<Line<'static>> = Vec::new();
     if let Some(error) = &list.list.error {
         // Already terminal-safe: git's stderr through `terminal_safe`.
@@ -37,7 +43,7 @@ pub(crate) fn reflog_lines(list: &ReflogList, height: usize, width: usize) -> Ve
     }
     let visible = list.list.visible();
     if visible.is_empty() {
-        lines.push(no_matches());
+        lines.push(no_matches(palette));
         return lines;
     }
     let room = height.saturating_sub(lines.len()).max(1);
@@ -45,7 +51,7 @@ pub(crate) fn reflog_lines(list: &ReflogList, height: usize, width: usize) -> Ve
         scrolled(&visible, Some(list.list.selected), room)
             .iter()
             .map(|&i| {
-                let line = entry_line(&entries[i], width);
+                let line = entry_line(palette, &entries[i], width);
                 if i == list.list.selected {
                     reversed(line, width)
                 } else {
@@ -58,7 +64,7 @@ pub(crate) fn reflog_lines(list: &ReflogList, height: usize, width: usize) -> Ve
 
 /// `<short id> <label> <rest of the message>`, cut to `width`. An id that
 /// is not hex shows as `?`.
-fn entry_line(entry: &ReflogEntry, width: usize) -> Line<'static> {
+fn entry_line(palette: &Palette, entry: &ReflogEntry, width: usize) -> Line<'static> {
     let short = short_id(entry);
     let label = entry.label();
     let display = entry.display();
@@ -71,9 +77,9 @@ fn entry_line(entry: &ReflogEntry, width: usize) -> Line<'static> {
     let used = width_of(&short) + 1 + width_of(&label) + 1;
     let rest = elide_right(rest, width.saturating_sub(used));
     Line::from(vec![
-        Span::styled(short, Style::new().fg(Color::Yellow)),
+        Span::styled(short, Style::new().fg(palette.ref_name)),
         Span::raw(" "),
-        Span::styled(label, Style::new().fg(Color::Cyan)),
+        Span::styled(label, Style::new().fg(palette.ref_label)),
         Span::raw(" "),
         Span::raw(rest),
     ])

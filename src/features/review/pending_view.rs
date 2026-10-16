@@ -5,7 +5,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Padding, Paragraph};
 
@@ -17,6 +17,7 @@ use super::state::ReviewState;
 use super::submit::comments_label;
 use super::threads_view::{CommentMarks, clip_line, dim};
 use crate::model::AppState;
+use crate::theme::Palette;
 use crate::view::{centered, elide_left, width_of};
 use kika_forge::anchor::{RowNumber, row_in, to_line_id};
 use kika_forge::discussion::PrDiscussion;
@@ -95,9 +96,9 @@ fn frame_block(title: String) -> Block<'static> {
 }
 
 /// Draw the pending list, then the composer over it, whichever is open.
-pub fn render_pending(review: &ReviewState, frame: &mut Frame, area: Rect) {
+pub fn render_pending(palette: &Palette, review: &ReviewState, frame: &mut Frame, area: Rect) {
     if let (Some(cursor), Some(slot)) = (review.pending_list, &review.pending) {
-        render_list(slot, cursor, frame, area);
+        render_list(palette, slot, cursor, frame, area);
     }
     if let Some(composer) = &review.composer {
         let comments = review.pending_count();
@@ -267,7 +268,13 @@ fn editor_lines(editor: &CommentEditor, width: usize, rows: usize) -> Vec<Line<'
     out.into_iter().skip(start).take(rows).collect()
 }
 
-fn render_list(slot: &PendingSlot, cursor: usize, frame: &mut Frame, area: Rect) {
+fn render_list(
+    palette: &Palette,
+    slot: &PendingSlot,
+    cursor: usize,
+    frame: &mut Frame,
+    area: Rect,
+) {
     let comments = slot
         .review()
         .map(|r| r.comments.as_slice())
@@ -297,14 +304,19 @@ fn render_list(slot: &PendingSlot, cursor: usize, frame: &mut Frame, area: Rect)
         .enumerate()
         .skip(start)
         .take(rows)
-        .map(|(i, c)| list_row(c, i == cursor, width))
+        .map(|(i, c)| list_row(palette, c, i == cursor, width))
         .collect();
     frame.render_widget(Clear, popup);
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
 /// `path:L12  first line`, cut to `width`, reversed under the cursor.
-fn list_row(comment: &PendingComment, cursor: bool, width: usize) -> Line<'static> {
+fn list_row(
+    palette: &Palette,
+    comment: &PendingComment,
+    cursor: bool,
+    width: usize,
+) -> Line<'static> {
     let place = format!(
         "{}:{}",
         sanitize(comment.path.as_bytes()),
@@ -312,7 +324,7 @@ fn list_row(comment: &PendingComment, cursor: bool, width: usize) -> Line<'stati
     );
     let first = sanitize(comment.body.lines().next().unwrap_or_default().as_bytes());
     let mut line = Line::from(vec![
-        Span::styled(place, Style::new().fg(Color::Cyan)),
+        Span::styled(place, Style::new().fg(palette.location)),
         Span::raw("  "),
         Span::styled(first, if cursor { Style::new() } else { dim() }),
     ]);

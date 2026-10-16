@@ -45,6 +45,7 @@ mod sequence_editor;
 mod spawn_guard;
 #[cfg(test)]
 mod test_support;
+mod theme;
 mod view;
 mod watch;
 mod worktree_file;

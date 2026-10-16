@@ -36,7 +36,7 @@
 //!   revert_disabled, reset_disabled}` and `keys::{TIPS_UNKNOWN,
 //!   tips_failed}`;
 //! - `effects::{load, load_markers, load_tips, load_files}`;
-//! - `view::{render_commits_panel, PATCH_MARK}`, `git::Tip` and
+//! - `view::{render_commits_panel, patch_mark}`, `git::Tip` and
 //!   `git::detached_checkout`.
 //!
 //! Kept cross-feature reads of `state.commits`: `branches/tags`

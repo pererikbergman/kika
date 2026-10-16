@@ -3,7 +3,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -58,7 +58,7 @@ pub(crate) fn render_status_panel(
     };
     let block = look.block(title);
     let block = if stale {
-        block.style(Style::new().fg(Color::DarkGray))
+        block.style(Style::new().fg(state.palette.dim))
     } else {
         block
     };
@@ -68,7 +68,9 @@ pub(crate) fn render_status_panel(
         frame.render_widget(Paragraph::new(text).block(block), area);
         return;
     };
-    let marker = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let marker = Style::new()
+        .fg(state.palette.warning)
+        .add_modifier(Modifier::BOLD);
     if !expanded {
         // One row: the branch, and what the repository is in the middle of.
         let ops = if operations.is_empty() {
@@ -135,6 +137,7 @@ mod tests {
         branch, contains, draw, draw_buffer, find, on, status_focused, thin,
     };
     use crate::view::buffer_rows;
+    use ratatui::style::Color;
 
     /// The three text rows inside the expanded Status panel on an 80x24 screen.
     fn panel_rows(state: &AppState) -> Vec<String> {

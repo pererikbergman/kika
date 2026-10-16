@@ -8,12 +8,13 @@ use crate::diff_search::DiffSearch;
 use crate::features::commits;
 use crate::features::diff::view::hunk_title;
 use crate::hunk_view::{HunkView, NO_CHANGES, RowKind, drawn_text};
-use crate::view::{FOCUSED, PanelLook, clip_cut, continues_glyph, reversed};
+use crate::theme::Palette;
+use crate::view::{PanelLook, clip_cut, continues_glyph, reversed};
 use kika_git::diff::{DiffLine, DiffOptions, EmojiZwj, LineKind};
 use kika_git::patch::{FileKind, PatchError};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use std::collections::HashSet;
@@ -32,7 +33,11 @@ pub(crate) fn diff_position(diff: &DiffPane) -> String {
 /// The inside of a streamed Diff pane at `inner`'s size: an error, a
 /// delayed "Loading…", "No diff", or the visible lines, with the
 /// search's matches marked on them.
-pub(crate) fn diff_pane_body(diff: &DiffPane, inner: Rect) -> Paragraph<'static> {
+pub(crate) fn diff_pane_body(
+    palette: &Palette,
+    diff: &DiffPane,
+    inner: Rect,
+) -> Paragraph<'static> {
     let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
     if let Some(error) = &diff.error {
         let lines = error.lines().map(|l| Line::from(l.to_string()));
@@ -51,7 +56,9 @@ pub(crate) fn diff_pane_body(diff: &DiffPane, inner: Rect) -> Paragraph<'static>
         diff.lines[start..end]
             .iter()
             .zip(start..)
-            .map(|(line, at)| styled_diff_line(line, width, &marks_of(&diff.search, at)))
+            .map(|(line, at)| {
+                styled_diff_line(palette, line, width, &marks_of(palette, &diff.search, at))
+            })
             .collect::<Vec<_>>(),
     )
 }
@@ -69,6 +76,7 @@ pub(crate) fn render_hunk_view(
     frame: &mut Frame,
     area: Rect,
 ) {
+    let palette = &look.palette;
     let view = pane.view;
     let block = look.block(hunk_title(view, options, suffix, look));
     let inner = block.inner(area);
@@ -105,23 +113,23 @@ pub(crate) fn render_hunk_view(
                     let gutter = if selected { "▌" } else { " " };
                     let style = match row.kind {
                         RowKind::Header => Style::new().add_modifier(Modifier::BOLD),
-                        RowKind::HunkHeader => Style::new().fg(Color::Cyan),
-                        RowKind::Added => Style::new().fg(Color::Green),
-                        RowKind::Removed => Style::new().fg(Color::Red),
+                        RowKind::HunkHeader => Style::new().fg(palette.hunk_header),
+                        RowKind::Added => Style::new().fg(palette.added),
+                        RowKind::Removed => Style::new().fg(palette.removed),
                         RowKind::Context => Style::new(),
-                        RowKind::NoNewline => Style::new().fg(Color::DarkGray),
+                        RowKind::NoNewline => Style::new().fg(palette.dim),
                     };
-                    let mut spans = vec![Span::styled(gutter, Style::new().fg(FOCUSED))];
+                    let mut spans = vec![Span::styled(gutter, Style::new().fg(palette.focused))];
                     if let Some(ids) = picked_ids {
                         let held = matches!((row.hunk, row.line), (Some(h), Some(l)) if ids.contains(&(h, l)));
                         let mark = if held { "●" } else { " " };
-                        spans.push(Span::styled(mark, commits::view::PATCH_MARK));
+                        spans.push(Span::styled(mark, commits::view::patch_mark(palette)));
                     }
                     spans.extend(clipped_marked(
                         &drawn_text(&row, emoji),
                         width.saturating_sub(gutters),
                         style,
-                        &marks_of(&view.search, at),
+                        &marks_of(palette, &view.search, at),
                     ));
                     let line = Line::from(spans);
                     let mark = match view.lines {
@@ -151,15 +159,19 @@ pub(crate) struct HunkPane<'a> {
 }
 
 /// [`search_marks`] of a pane's search, if it has one.
-pub(crate) fn marks_of(search: &Option<DiffSearch>, at: usize) -> Vec<(usize, usize, Style)> {
+pub(crate) fn marks_of(
+    palette: &Palette,
+    search: &Option<DiffSearch>,
+    at: usize,
+) -> Vec<(usize, usize, Style)> {
     search
         .as_ref()
-        .map_or_else(Vec::new, |s| search_marks(s, at))
+        .map_or_else(Vec::new, |s| search_marks(palette, s, at))
 }
 
 /// Matches of the search on row `at`: char ranges and their style, the
 /// current match standing out from the rest.
-fn search_marks(search: &DiffSearch, at: usize) -> Vec<(usize, usize, Style)> {
+fn search_marks(palette: &Palette, search: &DiffSearch, at: usize) -> Vec<(usize, usize, Style)> {
     // Matches are in row order, so this row's are found by bisection.
     let from = search.matches.partition_point(|m| m.row < at);
     let to = search.matches.partition_point(|m| m.row <= at);
@@ -168,9 +180,9 @@ fn search_marks(search: &DiffSearch, at: usize) -> Vec<(usize, usize, Style)> {
         .zip(from..)
         .map(|(m, i)| {
             let style = if Some(i) == search.current {
-                CURRENT_MATCH
+                current_match(palette)
             } else {
-                MATCH
+                search_match(palette)
             };
             (m.start, m.end, style)
         })
@@ -178,13 +190,27 @@ fn search_marks(search: &DiffSearch, at: usize) -> Vec<(usize, usize, Style)> {
 }
 
 /// A search match, and the one `n` and `N` step from.
-pub(crate) const MATCH: Style = Style::new().fg(Color::Black).bg(Color::Yellow);
+pub(crate) const fn search_match(palette: &Palette) -> Style {
+    Style::new().fg(palette.match_fg).bg(palette.match_bg)
+}
+
+/// What marks the current match apart without colour.
+const CURRENT_MARK: Modifier = Modifier::BOLD.union(Modifier::UNDERLINED);
+
 /// The current one is also bold and underlined, so it stands out without
 /// colour.
-pub(crate) const CURRENT_MATCH: Style = Style::new()
-    .fg(Color::Black)
-    .bg(Color::LightRed)
-    .add_modifier(Modifier::BOLD.union(Modifier::UNDERLINED));
+pub(crate) const fn current_match(palette: &Palette) -> Style {
+    Style::new()
+        .fg(palette.match_fg)
+        .bg(palette.current_match_bg)
+        .add_modifier(CURRENT_MARK)
+}
+
+/// Whether a mark is the current match's: known by its modifiers, which
+/// no palette changes.
+fn is_current(mark: Style) -> bool {
+    mark.add_modifier.contains(CURRENT_MARK)
+}
 
 /// `text` in `style`, split so each char range in `marks` (in order, not
 /// overlapping) takes its own style on top. Ranges past the end of a
@@ -207,8 +233,8 @@ fn marked_spans(text: String, style: Style, marks: &[(usize, usize, Style)]) -> 
     };
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut at = 0;
-    // The mark the last marked span carries.
-    let mut last_mark = None;
+    // Whether the last marked span carries the current match.
+    let mut last_current = false;
     for &(start, end, mark) in marks {
         let mut start = start.min(chars.len()).max(at);
         while start > at && inside(start) {
@@ -224,17 +250,17 @@ fn marked_spans(text: String, style: Style, marks: &[(usize, usize, Style)]) -> 
         // show where they stopped.
         if end <= start {
             if at > 0
-                && last_mark != Some(CURRENT_MATCH)
+                && !last_current
                 && let Some(last) = spans.last_mut()
             {
                 last.style = last.style.patch(mark);
-                last_mark = Some(mark);
+                last_current = is_current(mark);
             }
             continue;
         }
         spans.push(Span::styled(piece(at, start), style));
         spans.push(Span::styled(piece(start, end), style.patch(mark)));
-        last_mark = Some(mark);
+        last_current = is_current(mark);
         at = end;
     }
     spans.push(Span::styled(piece(at, chars.len()), style));
@@ -282,14 +308,15 @@ pub(crate) fn found_note(search: Option<&DiffSearch>, more: bool) -> String {
 /// green. A line wider than `width` ends in `…`, so a cut is never silent.
 /// `marks` are search matches, drawn over the colour.
 pub(crate) fn styled_diff_line(
+    palette: &Palette,
     line: &DiffLine,
     width: usize,
     marks: &[(usize, usize, Style)],
 ) -> Line<'static> {
     let style = match line.kind {
-        LineKind::Added => Style::new().fg(Color::Green),
-        LineKind::Removed => Style::new().fg(Color::Red),
-        LineKind::Hunk => Style::new().fg(Color::Cyan),
+        LineKind::Added => Style::new().fg(palette.added),
+        LineKind::Removed => Style::new().fg(palette.removed),
+        LineKind::Hunk => Style::new().fg(palette.hunk_header),
         LineKind::Header => Style::new().add_modifier(Modifier::BOLD),
         LineKind::Context => Style::new(),
     };
@@ -299,6 +326,9 @@ pub(crate) fn styled_diff_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MATCH: Style = search_match(&Palette::DEFAULT);
+    const CURRENT_MATCH: Style = current_match(&Palette::DEFAULT);
 
     #[test]
     fn marks_widen_to_whole_glyphs_and_a_second_mark_in_one_glyph_restyles_it() {

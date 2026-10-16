@@ -11,6 +11,7 @@ use super::files::PrFiles;
 use super::reader::{ThreadReader, reader_lines};
 use super::threads::ThreadScope;
 use super::threads_view::clip_line;
+use crate::theme::Palette;
 use crate::view::centered;
 use kika_forge::discussion::PrDiscussion;
 
@@ -38,6 +39,7 @@ pub fn reader_inner(area: Rect) -> Rect {
 
 /// Draw the open reader over the files screen in `area`.
 pub fn render_reader(
+    palette: &Palette,
     files: &PrFiles,
     discussion: Option<&PrDiscussion>,
     reader: &ThreadReader,
@@ -58,7 +60,7 @@ pub fn render_reader(
                 .selected()
                 .map(|row| row.file.path.display())
                 .unwrap_or_default();
-            fresh = reader_lines(&ThreadScope::of(files, discussion), t, path, width);
+            fresh = reader_lines(palette, &ThreadScope::of(files, discussion), t, path, width);
             &fresh
         }
         _ => &[],
