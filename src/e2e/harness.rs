@@ -76,7 +76,7 @@ impl Harness {
 
     /// Start over any runner, such as one resolved outside a repository.
     pub async fn start_with(runner: CliRunner, width: u16, height: u16) -> Self {
-        Self::start_inner(runner, width, height, None).await
+        Self::start_inner(runner, width, height, None, None).await
     }
 
     /// Start with `gh` standing in for GitHub on github.com. The host is
@@ -94,15 +94,26 @@ impl Harness {
         gh: Arc<FakeGh>,
         hosts: Vec<ForgeHost>,
     ) -> Self {
-        Self::start_with_runners(repo, gh, Arc::new(FakeGlab::new()), hosts).await
+        Self::start_with_runners(repo, gh, Arc::new(FakeGlab::new()), hosts, None).await
     }
 
     /// Start with `glab` standing in for GitLab on `host`, a `gitlab_ask`
     /// host, configured as [`start_with_forge`](Self::start_with_forge)
     /// configures GitHub's.
     pub async fn start_with_glab(repo: &TestRepo, glab: Arc<FakeGlab>, host: &str) -> Self {
+        Self::start_with_glab_storing(repo, glab, host, None).await
+    }
+
+    /// As [`start_with_glab`](Self::start_with_glab), keeping pending
+    /// reviews in `pending_store`, as the user's state directory would.
+    pub async fn start_with_glab_storing(
+        repo: &TestRepo,
+        glab: Arc<FakeGlab>,
+        host: &str,
+        pending_store: Option<std::path::PathBuf>,
+    ) -> Self {
         let hosts = vec![ForgeHost::parse_gitlab(host).unwrap()];
-        Self::start_with_runners(repo, Arc::new(FakeGh::new()), glab, hosts).await
+        Self::start_with_runners(repo, Arc::new(FakeGh::new()), glab, hosts, pending_store).await
     }
 
     async fn start_with_runners(
@@ -110,6 +121,7 @@ impl Harness {
         gh: Arc<FakeGh>,
         glab: Arc<FakeGlab>,
         hosts: Vec<ForgeHost>,
+        pending_store: Option<std::path::PathBuf>,
     ) -> Self {
         let forge = ForgeContext {
             gh,
@@ -118,7 +130,8 @@ impl Harness {
             cache_dir: None,
             cli: kika_forge::cli::CliGate::default(),
         };
-        let mut harness = Self::start_inner(repo.runner(), 120, 30, Some(forge)).await;
+        let mut harness =
+            Self::start_inner(repo.runner(), 120, 30, Some(forge), pending_store).await;
         harness.state.forge.hosts = hosts;
         // No check ran at start, as no host was configured then: count it
         // as answered with every kind open, so a refresh may run. `B`
@@ -132,13 +145,15 @@ impl Harness {
         width: u16,
         height: u16,
         forge: Option<ForgeContext>,
+        pending_store: Option<std::path::PathBuf>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let runner = Arc::new(runner);
         let clipboard = Arc::new(RecordingSink::default());
         let runtime = Runtime::new(runner.clone(), tx)
             .with_clipboard(clipboard.clone())
-            .with_forge(forge);
+            .with_forge(forge)
+            .with_pending_store(pending_store);
         // As `main` does, so submodule paths start from the right root.
         let launch = runner.workdir();
         let repo = find_toplevel(runner.as_ref());

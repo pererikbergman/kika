@@ -2190,6 +2190,8 @@ mod tests {
                 },
                 body: "hi".into(),
                 head: "1".repeat(40),
+                start_pos: None,
+                end_pos: None,
             }],
         };
         let tag = |seq| Tag {
@@ -2299,6 +2301,8 @@ mod tests {
                         },
                         body: "old".into(),
                         head: "1".repeat(40),
+                        start_pos: None,
+                        end_pos: None,
                     }],
                 }
             };

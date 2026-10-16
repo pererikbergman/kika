@@ -79,41 +79,56 @@ pub type RowNumber = (Option<u32>, Option<u32>);
 /// headers and git's `\ No newline` marker have none, and so has every
 /// row after a malformed header until the next good one.
 pub fn row_numbers(lines: &[DiffLine]) -> Vec<RowNumber> {
+    walk(lines)
+        .into_iter()
+        .map(|row| match row {
+            None => (None, None),
+            Some((LineKind::Added, _, new)) => (None, Some(new)),
+            Some((LineKind::Removed, old, _)) => (Some(old), None),
+            Some((_, old, new)) => (Some(old), Some(new)),
+        })
+        .collect()
+}
+
+/// The old and new line counters at each numbered row, before that row
+/// moves them on; `None` where [`row_numbers`] has none. An added row's
+/// old counter is the next old line, a removed row's new counter the
+/// next new line: what a forge that names a line by both sides needs.
+pub fn row_positions(lines: &[DiffLine]) -> Vec<Option<(u32, u32)>> {
+    walk(lines)
+        .into_iter()
+        .map(|row| row.map(|(_, old, new)| (old, new)))
+        .collect()
+}
+
+/// Each row's kind and the (old, new) counters before it, for the rows
+/// that are numbered; the one walk both numberings share.
+fn walk(lines: &[DiffLine]) -> Vec<Option<(LineKind, u32, u32)>> {
     let mut at: Option<(u32, u32)> = None;
     lines
         .iter()
         .map(|row| match row.kind {
             LineKind::Header => {
                 at = None;
-                (None, None)
+                None
             }
             LineKind::Hunk => {
                 at = hunk_start(&row.text);
-                (None, None)
+                None
             }
-            LineKind::Context if row.text.starts_with('\\') => (None, None),
+            LineKind::Context if row.text.starts_with('\\') => None,
             kind => {
-                let Some((old, new)) = at.as_mut() else {
-                    return (None, None);
-                };
+                let (old, new) = at.as_mut()?;
+                let before = (kind, *old, *new);
                 match kind {
-                    LineKind::Added => {
-                        let n = *new;
-                        *new = new.saturating_add(1);
-                        (None, Some(n))
-                    }
-                    LineKind::Removed => {
-                        let o = *old;
-                        *old = old.saturating_add(1);
-                        (Some(o), None)
-                    }
+                    LineKind::Added => *new = new.saturating_add(1),
+                    LineKind::Removed => *old = old.saturating_add(1),
                     _ => {
-                        let (o, n) = (*old, *new);
                         *old = old.saturating_add(1);
                         *new = new.saturating_add(1);
-                        (Some(o), Some(n))
                     }
                 }
+                Some(before)
             }
         })
         .collect()
@@ -383,6 +398,58 @@ mod tests {
         for (name, texts, want) in numbering_cases() {
             let lines = rows(&texts);
             assert_eq!(row_numbers(&lines), want, "{name}");
+        }
+    }
+
+    #[test]
+    fn positions_hold_both_counters_before_each_numbered_row() {
+        let lines = rows(&with_header(&[
+            "@@ -1,3 +1,3 @@",
+            " a",
+            "-b",
+            "+B",
+            " c",
+            "\\ No newline at end of file",
+            "@@ -10,2 +10,3 @@ fn x() {",
+            " j",
+            "+k",
+            " l",
+        ]));
+        let want: Vec<Option<(u32, u32)>> = [None; 4]
+            .into_iter()
+            .chain([
+                None,
+                Some((1, 1)),
+                // A removed row: the new counter is the next new line.
+                Some((2, 2)),
+                // An added row: the old counter is the next old line.
+                Some((3, 2)),
+                Some((3, 3)),
+                None,
+                None,
+                Some((10, 10)),
+                Some((11, 11)),
+                Some((11, 12)),
+            ])
+            .collect();
+        assert_eq!(row_positions(&lines), want);
+        // Numbered where `row_numbers` numbers, and on the same lines.
+        for (pos, number) in row_positions(&lines).iter().zip(row_numbers(&lines)) {
+            match (pos, number) {
+                (None, (None, None)) => {}
+                (Some((old, new)), (o, n)) => {
+                    assert!(o.is_none_or(|o| o == *old) && n.is_none_or(|n| n == *new));
+                    assert!(o.is_some() || n.is_some());
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        for (name, texts, _) in numbering_cases() {
+            let lines = rows(&texts);
+            let numbered = |n: &RowNumber| n.0.is_some() || n.1.is_some();
+            let a: Vec<bool> = row_numbers(&lines).iter().map(numbered).collect();
+            let b: Vec<bool> = row_positions(&lines).iter().map(Option::is_some).collect();
+            assert_eq!(a, b, "{name}");
         }
     }
 

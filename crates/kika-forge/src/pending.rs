@@ -81,6 +81,34 @@ pub struct PendingComment {
     /// The pull request head it was written against, as hex: the lines
     /// are that head's.
     pub head: String,
+    /// Both line counters at `start` and `end`, for a forge that names a
+    /// line by both sides. `None` in a comment written before they were
+    /// kept.
+    pub start_pos: Option<RowPos>,
+    pub end_pos: Option<RowPos>,
+}
+
+/// A commented row's old and new line counters, as
+/// [`row_positions`](super::anchor::row_positions) gives them: for an
+/// added row the old one is the next old line, for a removed row the new
+/// one the next new line. `both` marks a context row, on both sides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RowPos {
+    pub old: u32,
+    pub new: u32,
+    pub both: bool,
+}
+
+impl RowPos {
+    /// Whether this is where `line` is: the counter of `line`'s side is
+    /// its number, and only a new-side line may be a context row.
+    fn names(self, line: GhLine) -> bool {
+        match line.side {
+            GhSide::Left => !self.both && self.old == line.line,
+            GhSide::Right => self.new == line.line && (!self.both || self.old != 0),
+        }
+    }
 }
 
 /// The comments not yet submitted, in the order they were written.
@@ -150,6 +178,10 @@ struct StoredComment {
     end: StoredLine,
     body: String,
     head: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    start_pos: Option<RowPos>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    end_pos: Option<RowPos>,
 }
 
 /// [`GhLine`] as stored, so the anchor types stay free of serde.
@@ -200,6 +232,8 @@ impl From<&PendingComment> for StoredComment {
             end: c.end.into(),
             body: c.body.clone(),
             head: c.head.clone(),
+            start_pos: c.start_pos,
+            end_pos: c.end_pos,
         }
     }
 }
@@ -213,6 +247,8 @@ impl From<StoredComment> for PendingComment {
             end: c.end.into(),
             body: c.body,
             head: c.head,
+            start_pos: c.start_pos,
+            end_pos: c.end_pos,
         }
     }
 }
@@ -244,6 +280,18 @@ fn check(review: &PendingReview) -> Result<(), PendingError> {
             && start.line >= c.end.line
         {
             return Err(PendingError::Unreadable("a comment's range runs backwards"));
+        }
+        // A position is only kept with the line it is at, and on it.
+        let pos_ok = match (c.start, c.start_pos, c.end_pos) {
+            (_, None, None) => true,
+            (None, None, Some(end)) => end.names(c.end),
+            (Some(start), Some(from), Some(end)) => from.names(start) && end.names(c.end),
+            _ => false,
+        };
+        if !pos_ok {
+            return Err(PendingError::Unreadable(
+                "a comment's position is not its line's",
+            ));
         }
         let control = c
             .body
@@ -389,6 +437,8 @@ mod tests {
             end,
             body: body.into(),
             head: HEAD.into(),
+            start_pos: None,
+            end_pos: None,
         }
     }
 
@@ -569,6 +619,85 @@ mod tests {
             fs::write(file_of(tmp.path()), text).unwrap();
             assert!(matches!(read(tmp.path(), &key(12, "/r")), Ok(Some(_))));
         }
+    }
+
+    fn pos(old: u32, new: u32, both: bool) -> Option<RowPos> {
+        Some(RowPos { old, new, both })
+    }
+
+    #[test]
+    fn positions_round_trip_and_older_files_without_them_still_read() {
+        let tmp = TempDir::new("pending");
+        // A file from before positions were kept.
+        fs::write(file_of(tmp.path()), valid(GOOD)).unwrap();
+        let read_back = read(tmp.path(), &key(12, "/r")).unwrap().unwrap();
+        assert_eq!(read_back.comments[0].end_pos, None);
+        assert_eq!(read_back.comments[0].start_pos, None);
+        let mut with = review();
+        with.comments[0].end_pos = pos(2, 3, false);
+        with.comments[1].start_pos = pos(4, 6, false);
+        with.comments[1].end_pos = pos(6, 9, true);
+        write(tmp.path(), &key(12, "/r"), &with).unwrap();
+        assert_eq!(read(tmp.path(), &key(12, "/r")), Ok(Some(with)));
+        let text = fs::read_to_string(file_of(tmp.path())).unwrap();
+        assert!(
+            text.contains(r#""end_pos":{"old":2,"new":3,"both":false}"#),
+            "{text}"
+        );
+        // None is left out, as before.
+        write(tmp.path(), &key(12, "/r"), &review()).unwrap();
+        let text = fs::read_to_string(file_of(tmp.path())).unwrap();
+        assert!(!text.contains("_pos"), "{text}");
+        // An added row in a new file has old counter 0, and is fine.
+        let mut new_file = review();
+        new_file.comments[0].end_pos = pos(0, 3, false);
+        write(tmp.path(), &key(12, "/r"), &new_file).unwrap();
+    }
+
+    #[test]
+    fn a_position_of_line_0_or_off_its_line_is_refused() {
+        let tmp = planted(&valid(GOOD));
+        let good = |end_pos: &str| valid(&GOOD.replace("\"head\"", &format!("{end_pos},\"head\"")));
+        let fine = good(r#""end_pos":{"old":1,"new":3,"both":false}"#);
+        fs::write(file_of(tmp.path()), &fine).unwrap();
+        assert!(matches!(read(tmp.path(), &key(12, "/r")), Ok(Some(_))));
+        let cases = [
+            (
+                "a 0 line",
+                good(r#""end_pos":{"old":0,"new":0,"both":false}"#),
+            ),
+            (
+                "a 0 context",
+                good(r#""end_pos":{"old":0,"new":3,"both":true}"#),
+            ),
+            (
+                "another line",
+                good(r#""end_pos":{"old":1,"new":4,"both":false}"#),
+            ),
+            (
+                "a start with no range",
+                good(
+                    r#""start_pos":{"old":1,"new":1,"both":true},"end_pos":{"old":1,"new":3,"both":false}"#,
+                ),
+            ),
+            (
+                "a start with no end",
+                good(r#""start_pos":{"old":1,"new":1,"both":true}"#),
+            ),
+            (
+                "an unknown field",
+                good(r#""end_pos":{"old":1,"new":3,"both":false,"x":1}"#),
+            ),
+        ];
+        for (what, text) in cases {
+            fs::write(file_of(tmp.path()), &text).unwrap();
+            refused(&tmp, what);
+        }
+        // A removed row is on the old side, and never a context row.
+        let mut bad = review();
+        bad.comments[0].end = left(3);
+        bad.comments[0].end_pos = pos(3, 5, true);
+        assert!(write(tmp.path(), &key(12, "/r"), &bad).is_err());
     }
 
     #[test]

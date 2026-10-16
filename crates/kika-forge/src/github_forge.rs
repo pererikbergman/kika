@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use crate::cache::Cached;
 use crate::cli::{CliStatus, CliVersion, judge};
 use crate::discussion::PrDiscussion;
-use crate::discussion_write::{DiscussionWrite, Written};
+use crate::discussion_write::{DiscussionWrite, ReviewEvent, Written};
 use crate::forge::{Badges, Capability, Forge, Words};
 use crate::github::{Answer, Gh, Refusal};
 use crate::head::Head;
@@ -23,12 +23,20 @@ impl GitHubForge<'_> {
 
     /// How GitHub is named to the user.
     pub const WORDS: Words = Words {
+        name: "GitHub",
         cli: "gh",
         request: "pull request",
         requests: "pull requests",
         short: "PR",
         sign: '#',
     };
+
+    /// The kinds of review GitHub takes, in the order they are offered.
+    pub const EVENTS: &'static [ReviewEvent] = &[
+        ReviewEvent::Approve,
+        ReviewEvent::RequestChanges,
+        ReviewEvent::Comment,
+    ];
 
     /// The oldest `gh` accepted; none yet, as no flag needs a newer one.
     pub const MIN_CLI: Option<CliVersion> = None;
