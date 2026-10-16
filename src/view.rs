@@ -320,7 +320,7 @@ pub(crate) fn panel_block(palette: &Palette, title: String, focused: bool) -> Bl
             .title_style(Style::new().add_modifier(Modifier::BOLD))
             .border_style(Style::new().fg(palette.focused))
     } else {
-        block.border_style(Style::new().fg(palette.dim))
+        block.border_style(palette.dim_style())
     }
 }
 
@@ -634,7 +634,7 @@ pub(crate) fn tail<'a>(palette: &Palette, rows: &'a [String], room: usize) -> Ve
         shown = &rows[rows.len() - (room - 1)..];
         lines.push(Line::styled(
             format!("… {} earlier lines", rows.len() - shown.len()),
-            Style::new().fg(palette.dim),
+            palette.dim_style(),
         ));
     } else if rows.len() > room {
         shown = &rows[rows.len() - room..];
@@ -741,10 +741,7 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
         let focus = state.key_focus();
         let note = focus.bar_note();
         if let Some(note) = note {
-            spans.push(Span::styled(
-                format!(" {note}"),
-                Style::new().fg(state.palette.dim),
-            ));
+            spans.push(Span::styled(format!(" {note}"), state.palette.dim_style()));
         }
         let mut room = room.saturating_sub(note.map_or(0, |n| width_of(n) + 1));
         let copied = copied_note(state);
@@ -1057,7 +1054,7 @@ fn fit_hints(hints: &[(String, bool, bool)], room: usize) -> Vec<(String, bool)>
 
 fn dimmed_if(palette: &Palette, disabled: bool) -> Style {
     if disabled {
-        Style::new().fg(palette.dim)
+        palette.dim_style()
     } else {
         Style::new()
     }
@@ -1114,10 +1111,7 @@ fn render_help(state: &AppState, frame: &mut Frame, area: Rect) {
     if entries.len() > builtin_count {
         lines.insert(
             builtin_count,
-            Line::styled(
-                "─".repeat(content_width),
-                Style::new().fg(state.palette.dim),
-            ),
+            Line::styled("─".repeat(content_width), state.palette.dim_style()),
         );
     }
     let popup = centered(
@@ -1186,7 +1180,7 @@ pub(crate) fn filter_title(look: &PanelLook, name: &str, query: &str, counts: &s
 
 /// What a list says when its filter hides every row.
 pub(crate) fn no_matches(palette: &Palette) -> Line<'static> {
-    Line::styled("No matches", Style::new().fg(palette.dim))
+    Line::styled("No matches", palette.dim_style())
 }
 
 /// A list's title text: `base` alone, or with ` · N selected` while a
@@ -3166,6 +3160,68 @@ mod tests {
         assert!(contains(&rows, "●─╮"), "a second lane: {rows:#?}");
         assert_no_colour(&buffer);
         assert!(reversed_somewhere(&buffer, "commit 0"));
+        // Dim text keeps its place below normal text through the
+        // terminal's dim style; focus and plain rows are not dimmed.
+        let cells = HierarchyCells::find(&buffer);
+        assert!(cells.unfocused_border.add_modifier.contains(Modifier::DIM));
+        assert!(cells.date.add_modifier.contains(Modifier::DIM));
+        assert!(!cells.focused_border.add_modifier.contains(Modifier::DIM));
+        assert!(!cells.subject.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn with_colours_dim_text_keeps_its_colour_and_no_dim_style() {
+        let state = commits_list_focused();
+        let buffer = draw_buffer(&state, 100, 24);
+        let cells = HierarchyCells::find(&buffer);
+        for style in [cells.unfocused_border, cells.date] {
+            assert!(!style.add_modifier.contains(Modifier::DIM), "{style:?}");
+            assert_eq!(style.fg, Some(Palette::DEFAULT.dim));
+        }
+    }
+
+    /// The Commits panel focused and expanded over a five-commit page.
+    fn commits_list_focused() -> AppState {
+        use crate::intent::AppIntent;
+        use crate::test_support::{commits_load, commits_loaded, page};
+        let mut state =
+            AppState::new(Context::Workspace).with_location(Some(TOP.into()), TOP.into());
+        let (tag, _, _) = commits_load(&state.update(AppIntent::Start));
+        state.update(commits_loaded(tag, 0, page(0, 5, true)));
+        state.focus = Focus::Commits;
+        state.expanded = SidePanel::Commits;
+        state
+    }
+
+    /// The styles of cells that show the screen's hierarchy: a dim border
+    /// and date, against the focused border and a plain subject.
+    struct HierarchyCells {
+        unfocused_border: Style,
+        focused_border: Style,
+        date: Style,
+        subject: Style,
+    }
+
+    impl HierarchyCells {
+        fn find(buffer: &ratatui::buffer::Buffer) -> Self {
+            let rows = buffer_rows(buffer);
+            let at = |needle: &str, skip: usize| {
+                let (y, row) = rows
+                    .iter()
+                    .enumerate()
+                    .find(|(_, row)| row.contains(needle))
+                    .unwrap_or_else(|| panic!("{needle:?} in {rows:#?}"));
+                let x = row[..row.find(needle).unwrap()].chars().count() + skip;
+                buffer[(x as u16, y as u16)].style()
+            };
+            Self {
+                unfocused_border: at("┌ [1] Status", 0),
+                focused_border: at("┏ [4] Commits", 0),
+                // `c1` is not the selected row, so nothing reverses it.
+                date: at("c1 ", 3),
+                subject: at("commit 1", 0),
+            }
+        }
     }
 
     #[test]

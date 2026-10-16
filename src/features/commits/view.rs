@@ -154,7 +154,7 @@ pub(crate) fn render_commits_panel(
         frame.render_widget(Paragraph::new(lines).block(block), area);
         return;
     }
-    let dim = Style::new().fg(look.palette.dim);
+    let dim = look.palette.dim_style();
     let paragraph = if panel.list.rows.is_empty() {
         match &panel.list.error {
             _ if !panel.list.loaded => Paragraph::new("Loading…"),
@@ -225,10 +225,9 @@ fn render_commit_files(
             }
             Paragraph::new(lines).wrap(Wrap { trim: false })
         }
-        None if list.rows.is_empty() => Paragraph::new(Line::styled(
-            "No files changed",
-            Style::new().fg(look.palette.dim),
-        )),
+        None if list.rows.is_empty() => {
+            Paragraph::new(Line::styled("No files changed", look.palette.dim_style()))
+        }
         None if shown.as_ref().is_some_and(Vec::is_empty) => {
             Paragraph::new(no_matches(&look.palette))
         }
@@ -288,10 +287,7 @@ fn window(panel: &CommitsPanel, marks: &Marks, area: Rect) -> Vec<Line<'static>>
     let height = usize::from(area.height);
     let width = usize::from(area.width);
     let note = if panel.more_in_flight {
-        Some(Line::styled(
-            "Loading more…",
-            Style::new().fg(marks.palette.dim),
-        ))
+        Some(Line::styled("Loading more…", marks.palette.dim_style()))
     } else {
         panel.list.error.as_deref().map(|error| {
             let first = error.lines().next().unwrap_or_default();
@@ -417,7 +413,7 @@ fn todo_lines(palette: &Palette, panel: &CommitsPanel, width: usize) -> Vec<Line
     let Some(todo) = &panel.todo else {
         return Vec::new();
     };
-    let dim = Style::new().fg(palette.dim);
+    let dim = palette.dim_style();
     let mut rows: Vec<Line<'static>> = if todo.editable.is_ok() {
         todo.entries
             .iter()
@@ -452,7 +448,7 @@ fn todo_lines(palette: &Palette, panel: &CommitsPanel, width: usize) -> Vec<Line
 
 /// `<action> <hash> <subject>`, or a dim `break` or `→ <branch>`.
 fn todo_line(palette: &Palette, entry: &TodoEntry, width: usize) -> Line<'static> {
-    let dim = Style::new().fg(palette.dim);
+    let dim = palette.dim_style();
     match entry {
         TodoEntry::Commit { action, oid, rest } => {
             let colour = match action {
@@ -610,7 +606,7 @@ fn commit_line(
     if columns.date {
         spans.push(Span::styled(
             format!("{:>3} ", relative_date(row.time, panel.loaded_at)),
-            Style::new().fg(palette.dim),
+            palette.dim_style(),
         ));
     }
     if columns.author > 0 {
