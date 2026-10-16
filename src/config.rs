@@ -23,10 +23,12 @@
 //! hooks_detached = true   # hooks never ask: a commit that only runs them stays detached
 //! [forge]
 //! github = ["github.com"]   # absent or empty = off. The opt-in to asking GitHub.
-//! gitlab = ["gitlab.com"]   # only to build URLs; never contacted
+//! gitlab = ["gitlab.com"]   # URLs only: `gitlab` alone never contacts a host
+//! gitlab_ask = ["gitlab.com"]  # the opt-in to asking GitLab, through glab
 //! browser = ["open"]        # argv that opens a URL, given as its last argument
 //! [forge.allow]
 //! "github.com" = ["acme", "me/kika"]  # absent = every repository on the host
+//! "gitlab.com" = ["acme"]             # a gitlab_ask host is limited the same way
 //! [display]
 //! emoji_zwj_terminals = ["WezTerm"]  # terminals that draw an emoji sequence as one picture
 //! [clipboard]
@@ -144,9 +146,12 @@ pub struct Loaded {
     pub watch: WatchConfig,
     /// The global `[diff] pager` command, checked by `parse_command`.
     pub diff_pager: Option<String>,
-    /// The global `[forge] github` hosts; empty keeps the forge off.
+    /// The hosts Kika may contact: the global `[forge] github` hosts, then
+    /// the `gitlab_ask` ones as GitLab hosts, each with its
+    /// `[forge.allow]` list. Empty keeps the forge off.
     pub forge_hosts: Vec<ForgeHost>,
-    /// The global `[forge] gitlab` hosts, only ever used to build URLs.
+    /// The global `[forge] gitlab` hosts, used to build URLs. `gitlab`
+    /// alone never contacts a host; `gitlab_ask` does.
     pub forge_gitlab_hosts: Vec<ForgeHost>,
     /// The global `[forge] browser` argv, checked by `check_argv`; `None`
     /// leaves opening a URL off.
@@ -225,12 +230,17 @@ struct CommitTable {
 struct ForgeTable {
     #[serde(default)]
     github: Vec<String>,
-    /// Hosts whose URLs Kika builds; none is ever contacted.
+    /// Hosts whose URLs Kika builds. Alone, none is ever contacted.
     #[serde(default)]
     gitlab: Vec<String>,
+    /// The `gitlab` hosts `glab` may be asked about merge requests: the
+    /// opt-in to contacting GitLab. Each must be in `gitlab` and not in
+    /// `github`.
+    #[serde(default)]
+    gitlab_ask: Vec<String>,
     browser: Option<Vec<String>>,
-    /// Per `github` host, the owners and `owner/repo`s `gh` may be asked
-    /// about; a host without a key allows all of them.
+    /// Per `github` or `gitlab_ask` host, the owners and `owner/repo`s its
+    /// CLI may be asked about; a host without a key allows all of them.
     #[serde(default)]
     allow: BTreeMap<String, Vec<String>>,
 }
@@ -446,15 +456,27 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
     if let Some(tool) = &file.diff.tool {
         parse_command(tool).map_err(|e| format!("diff.tool: {e}"))?;
     }
-    let hosts = |names: &[String], key: &str| {
+    let parsed = |names: &[String], key: &str, parse: fn(&str) -> Result<ForgeHost, String>| {
         names
             .iter()
-            .map(|host| ForgeHost::parse(host).map_err(|e| format!("forge.{key}: {e}")))
+            .map(|host| parse(host).map_err(|e| format!("forge.{key}: {e}")))
             .collect::<Result<Vec<_>, _>>()
     };
-    let forge_hosts = attach_allow(hosts(&file.forge.github, "github")?, &file.forge.allow)
-        .map_err(|e| format!("forge.allow: {e}"))?;
+    let hosts = |names: &[String], key: &str| parsed(names, key, ForgeHost::parse);
+    let github = hosts(&file.forge.github, "github")?;
     let forge_gitlab_hosts = hosts(&file.forge.gitlab, "gitlab")?;
+    let gitlab_ask = parsed(
+        &file.forge.gitlab_ask,
+        "gitlab_ask",
+        ForgeHost::parse_gitlab,
+    )?;
+    check_gitlab_ask(&gitlab_ask, &forge_gitlab_hosts, &github)
+        .map_err(|e| format!("forge.gitlab_ask: {e}"))?;
+    let forge_hosts = attach_allow(
+        github.into_iter().chain(gitlab_ask).collect(),
+        &file.forge.allow,
+    )
+    .map_err(|e| format!("forge.allow: {e}"))?;
     let browser = file
         .forge
         .browser
@@ -520,19 +542,45 @@ fn theme(table: &ThemeTable) -> Result<Palette, String> {
     Ok(palette)
 }
 
-/// `github` with each `[forge.allow]` list attached to its host, and to
-/// every copy of it should the host be listed twice. A key must name one
-/// of `github`: a list for a host that is never asked would look like a
-/// limit while it limits nothing.
+/// Each `gitlab_ask` host must be a `gitlab` one, so asking is an
+/// opt-in on top of the URLs, and none a `github` one, so a host has one
+/// kind and only one CLI is ever asked about it.
+fn check_gitlab_ask(
+    ask: &[ForgeHost],
+    gitlab: &[ForgeHost],
+    github: &[ForgeHost],
+) -> Result<(), String> {
+    let among =
+        |hosts: &[ForgeHost], host: &ForgeHost| hosts.iter().any(|h| h.as_str() == host.as_str());
+    for host in ask {
+        if !among(gitlab, host) {
+            return Err(format!(
+                "{:?} is not one of the forge.gitlab hosts",
+                host.as_str()
+            ));
+        }
+        if among(github, host) {
+            return Err(format!("{:?} is also a forge.github host", host.as_str()));
+        }
+    }
+    Ok(())
+}
+
+/// `hosts` (the `github` and `gitlab_ask` ones) with each `[forge.allow]`
+/// list attached to its host, and to every copy of it should the host be
+/// listed twice. A key must name one of `hosts`: a list for a host that
+/// is never asked would look like a limit while it limits nothing.
 fn attach_allow(
-    github: Vec<ForgeHost>,
+    hosts: Vec<ForgeHost>,
     allow: &BTreeMap<String, Vec<String>>,
 ) -> Result<Vec<ForgeHost>, String> {
     let mut lists = BTreeMap::new();
     for (key, entries) in allow {
         let name = ForgeHost::parse(key)?;
-        if !github.iter().any(|h| h.as_str() == name.as_str()) {
-            return Err(format!("{key:?} is not one of the forge.github hosts"));
+        if !hosts.iter().any(|h| h.as_str() == name.as_str()) {
+            return Err(format!(
+                "{key:?} is not one of the forge.github or forge.gitlab_ask hosts"
+            ));
         }
         let rules = entries
             .iter()
@@ -540,7 +588,7 @@ fn attach_allow(
             .collect::<Result<Vec<_>, _>>()?;
         lists.insert(name.as_str().to_string(), rules);
     }
-    Ok(github
+    Ok(hosts
         .into_iter()
         .map(|host| match lists.get(host.as_str()) {
             Some(rules) => host.with_allow(rules.clone()),
@@ -1457,6 +1505,112 @@ output = "none"
     }
 
     #[test]
+    fn a_gitlab_ask_host_turns_the_gitlab_load_on() {
+        let global = |text: &str| apply_global(text, &Keymap::default(), DEFAULT_WATCH);
+        let lab = || ForgeHost::parse_gitlab("gitlab.example.com").unwrap();
+        let on = global(
+            "[forge]\ngitlab = [\"gitlab.example.com\"]\n\
+             gitlab_ask = [\"gitlab.example.com\"]\n",
+        )
+        .unwrap();
+        let [host] = on.forge_hosts.try_into().unwrap();
+        assert_eq!(host, lab());
+        assert_eq!(host.kind(), lab().kind());
+        assert_ne!(host.kind(), ForgeHost::parse("github.com").unwrap().kind());
+        assert_eq!(
+            on.forge_gitlab_hosts,
+            [ForgeHost::parse("gitlab.example.com").unwrap()]
+        );
+        // `gitlab` alone only builds URLs.
+        let off = global("[forge]\ngitlab = [\"gitlab.example.com\"]\n").unwrap();
+        assert_eq!(off.forge_hosts, []);
+        // GitHub's come first.
+        let both = global(
+            "[forge]\ngithub = [\"github.com\"]\ngitlab = [\"gitlab.example.com\"]\n\
+             gitlab_ask = [\"gitlab.example.com\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            both.forge_hosts,
+            [ForgeHost::parse("github.com").unwrap(), lab()]
+        );
+    }
+
+    #[test]
+    fn a_bad_gitlab_ask_host_drops_the_global_file() {
+        let err = |forge: &str| {
+            apply_global(
+                &format!("[forge]\n{forge}\n"),
+                &Keymap::default(),
+                DEFAULT_WATCH,
+            )
+            .map(|_| ())
+            .unwrap_err()
+        };
+        assert_eq!(
+            err("gitlab = [\"gitlab.com\"]\ngitlab_ask = [\"git.example.org\"]"),
+            "forge.gitlab_ask: \"git.example.org\" is not one of the forge.gitlab hosts"
+        );
+        assert_eq!(
+            err(
+                "github = [\"git.example.org\"]\ngitlab = [\"git.example.org\"]\n\
+                 gitlab_ask = [\"git.example.org\"]"
+            ),
+            "forge.gitlab_ask: \"git.example.org\" is also a forge.github host"
+        );
+        let malformed = err("gitlab = [\"gitlab.com\"]\ngitlab_ask = [\"GitLab.com\"]");
+        assert!(malformed.starts_with("forge.gitlab_ask: "), "{malformed}");
+
+        let files = Files::new("forge-gitlab-ask-bad");
+        files.global(
+            "[keys]\n\"files.stage\" = [\"x\"]\n[forge]\ngithub = [\"github.com\"]\n\
+             gitlab_ask = [\"gitlab.com\"]\n",
+        );
+        let loaded = files.load();
+        assert_eq!(loaded.forge_hosts, []);
+        assert_eq!(loaded.keymap, Keymap::default());
+        let [error] = loaded.errors.try_into().unwrap();
+        assert!(error.message.starts_with("forge.gitlab_ask: "), "{error}");
+    }
+
+    #[test]
+    fn an_allow_list_narrows_a_gitlab_ask_host_and_not_a_url_only_one() {
+        let global = |text: &str| apply_global(text, &Keymap::default(), DEFAULT_WATCH);
+        let [host] = global(
+            "[forge]\ngitlab = [\"gitlab.example.com\"]\n\
+             gitlab_ask = [\"gitlab.example.com\"]\n\
+             [forge.allow]\n\"gitlab.example.com\" = [\"acme\"]\n",
+        )
+        .unwrap()
+        .forge_hosts
+        .try_into()
+        .unwrap();
+        assert_eq!(
+            host,
+            ForgeHost::parse_gitlab("gitlab.example.com")
+                .unwrap()
+                .with_allow(vec![AllowRule::parse("acme").unwrap()])
+        );
+        let repo = |owner: &str| ForgeRepo {
+            host: "gitlab.example.com".into(),
+            owner: owner.into(),
+            name: "widgets".into(),
+        };
+        assert!(host.allows(&repo("acme")));
+        assert!(!host.allows(&repo("other")));
+        let only_urls = global(
+            "[forge]\ngitlab = [\"gitlab.example.com\"]\n\
+             [forge.allow]\n\"gitlab.example.com\" = [\"acme\"]\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            only_urls,
+            "forge.allow: \"gitlab.example.com\" is not one of the forge.github or \
+             forge.gitlab_ask hosts"
+        );
+    }
+
+    #[test]
     fn only_the_global_file_turns_the_forge_on() {
         let refused = repo("[forge]\ngithub = [\"github.com\"]\n").unwrap_err();
         assert!(refused.contains("unknown field `forge`"), "{refused}");
@@ -1471,12 +1625,14 @@ output = "none"
         for text in [
             "[forge]\nbrowser = [\"open\"]\n",
             "[forge]\ngitlab = [\"gitlab.com\"]\n",
+            "[forge]\ngitlab = [\"gitlab.com\"]\ngitlab_ask = [\"gitlab.com\"]\n",
         ] {
             let refused = repo(text).unwrap_err();
             assert!(refused.contains("unknown field `forge`"), "{refused}");
             files.repo(text);
             let loaded = files.load();
             assert_eq!(loaded.browser, None);
+            assert_eq!(loaded.forge_hosts, []);
             assert_eq!(loaded.forge_gitlab_hosts, []);
             assert_eq!(loaded.errors.len(), 1);
         }

@@ -169,10 +169,11 @@ pub fn percent_encode(bytes: &[u8]) -> String {
 
 /// The forge repository the branches belong to, and its kind: the remote
 /// `origin`, else the only remote, as the pull-request load reads it. Its
-/// URL must parse and its host be one the user listed, GitHub's first.
+/// URL must parse and its host be one the user listed, the forge hosts
+/// first.
 pub fn forge_for(
     remotes: &[Remote],
-    github: &[ForgeHost],
+    hosts: &[ForgeHost],
     gitlab: &[ForgeHost],
 ) -> Option<(ForgeKind, ForgeRepo)> {
     let configured: Vec<&Remote> = remotes.iter().filter(|r| r.configured).collect();
@@ -183,18 +184,20 @@ pub fn forge_for(
         [only] => only,
         _ => return None,
     };
-    repo_of(remote, github, gitlab)
+    repo_of(remote, hosts, gitlab)
 }
 
 /// `remote`'s forge repository and kind, when its URL is on a listed host.
+/// A host in `hosts` (the forge hosts Kika may contact) says its own kind;
+/// one only in `gitlab` (named for its URLs alone) is GitLab.
 pub fn repo_of(
     remote: &Remote,
-    github: &[ForgeHost],
+    hosts: &[ForgeHost],
     gitlab: &[ForgeHost],
 ) -> Option<(ForgeKind, ForgeRepo)> {
     let repo = parse_remote(remote.url.as_deref()?.as_bytes())?;
-    if matches(&repo, github).is_some() {
-        Some((ForgeKind::GitHub, repo))
+    if let Some(host) = matches(&repo, hosts) {
+        Some((host.kind(), repo))
     } else if matches(&repo, gitlab).is_some() {
         Some((ForgeKind::GitLab, repo))
     } else {
@@ -402,6 +405,28 @@ mod tests {
             ..remote("origin", "")
         };
         assert_eq!(forge_for(&[no_url], &github, &gitlab), None);
+    }
+
+    #[test]
+    fn a_forge_host_gives_its_own_kind() {
+        let hub = ForgeHost::parse("github.com").unwrap();
+        let lab = ForgeHost::parse_gitlab("gitlab.example.com").unwrap();
+        let first = [hub, lab.clone()];
+        let on = |url: &str| repo_of(&remote("origin", url), &first, std::slice::from_ref(&lab));
+        assert_eq!(
+            on("git@gitlab.example.com:grp/proj.git"),
+            Some((ForgeKind::GitLab, repo("gitlab.example.com", "grp", "proj")))
+        );
+        assert_eq!(
+            on("https://github.com/o/r"),
+            Some((ForgeKind::GitHub, repo("github.com", "o", "r")))
+        );
+        // In the first list only, it is still GitLab.
+        let origin = remote("origin", "https://gitlab.example.com/g/p");
+        assert_eq!(
+            forge_for(&[origin], &first, &[]),
+            Some((ForgeKind::GitLab, repo("gitlab.example.com", "g", "p")))
+        );
     }
 
     #[test]

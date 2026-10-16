@@ -21,19 +21,24 @@ use super::head::Head;
 use super::{CiState, ForgeHost, ForgeRepo, ForgeStatus, PrBadge, PrState};
 use kika_git::recording::{CommandOutcome, CommandSink};
 
-/// Set on every call: no prompt, no pager, no colour, no update check.
-pub const GLAB_ENV: [(&str, &str); 4] = [
+/// Set on every call: no prompt, no pager, no colour, no update check,
+/// and no usage data sent, which `glab` does by default.
+pub const GLAB_ENV: [(&str, &str); 5] = [
     ("NO_COLOR", "1"),
     ("NO_PROMPT", "1"),
     ("GLAB_CHECK_UPDATE", "false"),
     ("GLAB_PAGER", "cat"),
+    ("GLAB_SEND_TELEMETRY", "0"),
 ];
 
 /// Removed from every call, so only the arguments pick the host and no
 /// project is implied. Kika's hidden-mode keys never reach a child.
-pub const GLAB_ENV_REMOVE: [&str; 5] = [
+pub const GLAB_ENV_REMOVE: [&str; 8] = [
     "GITLAB_HOST",
     "GL_HOST",
+    "GITLAB_URI",
+    "GITLAB_API_HOST",
+    "GITLAB_URL",
     "GITLAB_REPO",
     kika_git::askpass::SOCKET_ENV,
     kika_git::rebase_plan::PLAN_ENV,
@@ -378,7 +383,8 @@ fn head_mr<'a>(
 }
 
 /// `mr` as a badge, or `None` when its number or state is not one Kika
-/// knows.
+/// knows. A `MANUAL` pipeline gets no mark: it waits for a person and
+/// never finishes on its own.
 fn badge_of(mr: &MrNode) -> Option<PrBadge> {
     // Digits only: `parse` alone would take a leading `+`.
     if !mr.iid.bytes().all(|b| b.is_ascii_digit()) {
@@ -404,7 +410,6 @@ fn badge_of(mr: &MrNode) -> Option<PrBadge> {
             | "PENDING"
             | "RUNNING"
             | "SCHEDULED"
-            | "MANUAL"
             | "WAITING_FOR_CALLBACK"
             | "CANCELING" => Some(CiState::Pending),
             _ => None,
@@ -680,8 +685,9 @@ mod tests {
             pr(7, Open, Some(Pending)),
             pr(8, Open, Some(Pending)),
             pr(9, Open, Some(Pending)),
+            // Scheduled runs on its own; manual waits for a person.
             pr(10, Open, Some(Pending)),
-            pr(11, Open, Some(Pending)),
+            pr(11, Open, None),
             pr(12, Open, Some(Pending)),
             pr(13, Open, Some(Pending)),
             // Skipped, and a status Kika does not know: no mark.
@@ -794,6 +800,39 @@ mod tests {
         ));
     }
 
+    /// `answer` with `glab`'s exit 1, as it exits on any GraphQL error.
+    fn exit_1(stdout: &str) -> GhOutput {
+        GhOutput {
+            exit: Some(1),
+            ..answer(stdout)
+        }
+    }
+
+    #[test]
+    fn a_200_body_is_read_even_when_glab_exits_non_zero() {
+        // GraphQL errors inside a 200: refused, by the body.
+        assert_eq!(
+            classify_ok(exit_1(GRAPHQL_ERRORS)),
+            Answer::Failed(ForgeStatus::Failed)
+        );
+        // Valid data inside a 200: read, and its badges found.
+        assert!(matches!(
+            classify_ok(exit_1(STATES)),
+            Answer::Body { etag: None, .. }
+        ));
+        let runner = FakeGlab::new().reply(exit_1(STATES));
+        let branches = names(1);
+        let badges = fetch(&runner, &branches).unwrap();
+        assert_eq!(badges[&branches[0]].number, 1);
+        // With no status line, the exit code decides.
+        let bare = "{\"data\":{\"project\":{}}}";
+        assert_eq!(
+            classify_ok(exit_1(bare)),
+            Answer::Failed(ForgeStatus::Failed)
+        );
+        assert!(matches!(classify_ok(answer(bare)), Answer::Body { .. }));
+    }
+
     #[test]
     fn rate_limits_are_classified_with_until_clamped() {
         let limited = |until| Answer::Limited { until };
@@ -830,9 +869,17 @@ mod tests {
                 ("NO_PROMPT", "1"),
                 ("GLAB_CHECK_UPDATE", "false"),
                 ("GLAB_PAGER", "cat"),
+                ("GLAB_SEND_TELEMETRY", "0"),
             ]
         );
-        for key in ["GITLAB_HOST", "GL_HOST", "GITLAB_REPO"] {
+        for key in [
+            "GITLAB_HOST",
+            "GL_HOST",
+            "GITLAB_URI",
+            "GITLAB_API_HOST",
+            "GITLAB_URL",
+            "GITLAB_REPO",
+        ] {
             assert!(GLAB_ENV_REMOVE.contains(&key), "{key}");
         }
         assert!(GLAB_ENV_REMOVE.contains(&kika_git::askpass::SOCKET_ENV));
