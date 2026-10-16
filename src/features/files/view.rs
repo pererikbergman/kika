@@ -6,6 +6,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
+use crate::layout::SidePanel;
 use crate::model::AppState;
 use crate::theme::Palette;
 use crate::view::{PanelLook, elide_left, filter_title, no_matches, range_row, width_of};
@@ -80,7 +81,6 @@ fn file_lines(
     range: &[usize],
     area: Rect,
 ) -> Vec<Line<'static>> {
-    let rows = usize::from(area.height);
     let width = usize::from(area.width);
     let line = |&i: &usize| {
         range_row(
@@ -91,26 +91,94 @@ fn file_lines(
             width,
         )
     };
-    if shown.len() <= rows {
-        return shown.iter().map(line).collect();
-    }
-    let selected = selected
+    let at = selected
         .and_then(|s| shown.iter().position(|&i| i == s))
         .unwrap_or(0);
+    let window = file_window(shown.len(), at, usize::from(area.height));
+    let mut lines: Vec<Line> = shown
+        .iter()
+        .skip(window.start)
+        .take(window.files)
+        .map(line)
+        .collect();
+    if window.cut {
+        let hidden = shown.len() - window.start - window.files;
+        lines.push(Line::from(format!("+{hidden} more")));
+    }
+    lines
+}
+
+/// Which of the shown files a window draws: `files` of them from position
+/// `start`, then a "+N more" line when `cut`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileWindow {
+    start: usize,
+    files: usize,
+    cut: bool,
+}
+
+/// The window of `rows` lines over `shown` files that keeps position `at`
+/// in view. One line is kept for "+N more" unless the window reaches the
+/// end. Shared with the mouse hit-test, so a click lands on the file drawn
+/// under it.
+fn file_window(shown: usize, at: usize, rows: usize) -> FileWindow {
+    if shown <= rows {
+        return FileWindow {
+            start: 0,
+            files: shown,
+            cut: false,
+        };
+    }
     if rows <= 1 {
         // No room for a "+N more" row; the selection matters more.
-        return shown.iter().skip(selected).take(rows).map(line).collect();
+        return FileWindow {
+            start: at,
+            files: rows.min(shown - at),
+            cut: false,
+        };
     }
-    // One row is kept for "+N more" unless the window reaches the end.
     let more = rows - 1;
-    let start = selected.saturating_sub(more - 1);
-    if start + rows >= shown.len() {
-        let start = shown.len() - rows;
-        return shown.iter().skip(start).map(line).collect();
+    let start = at.saturating_sub(more - 1);
+    if start + rows >= shown {
+        return FileWindow {
+            start: shown - rows,
+            files: rows,
+            cut: false,
+        };
     }
-    let mut lines: Vec<Line> = shown.iter().skip(start).take(more).map(line).collect();
-    lines.push(Line::from(format!("+{} more", shown.len() - start - more)));
-    lines
+    FileWindow {
+        start,
+        files: more,
+        cut: true,
+    }
+}
+
+impl AppState {
+    /// Whether the Files panel lists its rows, expanded: what a click or
+    /// the wheel can move through.
+    pub(crate) fn files_list_shown(&self) -> bool {
+        let files = &self.files;
+        self.expanded == SidePanel::Files
+            && files.error.is_none()
+            && files.loaded
+            && !files.visible().is_empty()
+    }
+
+    /// The move from the cursor to the file drawn on `line` of the listed
+    /// panel's `rows` inner lines. `None` on the "+N more" line, below the
+    /// last file, or when the panel lists no rows.
+    pub(crate) fn files_step_to(&self, line: usize, rows: usize) -> Option<isize> {
+        if !self.files_list_shown() {
+            return None;
+        }
+        let shown = self.files.visible();
+        let at = shown
+            .iter()
+            .position(|&i| i == self.files.selected)
+            .unwrap_or(0);
+        let window = file_window(shown.len(), at, rows);
+        (line < window.files).then(|| (window.start + line) as isize - at as isize)
+    }
 }
 
 /// `XY path`, or `XY orig → path` for renames and copies, fitted to `width`

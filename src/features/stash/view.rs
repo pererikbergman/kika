@@ -8,11 +8,37 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use super::git::StashEntry;
 use super::list::{StashFilesList, StashList};
+use crate::layout::SidePanel;
+use crate::model::AppState;
 use crate::rows::commit_file_line;
 use crate::theme::Palette;
 use crate::view::{
-    PanelLook, elide_right, list_title, no_matches, range_row, reversed, scrolled, width_of,
+    PanelLook, elide_right, list_title, no_matches, range_row, reversed, scrolled,
+    scrolled_step_to, width_of,
 };
+
+impl AppState {
+    /// Whether the Stash panel lists its entries, expanded and no entry
+    /// opened: what a click or the wheel can move through.
+    pub(crate) fn stash_list_shown(&self) -> bool {
+        let list = &self.stash.list;
+        self.expanded == SidePanel::Stash
+            && self.stash.open.is_none()
+            && list.error.is_none()
+            && !list.visible().is_empty()
+    }
+
+    /// The move from the cursor to the entry drawn on `line` of the
+    /// listed panel's `rows` inner lines; `None` below the last entry or
+    /// when the panel lists no entries.
+    pub(crate) fn stash_step_to(&self, line: usize, rows: usize) -> Option<isize> {
+        let list = &self.stash.list;
+        // As drawn: a panel too short for a row still draws one.
+        self.stash_list_shown()
+            .then(|| scrolled_step_to(&list.visible(), list.selected, rows.max(1), line))
+            .flatten()
+    }
+}
 
 /// The panel: a placeholder until the list loads, then one row per entry
 /// the filter shows, scrolled so the cursor shows, the cursor and the

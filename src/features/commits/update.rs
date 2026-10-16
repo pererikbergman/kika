@@ -28,11 +28,9 @@ pub(crate) fn update(state: &mut AppState, intent: CommitsIntent) -> Vec<Effect>
         }
         CommitsIntent::MarkersLoaded { tag, result } => state.markers_loaded(tag, result),
         CommitsIntent::TipsLoaded { tag, result } => state.branch_tips_loaded(tag, result),
-        CommitsIntent::Next => {
-            state.commits.step(1);
-            return state.more_commits();
-        }
-        CommitsIntent::Prev => state.commits.step(-1),
+        CommitsIntent::Next => return state.move_commit(1),
+        CommitsIntent::Prev => return state.move_commit(-1),
+        CommitsIntent::MoveBy(delta) => return state.move_commit(delta),
         CommitsIntent::OpenFiles => return state.open_commit_files(),
         CommitsIntent::CloseFiles => return state.close_commit_files(),
         CommitsIntent::FileNext => return state.move_commit_file(1),
@@ -61,6 +59,20 @@ pub(crate) fn update(state: &mut AppState, intent: CommitsIntent) -> Vec<Effect>
 
 /// The Commits panel: its log pages, markers and branch tips, and its tabs.
 impl AppState {
+    /// Move the commit cursor `delta` rows, a row at a time so the todo
+    /// rows are walked as the keys walk them. Moving down asks for the
+    /// next page once, when the cursor lands near the end.
+    pub(crate) fn move_commit(&mut self, delta: isize) -> Vec<Effect> {
+        for _ in 0..delta.unsigned_abs() {
+            self.commits.step(delta.signum());
+        }
+        if delta > 0 {
+            self.more_commits()
+        } else {
+            vec![]
+        }
+    }
+
     /// Load page 0 of the log under the current query, superseding any
     /// page in flight.
     pub(crate) fn first_commits_page(&mut self) -> Effect {
@@ -297,6 +309,36 @@ mod tests {
         assert_eq!(state.commits.graph.len(), PAGE + 10);
         assert_eq!(state.commits.list.rows[PAGE].oid, format!("c{PAGE}"));
         assert!(!state.commits.more_in_flight);
+    }
+
+    #[test]
+    fn move_by_moves_through_the_shown_commits_and_loads_the_next_page_once() {
+        let mut state = with_commits(PAGE, false);
+        state.commits.list.selected = PAGE - PREFETCH - 3;
+        assert_eq!(
+            state.update(AppIntent::Commits(CommitsIntent::MoveBy(2))),
+            vec![]
+        );
+        // Past the prefetch line by more than one row: still one load.
+        let effects = state.update(AppIntent::Commits(CommitsIntent::MoveBy(3)));
+        commits_load(&effects);
+        assert_eq!(effects.len(), 1);
+        assert_eq!(state.commits.list.selected, PAGE - PREFETCH + 2);
+        assert_eq!(
+            state.update(AppIntent::Commits(CommitsIntent::MoveBy(-3))),
+            vec![]
+        );
+
+        let mut state = crate::test_support::with_log(30);
+        state.update(AppIntent::Commits(CommitsIntent::MoveBy(99)));
+        assert_eq!(state.commits.list.selected, 29, "clamped at the end");
+        // "commit 1" and "commit 10" to "commit 19" show.
+        state.commits.list.set_filter("commit 1".into());
+        state.commits.list.selected = 1;
+        state.update(AppIntent::Commits(CommitsIntent::MoveBy(2)));
+        assert_eq!(state.commits.list.selected, 11);
+        state.update(AppIntent::Commits(CommitsIntent::MoveBy(-9)));
+        assert_eq!(state.commits.list.selected, 1);
     }
 
     #[test]

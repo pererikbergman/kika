@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crossterm::event::{Event, KeyEventKind};
+use crossterm::event::{Event, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
 
 use crate::config::ConfigError;
 use crate::effect::Tag;
@@ -51,6 +51,19 @@ pub enum AppIntent {
     Resize {
         width: u16,
         height: u16,
+    },
+    /// A left click at a screen cell: selects the row under it and
+    /// focuses its panel, when nothing is open over the workspace.
+    Click {
+        column: u16,
+        row: u16,
+    },
+    /// A wheel notch at a screen cell, `down` or up: scrolls what is under
+    /// it without moving focus.
+    Wheel {
+        column: u16,
+        row: u16,
+        down: bool,
     },
 
     // --- core: focus ---
@@ -385,6 +398,23 @@ impl AppIntent {
             Event::Key(key) if key.kind == KeyEventKind::Press => Some(Self::Key(key.into())),
             Event::Resize(width, height) => Some(Self::Resize { width, height }),
             Event::FocusGained => Some(Self::Watch(WatchEvent::FocusGained)),
+            // Only a left press and the wheel; modifiers are ignored.
+            Event::Mouse(MouseEvent {
+                kind, column, row, ..
+            }) => match kind {
+                MouseEventKind::Down(MouseButton::Left) => Some(Self::Click { column, row }),
+                MouseEventKind::ScrollDown => Some(Self::Wheel {
+                    column,
+                    row,
+                    down: true,
+                }),
+                MouseEventKind::ScrollUp => Some(Self::Wheel {
+                    column,
+                    row,
+                    down: false,
+                }),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -436,5 +466,59 @@ mod tests {
             Some(AppIntent::Watch(WatchEvent::FocusGained))
         );
         assert_eq!(AppIntent::from_event(Event::FocusLost), None);
+    }
+
+    fn mouse(kind: MouseEventKind, modifiers: KeyModifiers) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: 7,
+            row: 3,
+            modifiers,
+        })
+    }
+
+    #[test]
+    fn a_left_press_is_a_click_and_the_wheel_scrolls_whatever_the_modifiers() {
+        for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+            assert_eq!(
+                AppIntent::from_event(mouse(MouseEventKind::Down(MouseButton::Left), modifiers)),
+                Some(AppIntent::Click { column: 7, row: 3 })
+            );
+            assert_eq!(
+                AppIntent::from_event(mouse(MouseEventKind::ScrollDown, modifiers)),
+                Some(AppIntent::Wheel {
+                    column: 7,
+                    row: 3,
+                    down: true
+                })
+            );
+            assert_eq!(
+                AppIntent::from_event(mouse(MouseEventKind::ScrollUp, modifiers)),
+                Some(AppIntent::Wheel {
+                    column: 7,
+                    row: 3,
+                    down: false
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn other_mouse_events_are_dropped() {
+        for kind in [
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Moved,
+            MouseEventKind::Down(MouseButton::Right),
+            MouseEventKind::Down(MouseButton::Middle),
+            MouseEventKind::ScrollLeft,
+            MouseEventKind::ScrollRight,
+        ] {
+            assert_eq!(
+                AppIntent::from_event(mouse(kind, KeyModifiers::NONE)),
+                None,
+                "{kind:?}"
+            );
+        }
     }
 }

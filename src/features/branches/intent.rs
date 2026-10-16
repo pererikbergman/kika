@@ -28,6 +28,9 @@ pub(crate) enum BranchesIntent {
     /// Move the branch selection down or up.
     Next,
     Prev,
+    /// Move the branch selection by this many rows, clamped at both ends:
+    /// a click or a wheel notch. One log load, however far it moves.
+    MoveBy(isize),
     /// Switch to the selected branch.
     Checkout,
     /// Ask for a name, to make a branch at the selected one.
