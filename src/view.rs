@@ -752,7 +752,7 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
             spans.push(Span::styled(
                 format!(" {copied}"),
                 Style::new()
-                    .fg(state.palette.copied)
+                    .fg(state.palette.copied_commit)
                     .add_modifier(Modifier::BOLD),
             ));
             room = room.saturating_sub(width_of(copied) + 1);
@@ -2585,6 +2585,17 @@ mod tests {
         let buffer = draw_buffer(&state, 80, 24);
         let (border, _) = frame_style(&buffer, "[2] Files");
         assert_eq!(border.fg, Some(Color::Magenta));
+    }
+
+    #[test]
+    fn the_light_theme_colours_the_focused_border() {
+        let mut state = with_diff(vec![diff_line(LineKind::Added, "+new")]);
+        state.palette = Palette::LIGHT;
+        let buffer = draw_buffer(&state, 80, 24);
+        let (border, _) = frame_style(&buffer, "[2] Files");
+        assert_eq!(border.fg, Some(Color::Indexed(25)));
+        let (other, _) = frame_style(&buffer, "[1] Status");
+        assert_eq!(other.fg, Some(Color::Indexed(240)));
     }
 
     #[test]

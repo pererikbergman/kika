@@ -1,13 +1,16 @@
 //! Keeps `docs/configuration.md` honest: its binding table must list every
 //! binding in the keymap with its default keys and whether a repository
 //! file may change it. A new or re-keyed binding fails here until the page
-//! says so, and the failure prints the row to paste.
+//! says so, and the failure prints the row to paste. Its `[theme]` section
+//! must name every colour role and built-in theme, with each theme's colour
+//! for each role.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crossterm::event::KeyCode;
 
 use crate::keymap::{Binding, KeyPattern, REPO_LOCKED, parse_key, registry};
+use crate::theme::{self, ColourValue, ROLES, THEMES};
 
 const PAGE: &str = include_str!("../docs/configuration.md");
 
@@ -280,4 +283,88 @@ fn the_page_documents_the_clipboard_command() {
             "docs/configuration.md lacks {needle:?}"
         );
     }
+}
+
+/// The page's `[theme]` section: from its heading to the next `## `.
+fn theme_section(page: &str) -> &str {
+    let start = page
+        .find("\n## `[theme]`")
+        .expect("docs/configuration.md has a `[theme]` section");
+    let rest = &page[start + 1..];
+    let end = rest[3..].find("\n## ").map_or(rest.len(), |i| i + 3);
+    &rest[..end]
+}
+
+/// Every role and theme name the `[theme]` section of `page` does not
+/// name as a backticked word, and every role-table cell that does not
+/// match its theme.
+fn theme_mismatches(page: &str) -> Vec<String> {
+    let section = theme_section(page);
+    let mut problems: Vec<String> = ROLES
+        .iter()
+        .chain(THEMES.iter())
+        .filter(|name| !section.contains(&format!("`{name}`")))
+        .map(|name| format!("`{name}` is not named in the [theme] section"))
+        .collect();
+    let palettes = THEMES.map(|name| theme::builtin(name).expect("a built-in theme"));
+    for line in section.lines() {
+        let Some(inner) = line
+            .trim()
+            .strip_prefix('|')
+            .and_then(|l| l.strip_suffix('|'))
+        else {
+            continue;
+        };
+        let cells: Vec<&str> = inner.split('|').map(str::trim).collect();
+        let [role, _, colours @ ..] = cells.as_slice() else {
+            continue;
+        };
+        let Some(role) = role.strip_prefix('`').and_then(|r| r.strip_suffix('`')) else {
+            continue;
+        };
+        if !ROLES.contains(&role) || colours.len() != THEMES.len() {
+            continue;
+        }
+        for ((cell, palette), name) in colours.iter().zip(&palettes).zip(THEMES) {
+            let want = palette.get(role).expect("a role");
+            let got = match cell.trim_matches('`') {
+                "terminal default" => Ok(ratatui::style::Color::Reset),
+                text => theme::parse_colour(&ColourValue::Text(text.into())),
+            };
+            if got != Ok(want) {
+                problems.push(format!(
+                    "`{role}` in `{name}` is {want:?} but the page says {cell}"
+                ));
+            }
+        }
+    }
+    problems
+}
+
+#[test]
+fn the_theme_section_names_every_role_and_theme_with_its_colours() {
+    let problems = theme_mismatches(PAGE);
+    assert!(
+        problems.is_empty(),
+        "docs/configuration.md's [theme] section is out of date:\n{}",
+        problems.join("\n")
+    );
+}
+
+#[test]
+fn a_missing_role_or_a_wrong_colour_fails() {
+    let page = "# x\n\n## `[theme]` (global file only)\n\n`default` `light` `high-contrast`\n| `focused` | f | `cyan` | `25` | `light_cyan` |\n| `added` | a | `red` | `28` | `light_green` |\n\n## `[clipboard]`\n`dim`\n";
+    let problems = theme_mismatches(page);
+    assert!(
+        problems.contains(&"`dim` is not named in the [theme] section".to_string()),
+        "{problems:?}"
+    );
+    assert!(
+        !problems.iter().any(|p| p.starts_with("`focused`")),
+        "{problems:?}"
+    );
+    assert!(
+        problems.contains(&"`added` in `default` is Green but the page says `red`".to_string()),
+        "{problems:?}"
+    );
 }

@@ -515,7 +515,9 @@ fn commit_line(
         spans.push(if is_copied {
             Span::styled(
                 "+ ",
-                Style::new().fg(palette.copied).add_modifier(Modifier::BOLD),
+                Style::new()
+                    .fg(palette.copied_commit)
+                    .add_modifier(Modifier::BOLD),
             )
         } else {
             Span::raw("  ")

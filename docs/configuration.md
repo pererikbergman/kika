@@ -4,14 +4,14 @@ Kika works without any configuration. Two optional TOML files let you remap
 keys, bind your own programs to keys, tune how often Kika looks for changes
 made outside it, choose a program to draw the Diff pane, keep commits whose
 hooks never ask anything in the background, show GitHub pull requests
-beside your branches, and say which terminals draw emoji sequences as one
-picture.
+beside your branches, say which terminals draw emoji sequences as one
+picture, and choose the colours Kika draws with.
 
 ## Files and locations
 
 | File | Where | Holds |
 |---|---|---|
-| Global | `$XDG_CONFIG_HOME/kika/config.toml`, else `~/.config/kika/config.toml` (Linux, macOS); `%APPDATA%\kika\config.toml` (Windows) | `[keys]`, `[watch]`, `[diff]`, `[commit]`, `[forge]`, `[display]` and `[[commands]]` |
+| Global | `$XDG_CONFIG_HOME/kika/config.toml`, else `~/.config/kika/config.toml` (Linux, macOS); `%APPDATA%\kika\config.toml` (Windows) | `[keys]`, `[watch]`, `[diff]`, `[commit]`, `[forge]`, `[display]`, `[clipboard]`, `[theme]` and `[[commands]]` |
 | Repository | `.kika.toml` at the top level of the repository | `[keys]` only |
 
 - Neither file is required. A missing file is not an error.
@@ -52,6 +52,12 @@ emoji_zwj_terminals = ["WezTerm"]   # leave out to keep emoji joiners escaped
 
 [clipboard]
 command = ["pbcopy"]   # copies instead of OSC 52; leave out to keep it off
+
+[theme]
+name = "light"   # leave out to keep the default colours
+
+[theme.colors]
+added = "light_green"   # one role's colour, over the theme
 ```
 
 Earlier versions of this example bound `files.stage` to `s`. `s` now opens
@@ -644,6 +650,122 @@ emoji_zwj_terminals = ["WezTerm", "ghostty"]
 
 **Changes to `[display]` take effect after a restart.**
 
+## `[theme]` (global file only)
+
+`[theme]` picks the colours Kika draws with. `name` chooses a built-in
+theme, and `[theme.colors]` changes single roles on top of it. Without a
+`[theme]` table Kika draws as it always has.
+
+```toml
+[theme]
+name = "light"
+
+[theme.colors]
+added = "light_green"   # a colour name
+match_bg = 229          # a 256-colour index
+hash = "#005f87"        # a true colour
+```
+
+| Setting | Meaning | Default |
+|---|---|---|
+| `name` | The built-in theme to start from: `default`, `light` or `high-contrast` | `default` |
+| `colors` | A table of role = colour, each one replacing that role's colour in the theme | empty |
+
+The built-in themes:
+
+- `default`: the colours Kika has always drawn, for dark backgrounds. Plain
+  text keeps the terminal's own foreground colour.
+- `light`: for light backgrounds. It sets every role, using 256-colour
+  indexes, because the basic yellow, cyan and grey are hard to read on
+  white in most terminal schemes.
+- `high-contrast`: for dark backgrounds. Each default colour moves to its
+  bright form, plain text is `white`, and dimmed text is `gray`.
+
+A colour in `[theme.colors]` is one of:
+
+- one of these 16 names, written exactly so (lowercase, with `_`):
+
+  | Name | ANSI colour |
+  |---|---|
+  | `black` | 0 |
+  | `red` | 1 |
+  | `green` | 2 |
+  | `yellow` | 3 |
+  | `blue` | 4 |
+  | `magenta` | 5 |
+  | `cyan` | 6 |
+  | `gray` | 7 |
+  | `dark_gray` | 8 |
+  | `light_red` | 9 |
+  | `light_green` | 10 |
+  | `light_yellow` | 11 |
+  | `light_blue` | 12 |
+  | `light_magenta` | 13 |
+  | `light_cyan` | 14 |
+  | `white` | 15 |
+
+- a 256-colour index from `0` to `255`, as a number (`17`) or a string
+  (`"17"`);
+- a true colour as `"#rrggbb"`, six hex digits in either case
+  (`"#3a3a3a"`, `"#AbCdEf"`).
+
+Anything else is an error, and the whole file is ignored: another spelling
+such as `"Green"` or `"darkgray"`, `"reset"`, a short `"#fff"`, a number
+above 255, or a value that is not a number or string. So is a `name` that
+is not a built-in theme, a role that does not exist, or an unknown key in
+`[theme]`. The error names the key and says what to write instead.
+
+The roles, and their colour in each built-in theme:
+
+| Role | Meaning | `default` | `light` | `high-contrast` |
+|---|---|---|---|---|
+| `text` | Plain text that still takes a colour slot: a plain status letter, the rebase `pick` action | terminal default | `black` | `white` |
+| `dim` | Unfocused borders, hints, empty states, dates and disabled rows | `dark_gray` | `240` | `gray` |
+| `focused` | The focused panel's border and the Diff pane's cursor gutter | `cyan` | `25` | `light_cyan` |
+| `added` | Added lines and counts, and the status `A` | `green` | `28` | `light_green` |
+| `removed` | Removed lines and counts, and the status `D` | `red` | `124` | `light_red` |
+| `modified` | The status `M` | `yellow` | `130` | `light_yellow` |
+| `status_renamed` | The status `R` and `C` | `cyan` | `25` | `light_cyan` |
+| `hunk_header` | Hunk headers in the diff and hunk views | `cyan` | `25` | `light_cyan` |
+| `warning` | Notices and things to look at: the bar notice, next steps, markers | `yellow` | `130` | `light_yellow` |
+| `error` | Failures: a git command's error, conflicted files, load errors | `red` | `124` | `light_red` |
+| `success` | Done and fine: viewed, check passed, mergeable | `green` | `28` | `light_green` |
+| `pending` | A check still running | `yellow` | `130` | `light_yellow` |
+| `neutral` | A check neutral or skipped; mergeability unknown | `dark_gray` | `240` | `gray` |
+| `hash` | A commit's short hash | `cyan` | `25` | `light_cyan` |
+| `ref_name` | A stash name or reflog selector | `yellow` | `130` | `light_yellow` |
+| `ref_label` | A reflog entry's label | `cyan` | `25` | `light_cyan` |
+| `author` | A commit's author | `green` | `28` | `light_green` |
+| `graph` | The commit graph's lanes | `magenta` | `90` | `light_magenta` |
+| `mark` | The diff mark and the custom-patch mark | `magenta` | `90` | `light_magenta` |
+| `copied_commit` | Copied commits and the bar's copied note | `cyan` | `25` | `light_cyan` |
+| `location` | Where a review comment sits | `cyan` | `25` | `light_cyan` |
+| `conflict_ours` | The "ours" side of a conflict | `green` | `28` | `light_green` |
+| `conflict_theirs` | The "theirs" side of a conflict | `cyan` | `25` | `light_cyan` |
+| `thread_open` | A review thread still open | `yellow` | `130` | `light_yellow` |
+| `thread_addressed` | A review thread addressed | `green` | `28` | `light_green` |
+| `pr_open` | The PR badge: open | `green` | `28` | `light_green` |
+| `pr_draft` | The PR badge: draft | `dark_gray` | `240` | `gray` |
+| `pr_merged` | The PR badge: merged | `magenta` | `90` | `light_magenta` |
+| `pr_closed` | The PR badge: closed | `red` | `124` | `light_red` |
+| `match_fg` | The text of every search match, the current one included | `black` | `black` | `black` |
+| `match_bg` | The background of a search match | `yellow` | `229` | `light_yellow` |
+| `current_match_bg` | The background of the current search match | `light_red` | `217` | `light_red` |
+
+- `match_fg` is the text of both kinds of search match. It is drawn on
+  `match_bg` for every match, and on `current_match_bg` for the current
+  one, so pick it to read on both.
+- `focused` also colours the Diff pane's cursor gutter.
+- The selected row is drawn in reverse video, the text and background
+  swapped. It takes no colour of its own, so no role changes it.
+- Colour is only an extra signal. Every status, mark and badge also shows
+  as a letter, symbol or word, so nothing is lost in any theme or in a
+  terminal without colour.
+- Colours inside a `[diff]` program's output are that program's own; a theme
+  does not change them.
+
+**Changes to `[theme]` take effect after a restart.**
+
 ## `[clipboard]` (global file only)
 
 Kika copies with the OSC 52 terminal escape (see the Copy menu under
@@ -925,6 +1047,10 @@ Pass values as arguments after the code, and read them from there (`"$1"`,
   whole file is ignored.
 - **`[clipboard]` is allowed only in the global file**, since it names a
   program for Kika to run. A `[clipboard]` table in `.kika.toml` is an error,
+  and the whole file is ignored.
+- **`[theme]` is allowed only in the global file**, since a cloned
+  repository that could recolour Kika could make a warning or an error hard
+  to see. A `[theme]` or `[theme.colors]` table in `.kika.toml` is an error,
   and the whole file is ignored.
 - **A repository's `.kika.toml` comes with a clone and is not trusted.** It
   may hold only `[keys]`. It cannot change any binding marked `locked` in the
