@@ -662,6 +662,7 @@ mod tests {
         );
         load_remotes(&mut state.branches.remotes.list, Ok(remotes));
         state.forge.repo = Some(repo("acme", "widgets"));
+        state.forge.cli_checked([]);
         state.focus = Focus::Branches;
         state.expanded = SidePanel::Branches;
         state.files.loaded = true;

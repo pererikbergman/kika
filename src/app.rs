@@ -50,10 +50,12 @@ pub async fn run(
     // Only when the user named hosts; otherwise no forge CLI is ever run.
     let forge = (!config.forge_hosts.is_empty()).then(|| ForgeContext {
         gh: Arc::new(CliGh),
-        // Not reached yet: no configured host is GitLab-kind.
+        // Only run for a repository on a `gitlab_ask` host, and for its
+        // version check when one is configured.
         glab: Arc::new(CliGlab::new("glab")),
         sink: sink.clone(),
         cache_dir: kika_forge::cache::default_dir(|key| std::env::var_os(key)),
+        cli: kika_forge::cli::CliGate::default(),
     });
     let runtime = Runtime::new(Arc::clone(&runner), tx.clone())
         .with_recent_store(recent_store)

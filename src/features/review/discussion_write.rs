@@ -681,8 +681,8 @@ pub(crate) mod tests {
                 format!("{MAYBE_POSTED} ({NO_USABLE})"),
             ),
             (
-                CreateError::Status(ForgeStatus::NoGh),
-                "The gh command is not installed.".to_string(),
+                CreateError::Status(ForgeStatus::Cli(kika_forge::cli::CliStatus::NotInstalled)),
+                "The forge CLI is not installed.".to_string(),
             ),
             (
                 CreateError::Status(ForgeStatus::NotLoggedIn),

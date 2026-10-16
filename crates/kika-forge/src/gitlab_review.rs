@@ -684,7 +684,9 @@ mod tests {
         );
         assert_eq!(
             queues(&FakeGlab::new().missing()),
-            Err(Refusal::Status(ForgeStatus::NoGh))
+            Err(Refusal::Status(ForgeStatus::Cli(
+                crate::cli::CliStatus::NotInstalled
+            )))
         );
     }
 

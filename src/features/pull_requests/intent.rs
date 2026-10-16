@@ -5,6 +5,8 @@
 use std::collections::HashMap;
 
 use crate::effect::Tag;
+use kika_forge::cli::CliStatus;
+use kika_forge::url::ForgeKind;
 use kika_forge::{CreateError, ForgeRepo, ForgeStatus, PrBadge};
 use kika_git::branches::BranchName;
 
@@ -55,5 +57,10 @@ pub(crate) enum PullRequestsIntent {
     Created {
         tag: Tag,
         result: Result<(u64, String), CreateError>,
+    },
+    /// Each opted-in forge kind's CLI check came to `statuses`; the gate
+    /// already holds them.
+    CliChecked {
+        statuses: Vec<(ForgeKind, CliStatus)>,
     },
 }

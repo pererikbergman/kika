@@ -2846,7 +2846,7 @@ async fn shift_b_in_branches_asks_github_once_and_only_for_an_opted_in_host() {
 
     use kika_forge::ForgeView;
     use kika_forge::github::fixtures::{PROBE_200, STATES};
-    use kika_forge::github::{FakeGh, answer};
+    use kika_forge::github::{FakeGh, GhCall, answer};
 
     let repo = on_main();
     repo.git(["remote", "add", "origin", "https://github.com/acme/widgets"]);
@@ -2862,12 +2862,13 @@ async fn shift_b_in_branches_asks_github_once_and_only_for_an_opted_in_host() {
         Some("Name GitHub hosts under [forge] in the global config")
     );
 
-    // github.com opted in: a reload matches the remote, then `B` runs
-    // exactly one more refresh, a probe and the query.
+    // github.com opted in: a reload matches the remote, then `B` checks
+    // `gh` again and runs exactly one more refresh, a probe and the query.
     let gh = Arc::new(
         FakeGh::new()
             .reply(answer(PROBE_200))
             .reply(answer(STATES))
+            .reply(answer("gh version 2.40.1 (2023-12-13)\n"))
             .reply(answer(PROBE_200))
             .reply(answer(STATES)),
     );
@@ -2877,9 +2878,51 @@ async fn shift_b_in_branches_asks_github_once_and_only_for_an_opted_in_host() {
     assert_eq!(gh.calls().len(), 2);
     assert_eq!(app.state().forge.status, ForgeView::Fresh);
     app.type_text("B").await;
-    assert_eq!(gh.calls().len(), 4);
+    let calls = gh.calls();
+    assert_eq!(calls.len(), 5);
+    assert_eq!(calls[2].kind, GhCall::Version);
+    assert_eq!(calls[2].args(), ["--version"]);
     assert_eq!(app.state().forge.status, ForgeView::Fresh);
     assert_eq!(app.state().notice, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_gh_blocks_every_call_until_b_finds_it_installed() {
+    use std::sync::Arc;
+
+    use kika_forge::ForgeView;
+    use kika_forge::github::fixtures::{PROBE_200, STATES};
+    use kika_forge::github::{FakeGh, GhCall, answer};
+
+    let repo = on_main();
+    repo.git(["remote", "add", "origin", "https://github.com/acme/widgets"]);
+    // `B` finds no `gh`: no other call is made, and the row says so.
+    let gh = Arc::new(
+        FakeGh::new()
+            .reply(answer(PROBE_200))
+            .reply(answer(STATES))
+            .missing()
+            .reply(answer("gh version 2.40.1 (2023-12-13)\n"))
+            .reply(answer(PROBE_200))
+            .reply(answer(STATES)),
+    );
+    let mut app = Harness::start_with_forge(&repo, Arc::clone(&gh)).await;
+    app.press(KeyCode::Char('3')).await;
+    app.press(KeyCode::Char('r')).await;
+    assert_eq!(gh.calls().len(), 2);
+    app.type_text("B").await;
+    assert_eq!(gh.calls().len(), 3);
+    app.assert_screen_contains("GitHub: gh not installed");
+    // Installed since: `B` finds it and refreshes, with no restart.
+    app.type_text("B").await;
+    assert_eq!(gh.calls().len(), 6);
+    assert_eq!(app.state().forge.status, ForgeView::Fresh);
+    let versions: Vec<bool> = gh
+        .calls()
+        .iter()
+        .map(|c| c.kind == GhCall::Version)
+        .collect();
+    assert_eq!(versions, [false, false, true, true, false, false]);
 }
 
 /// Twenty numbered lines, with `changes` (line number, new text) made.

@@ -12,7 +12,7 @@ use kika_git::commit_files::CommitId;
 use kika_git::remotes::Remote;
 
 /// Which forge a repository is on, which decides the shape of its URLs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ForgeKind {
     GitHub,
     GitLab,

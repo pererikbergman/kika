@@ -1512,6 +1512,8 @@ pub(crate) fn forge_state(branches: &[BranchName]) -> AppState {
         .collect();
     load_list(&mut state.branches.list, Ok(listed));
     state.forge.set_branches(branches);
+    // The CLI check answered with every kind open, so a refresh may run.
+    state.forge.cli_checked([]);
     state.focus = Focus::Branches;
     state.expanded = SidePanel::Branches;
     state.files.loaded = true;
