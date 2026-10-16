@@ -20,6 +20,7 @@ use kika_forge::forge::{Unsupported, Words, words_or_default};
 use kika_forge::merge::MergeMethod;
 use kika_forge::remote::{allowed, matches};
 use kika_forge::review::{CheckStatus, PrDetail, PrSummary, QueueKind, Queues, ReviewError};
+use kika_forge::url::ForgeKind;
 use kika_forge::{ForgeHost, ForgeRepo, ForgeStatus, REFRESH_LIMITED};
 use kika_git::commit_files::CommitId;
 use ratatui::text::Line;
@@ -211,13 +212,17 @@ impl ReviewState {
         };
     }
 
-    /// A load is in flight on any screen.
+    /// A load, or a pending-review read or save, is in flight on any
+    /// screen.
     #[cfg(test)]
     pub fn loading(&self) -> bool {
         self.queues_fetch.loading
             || self.detail_fetch.loading
             || self.discussion_fetch.loading
             || self.files.as_ref().is_some_and(PrFiles::loading)
+            || self.pending.as_ref().is_some_and(|p| {
+                p.saving.is_some() || matches!(p.load, super::pending::PendingLoad::Loading(_))
+            })
     }
 
     /// The pull request under the cursor, if the filter shows it.
@@ -616,11 +621,16 @@ impl AppState {
     /// badges found, or of the reviewed repository's host, and GitHub's
     /// while neither is known.
     pub(crate) fn review_words(&self) -> &'static Words {
-        let kind = self.forge.kind().or_else(|| {
+        words_or_default(self.review_forge_kind())
+    }
+
+    /// The forge kind the badges found, or of the reviewed repository's
+    /// host; `None` while neither is known.
+    pub(crate) fn review_forge_kind(&self) -> Option<ForgeKind> {
+        self.forge.kind().or_else(|| {
             let repo = self.review.repo.as_ref()?;
             self.forge.kind_of(repo)
-        });
-        words_or_default(kind)
+        })
     }
 
     /// The furthest the detail scrolls, with its last line at the bottom.
@@ -803,6 +813,18 @@ pub(crate) mod tests {
             owner: "acme".into(),
             name: "widgets".into(),
         }
+    }
+
+    /// `state` reviewing the same repository on a `gitlab_ask` host.
+    pub(crate) fn on_gitlab(mut state: AppState) -> AppState {
+        let repo = ForgeRepo {
+            host: "gitlab.example.com".into(),
+            ..repo()
+        };
+        state.forge.hosts = vec![ForgeHost::parse_gitlab("gitlab.example.com").unwrap()];
+        state.forge.repo = Some(repo.clone());
+        state.review.repo = Some(repo);
+        state
     }
 
     fn browser() -> Vec<OsString> {

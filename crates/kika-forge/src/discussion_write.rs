@@ -90,7 +90,7 @@ pub enum DiscussionWrite {
 /// The body rules GitHub has for each kind of review: Approve needs
 /// nothing, Request changes a summary, and Comment a summary or a line
 /// comment.
-fn review_ok(event: ReviewEvent, body: &str, threads: &[PendingComment]) -> bool {
+pub(crate) fn review_ok(event: ReviewEvent, body: &str, threads: &[PendingComment]) -> bool {
     let has_body = !body.trim().is_empty();
     let parts_ok = body.len() <= MAX_BODY
         && threads.len() <= MAX_COMMENTS
@@ -134,6 +134,10 @@ fn draft_thread(comment: &PendingComment) -> Value {
 pub enum Written {
     Posted,
     Resolved(bool),
+    /// A review's comments were published, but the approval asked with
+    /// them was not taken: the comments are public, so the pending review
+    /// is done with, and the approval can be asked again on its own.
+    PostedApprovalFailed,
 }
 
 impl DiscussionWrite {
@@ -575,6 +579,8 @@ mod tests {
             end,
             body: format!("{BODY} {id}"),
             head: HEAD.into(),
+            start_pos: None,
+            end_pos: None,
         }
     }
 

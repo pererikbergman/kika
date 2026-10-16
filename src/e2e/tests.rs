@@ -2841,6 +2841,142 @@ async fn review_mode_on_a_gitlab_ask_host_lists_merge_requests_and_opens_one() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_pending_comment_is_submitted_to_gitlab_as_published_drafts_and_an_approval() {
+    use std::sync::Arc;
+
+    use crate::features::review::ReviewScreen;
+    use kika_forge::github::answer;
+    use kika_forge::gitlab::{FakeGlab, GlabCall, RestMethod, RestPath};
+    use kika_forge::gitlab_discussion::fixtures::DISCUSSION;
+    use kika_forge::gitlab_review::fixtures::{DETAIL, QUEUES};
+    use kika_forge::gitlab_submit::fixtures::{APPROVED, DRAFTS_EMPTY, NO_CONTENT, REFS, created};
+
+    let repo = TestRepo::new()
+        .write("src/cache.rs", "one\n")
+        .commit("base")
+        .write("src/cache.rs", "two\n")
+        .commit("head");
+    let head = repo.head().trim().to_string();
+    let base = String::from_utf8(repo.git(["rev-parse", "HEAD~1"]))
+        .unwrap()
+        .trim()
+        .to_string();
+    repo.git([
+        "remote",
+        "add",
+        "origin",
+        "https://gitlab.example.com/acme/widgets",
+    ]);
+    let ours = |text: &str| {
+        text.replace(&"1".repeat(40), &head)
+            .replace(&"2".repeat(40), &base)
+    };
+    let glab = Arc::new(
+        FakeGlab::new()
+            .reply(answer(QUEUES))
+            .reply(answer(&ours(DETAIL)))
+            .reply(answer(&ours(DISCUSSION)))
+            .reply(answer(&ours(REFS)))
+            .reply(answer(DRAFTS_EMPTY))
+            .reply(answer(&created(101)))
+            .reply(answer(&created(102)))
+            .reply(answer(NO_CONTENT))
+            .reply(answer(APPROVED))
+            .reply(answer(&ours(DISCUSSION))),
+    );
+    let store = TempDir::new("e2e-pending");
+    let mut app = Harness::start_with_glab_storing(
+        &repo,
+        Arc::clone(&glab),
+        "gitlab.example.com",
+        Some(store.path().to_path_buf()),
+    )
+    .await;
+
+    app.type_text("G").await;
+    app.press(KeyCode::Enter).await;
+    app.assert_screen_contains("Add widget caching");
+    app.press(KeyCode::Char('f')).await;
+    assert_eq!(app.state().review.screen, ReviewScreen::Files(12));
+    app.assert_screen_contains("+two");
+    // A comment on the first numbered row, kept in the pending review.
+    app.type_text("a").await;
+    app.press(KeyCode::Enter).await;
+    app.type_text("Needs a test").await;
+    app.press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        .await;
+    let pending = |app: &Harness| {
+        app.state()
+            .review
+            .pending
+            .as_ref()
+            .and_then(|s| s.review())
+            .map(|r| r.comments.len())
+    };
+    assert_eq!(pending(&app), Some(1));
+    assert_eq!(glab.calls().len(), 3, "a pending comment reached GitLab");
+
+    // `S`, Approve, a summary, and `y`.
+    app.type_text("S").await;
+    assert_eq!(app.state().notice, None);
+    app.assert_screen_contains("Approve");
+    app.press(KeyCode::Enter).await;
+    app.type_text("Ship it").await;
+    app.press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        .await;
+    app.assert_screen_contains("Submit review (Approve) on !12 with 1 comment to GitLab? (y/n)");
+    app.type_text("y").await;
+
+    app.assert_screen_contains("Review submitted (Approve)");
+    assert_eq!(pending(&app), Some(0));
+    let calls = glab.calls();
+    let shape: Vec<String> = calls[3..]
+        .iter()
+        .map(|cmd| match &cmd.kind {
+            GlabCall::Rest { method, path, .. } => format!("{method:?} {}", path.render()),
+            other => format!("{other:?}").chars().take(7).collect(),
+        })
+        .collect();
+    let mr = "projects/17/merge_requests/7";
+    assert_eq!(
+        shape,
+        [
+            "Graphql".to_string(),
+            format!("Get {mr}/draft_notes"),
+            format!("Post {mr}/draft_notes"),
+            format!("Post {mr}/draft_notes"),
+            format!("Post {mr}/draft_notes/bulk_publish"),
+            format!("Post {mr}/approve"),
+            // The discussion, read again.
+            "Graphql".to_string(),
+        ]
+    );
+    let note: serde_json::Value = serde_json::from_slice(&calls[5].stdin()).unwrap();
+    assert_eq!(note["note"], "Needs a test");
+    assert_eq!(note["position"]["new_path"], "src/cache.rs");
+    assert_eq!(note["position"]["head_sha"], head.as_str());
+    let summary: serde_json::Value = serde_json::from_slice(&calls[6].stdin()).unwrap();
+    assert_eq!(summary, serde_json::json!({ "note": "Ship it" }));
+    let approve: serde_json::Value = serde_json::from_slice(&calls[8].stdin()).unwrap();
+    assert_eq!(approve, serde_json::json!({ "sha": head }));
+    assert!(matches!(
+        calls[8].kind,
+        GlabCall::Rest {
+            method: RestMethod::Post,
+            path: RestPath::Approve {
+                project: 17,
+                iid: 7
+            },
+            ..
+        }
+    ));
+    for cmd in &calls {
+        let line = cmd.display_line();
+        assert!(!line.contains("Ship") && !line.contains("Needs"), "{line}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn shift_b_in_branches_asks_github_once_and_only_for_an_opted_in_host() {
     use std::sync::Arc;
 

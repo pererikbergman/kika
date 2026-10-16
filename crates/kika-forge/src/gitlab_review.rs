@@ -10,6 +10,7 @@ use serde_json::json;
 
 use super::github::Refusal;
 use super::gitlab::{Glab, GlabCall};
+use super::gitlab_discussion::merge_request_id_ok;
 use super::review::{
     Check, CheckStatus, MAX_BODY, MAX_CHECKS, MAX_LABELS, MAX_REVIEWERS, MergeState, Mergeability,
     Nodes, PrDetail, PrSummary, QUEUE_SIZE, Queues, ReviewVerdict, capped_body, data_of, full_oid,
@@ -70,7 +71,7 @@ project(fullPath:$path){mergeRequests(state:opened,sort:UPDATED_DESC,first:50)\
 
 /// The detail query: fixed text; the project path and iid are variables.
 const DETAIL_QUERY: &str = "query($path:ID!,$iid:String!){project(fullPath:$path)\
-{mergeRequest(iid:$iid){title description state draft sourceBranch targetBranch \
+{mergeRequest(iid:$iid){id title description state draft sourceBranch targetBranch \
 conflicts detailedMergeStatus author{username} \
 labels(first:20){nodes{title}} reviewers(first:20){nodes{username}} \
 approvedBy(first:20){nodes{username}} diffRefs{headSha startSha baseSha} \
@@ -178,6 +179,8 @@ struct DetailProject {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MrNode {
+    /// The global id a write names the merge request by.
+    id: Option<String>,
     title: Option<String>,
     description: Option<String>,
     state: Option<String>,
@@ -282,7 +285,7 @@ fn read_detail(body: &[u8], number: u64, host: &str) -> Result<Option<PrDetail>,
     };
     Ok(Some(PrDetail {
         number,
-        node_id: None,
+        node_id: mr.id.filter(|id| merge_request_id_ok(id)),
         title: line(mr.title.as_deref().unwrap_or_default()),
         author: username(mr.author),
         state,
@@ -558,7 +561,10 @@ mod tests {
         assert!(argv(&cmd).iter().all(|a| !a.contains("acme") && a != "42"));
 
         assert_eq!(pr.number, 42);
-        assert_eq!(pr.node_id, None);
+        assert_eq!(
+            pr.node_id.as_deref(),
+            Some("gid://gitlab/MergeRequest/4242")
+        );
         assert_eq!(pr.title, "Add widget caching");
         assert_eq!(pr.author, "octocat");
         assert_eq!((pr.state, pr.draft), (PrState::Open, false));
@@ -648,6 +654,26 @@ mod tests {
         assert_eq!(pr.mergeable, Mergeability::Unknown);
         assert_eq!(pr.checks, []);
         assert_eq!(pr.head_oid, None);
+    }
+
+    #[test]
+    fn only_a_merge_requests_global_id_is_kept_as_its_node_id() {
+        let id = "\"gid://gitlab/MergeRequest/4242\"";
+        for bad in [
+            "\"gid://gitlab/Note/4242\"",
+            "\"gid://gitlab/MergeRequest/42a\"",
+            "\"gid://gitlab/MergeRequest/1\\u001b[31m\"",
+            "\"MR_kwDOA1\"",
+            "\"\"",
+            "null",
+        ] {
+            let body = DETAIL.replace(id, bad);
+            let pr = detail(&FakeGlab::new().reply(answer(&body)), 42);
+            assert_eq!(pr.unwrap().unwrap().node_id, None, "{bad}");
+        }
+        let gone = DETAIL.replace(&format!("\"id\":{id},"), "");
+        let pr = detail(&FakeGlab::new().reply(answer(&gone)), 42);
+        assert_eq!(pr.unwrap().unwrap().node_id, None);
     }
 
     #[test]

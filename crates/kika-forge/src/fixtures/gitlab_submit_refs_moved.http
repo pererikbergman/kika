@@ -1,0 +1,6 @@
+HTTP/2.0 200 OK
+Content-Type: application/json
+Ratelimit-Remaining: 1990
+Ratelimit-Reset: 1700000060
+
+{"data":{"mergeRequest":{"iid":"7","project":{"id":"gid://gitlab/Project/17"},"diffRefs":{"baseSha":"3333333333333333333333333333333333333333","startSha":"2222222222222222222222222222222222222222","headSha":"4444444444444444444444444444444444444444"}}}}

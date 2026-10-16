@@ -7,7 +7,7 @@
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use super::discussion_write::{POSTING, WAIT};
+use super::discussion_write::{POSTING, wait};
 use super::pending::CommentTarget;
 use super::state::{ReviewScreen, ReviewState};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
@@ -287,7 +287,7 @@ impl AppState {
     /// While its text is being posted it stays.
     pub(crate) fn escape_comment(&mut self) {
         if self.composer_posting() {
-            self.notice = Some(WAIT.into());
+            self.notice = Some(wait(self.review_words()).into());
             return;
         }
         let Some(composer) = &self.review.composer else {

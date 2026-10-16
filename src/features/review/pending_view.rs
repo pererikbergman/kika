@@ -126,13 +126,16 @@ fn where_label(target: &CommentTarget) -> String {
     format!("{path}:{}", lines_label(target.start, target.end))
 }
 
-/// The cue on a composer whose text goes to GitHub, longest first: the
-/// first that fits is drawn.
-const POSTS_CUES: [&str; 3] = [
-    " · ctrl-s posts to GitHub ",
-    " ctrl-s posts to GitHub ",
-    " posts to GitHub ",
-];
+/// The cue on a composer whose text goes to the forge `words` names,
+/// longest first: the first that fits is drawn.
+fn posts_cues(words: &Words) -> [String; 3] {
+    let name = words.name;
+    [
+        format!(" · ctrl-s posts to {name} "),
+        format!(" ctrl-s posts to {name} "),
+        format!(" posts to {name} "),
+    ]
+}
 const POSTING_CUES: [&str; 2] = [" · posting… ", " posting… "];
 /// The fewest columns a reply's label is cut to before it is dropped.
 const MIN_LABEL: usize = 8;
@@ -144,7 +147,7 @@ const EDITOR_CUE: &str = " · ctrl-e editor ";
 /// The composer's title for a box `room` columns inside: what is written
 /// and where it goes, then the editor cue; a review's summary also counts
 /// the `comments` it carries. The editor cue gives way first; for a post
-/// the cue that it goes to GitHub, or that it is on its way, is kept whole
+/// the cue that it goes to the forge, or that it is on its way, is kept whole
 /// and the label gives way next. While posting there is no editor cue,
 /// since the text may not change.
 fn composer_title(
@@ -176,6 +179,7 @@ fn base_title(
     room: usize,
 ) -> (String, bool) {
     let sign = words.sign;
+    let posts = posts_cues(words);
     let head = match &composer.kind {
         ComposerKind::Line {
             target,
@@ -187,7 +191,7 @@ fn base_title(
         } => return (format!(" Comment on {} ", where_label(target)), true),
         ComposerKind::Reply { label, .. } => {
             let label = sanitize(label.as_bytes());
-            let fixed = width_of(" Reply to ") + width_of(POSTS_CUES[0]);
+            let fixed = width_of(" Reply to ") + width_of(&posts[0]);
             let cut = room.saturating_sub(fixed);
             if cut < MIN_LABEL.min(width_of(&label)) {
                 String::new()
@@ -202,10 +206,14 @@ fn base_title(
             comments_label(comments)
         ),
     };
-    let cues: &[&str] = if posting { &POSTING_CUES } else { &POSTS_CUES };
+    let cues: Vec<&str> = if posting {
+        POSTING_CUES.to_vec()
+    } else {
+        posts.iter().map(String::as_str).collect()
+    };
     let (with_head, alone) = cues
         .split_first()
-        .map_or((None, cues), |(f, r)| (Some(*f), r));
+        .map_or((None, &cues[..]), |(f, r)| (Some(*f), r));
     if let Some(cue) = with_head.filter(|_| !head.is_empty()) {
         let title = format!("{head}{cue}");
         if width_of(&title) <= room {
@@ -382,7 +390,7 @@ mod tests {
     use crate::view::buffer_rows;
 
     fn github() -> &'static Words {
-        kika_forge::forge::words(kika_forge::url::ForgeKind::GitHub)
+        kika_forge::forge::words_or_default(None)
     }
     use kika_forge::pending::PendingReview;
 
@@ -537,6 +545,8 @@ mod tests {
             start: None,
             end: right(1),
             head: crate::features::review::pending::tests::HEAD.into(),
+            start_pos: None,
+            end_pos: None,
         };
         let edit = Composer::new(ComposerKind::Line {
             target,
@@ -568,6 +578,38 @@ mod tests {
         assert_eq!(
             composer_title(&general, github(), 0, true, 80),
             " Comment on #12 · posting… "
+        );
+    }
+
+    #[test]
+    fn on_gitlab_the_composer_posts_to_gitlab() {
+        let mut state = crate::features::review::state::tests::on_gitlab(commenting());
+        let detail = state.review.detail.as_mut().unwrap();
+        detail.number = 12;
+        detail.node_id = Some("gid://gitlab/MergeRequest/1".into());
+        // An approval's summary composer: its text goes to the forge.
+        type_char(&mut state, 'S');
+        press(&mut state, crossterm::event::KeyCode::Enter);
+        let rows = buffer_rows(&draw(&state));
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("Review summary: Approve !12")
+                    && r.contains("ctrl-s posts to GitLab")),
+            "{rows:#?}"
+        );
+        assert!(!rows.iter().any(|r| r.contains("GitHub")), "{rows:#?}");
+        let gitlab = kika_forge::forge::words(kika_forge::url::ForgeKind::GitLab);
+        let general = Composer::new(ComposerKind::General {
+            number: 12,
+            subject: "gid://gitlab/MergeRequest/1".into(),
+        });
+        assert_eq!(
+            composer_title(&general, gitlab, 0, false, 80),
+            " Comment on !12 · ctrl-s posts to GitLab · ctrl-e editor "
+        );
+        assert_eq!(
+            composer_title(&general, gitlab, 0, false, 24),
+            " ctrl-s posts to GitLab "
         );
     }
 

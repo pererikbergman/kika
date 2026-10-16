@@ -9,7 +9,7 @@
 use std::path::Path;
 
 use super::comment_editor::{CommentEditor, ComposerKind};
-use super::discussion_write::WAIT;
+use super::discussion_write::wait;
 use crate::effect::Effect;
 use crate::handoff::{HandOff, KeptFile};
 use crate::keymap::Reason;
@@ -62,7 +62,9 @@ pub fn edited_comment(bytes: &[u8]) -> Result<String, String> {
 
 /// Why `ctrl-e` cannot open the editor now: the text is being posted.
 pub(crate) fn external_editor_disabled(state: &AppState) -> Option<Reason> {
-    state.composer_posting().then(|| WAIT.into())
+    state
+        .composer_posting()
+        .then(|| wait(state.review_words()).into())
 }
 
 /// `path`, made safe to draw.
@@ -78,7 +80,7 @@ impl AppState {
             return vec![];
         };
         if self.composer_posting() {
-            self.notice = Some(WAIT.into());
+            self.notice = Some(wait(self.review_words()).into());
             return vec![];
         }
         let stamp = ComposerStamp {
@@ -287,11 +289,17 @@ mod tests {
         type_char(&mut state, 'y');
         assert!(state.composer_posting());
         assert_eq!(ctrl_e(&mut state), []);
-        assert_eq!(state.notice.as_deref(), Some(WAIT));
+        assert_eq!(
+            state.notice.as_deref(),
+            Some(crate::features::review::discussion_write::tests::WAIT)
+        );
         // Asked directly, as a stale key could, it still waits.
         state.notice = None;
         assert_eq!(state.edit_comment_externally(), []);
-        assert_eq!(state.notice.as_deref(), Some(WAIT));
+        assert_eq!(
+            state.notice.as_deref(),
+            Some(crate::features::review::discussion_write::tests::WAIT)
+        );
     }
 
     #[test]
