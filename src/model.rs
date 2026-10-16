@@ -1372,14 +1372,18 @@ impl AppState {
             return self.start_review(number);
         }
         self.workspace_started = true;
-        match self.repo.clone() {
+        // Each opted-in forge kind's CLI is checked once, in the background;
+        // no refresh asks the forge before it answers.
+        let mut effects = self.check_forge_clis();
+        effects.extend(match self.repo.clone() {
             Some(path) => {
                 let mut effects = vec![self.record_recent(path)];
                 effects.extend(self.reload_repo());
                 effects
             }
             None => self.open_recent(),
-        }
+        });
+        effects
     }
 
     /// Forget what belonged to the repository being left: results still in

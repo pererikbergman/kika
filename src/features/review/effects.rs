@@ -573,6 +573,7 @@ mod tests {
             glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
             sink: CommandSink::new(),
             cache_dir: None,
+            cli: kika_forge::cli::CliGate::default(),
         }));
         runtime.spawn(Effect::LoadPrDetail {
             tag: forge_tag(),
@@ -622,6 +623,7 @@ mod tests {
                 glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
                 sink: CommandSink::new(),
                 cache_dir: None,
+                cli: kika_forge::cli::CliGate::default(),
             })
         };
         let git = Arc::new(FakeRunner::new());
@@ -697,6 +699,7 @@ mod tests {
                 glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
                 sink: CommandSink::new(),
                 cache_dir: None,
+                cli: kika_forge::cli::CliGate::default(),
             })
         };
         let git = Arc::new(FakeRunner::new());
@@ -761,6 +764,7 @@ mod tests {
             glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
             sink: CommandSink::new(),
             cache_dir: Some(cache_dir.clone()),
+            cli: kika_forge::cli::CliGate::default(),
         }));
         let merge = Effect::MergePullRequest {
             tag: forge_tag(),
@@ -818,6 +822,7 @@ mod tests {
             glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
             sink: CommandSink::new(),
             cache_dir: None,
+            cli: kika_forge::cli::CliGate::default(),
         }));
         runtime.spawn(Effect::MergePullRequest {
             tag: forge_tag(),
@@ -860,6 +865,7 @@ mod tests {
                 glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
                 sink: CommandSink::new(),
                 cache_dir: None,
+                cli: kika_forge::cli::CliGate::default(),
             })
         };
         let mark = |host: ForgeHost| Effect::SetFileViewed {
@@ -933,6 +939,7 @@ mod tests {
                 glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
                 sink: CommandSink::new(),
                 cache_dir: None,
+                cli: kika_forge::cli::CliGate::default(),
             })
         };
         let reply = DiscussionWrite::Reply {

@@ -11,6 +11,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::anchor::{GhLine, GhSide};
+use super::cli::CliStatus;
 use super::github::{Answer, Gh, GhCall, GhOutput, classify, refusal, split_include};
 use super::pending::{MAX_BODY, MAX_COMMENTS, PendingComment};
 use super::review::node_id_ok;
@@ -250,7 +251,9 @@ impl Gh<'_> {
             |output| read_write(output, now, field, write),
             |result| match result {
                 Ok(_) => CommandOutcome::Ok,
-                Err(CreateError::Status(ForgeStatus::NoGh)) => CommandOutcome::NotStarted,
+                Err(CreateError::Status(ForgeStatus::Cli(CliStatus::NotInstalled))) => {
+                    CommandOutcome::NotStarted
+                }
                 Err(_) => CommandOutcome::Failed(None),
             },
         )
@@ -755,7 +758,10 @@ mod tests {
                 "{w:?}"
             );
             let cases = [
-                (FakeGh::new().missing(), ForgeStatus::NoGh),
+                (
+                    FakeGh::new().missing(),
+                    ForgeStatus::Cli(CliStatus::NotInstalled),
+                ),
                 (
                     FakeGh::new().reply(failure(1, HTTP_401_STDERR)),
                     ForgeStatus::NotLoggedIn,

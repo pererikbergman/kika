@@ -46,6 +46,7 @@ pub(crate) fn update(state: &mut AppState, intent: PullRequestsIntent) -> Vec<Ef
         PullRequestsIntent::Created { tag, result } => {
             return state.pull_request_created(tag, result);
         }
+        PullRequestsIntent::CliChecked { statuses } => return state.forge_clis_checked(statuses),
     }
     Vec::new()
 }

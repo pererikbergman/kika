@@ -12,7 +12,7 @@ use crate::rows::{DIFF_MARK, clock, diff_mark_style};
 use crate::view::{
     PanelLook, clip, elide_right, fit, list_title, no_matches, pad, range_row, scrolled, width_of,
 };
-use kika_forge::forge::{Words, words};
+use kika_forge::forge::{Words, cli_text, words};
 use kika_forge::{CiState, ForgeState, ForgeStatus, ForgeView, PrBadge, PrState};
 use kika_git::branches::{Branch, BranchName, LogRow, Track};
 
@@ -276,22 +276,24 @@ fn forge_line(forge: &ForgeState, now: i64, width: usize) -> Option<String> {
     let kind = forge.kind()?;
     let name = kind.name();
     let Words { cli, requests, .. } = words(kind);
-    let problem = match forge.status {
-        ForgeView::Off | ForgeView::Cached | ForgeView::Fresh => return None,
-        ForgeView::Updating => return Some(elide_right(&format!("{name}: updating…"), width)),
-        ForgeView::Problem(problem) => problem,
+    // A CLI that is missing, broken or too old blocks every call, so it
+    // is said first, whatever the last load came to.
+    let problem = match (forge.cli_problem(), forge.status) {
+        (Some(status), _) => ForgeStatus::Cli(status),
+        (None, ForgeView::Off | ForgeView::Cached | ForgeView::Fresh) => return None,
+        (None, ForgeView::Updating) => {
+            return Some(elide_right(&format!("{name}: updating…"), width));
+        }
+        (None, ForgeView::Problem(problem)) => problem,
     };
     let (what, hint) = match problem {
+        ForgeStatus::Cli(status) => cli_text(kind, status),
         ForgeStatus::NotLoggedIn => (
             format!("{name}: not logged in"),
             Some(format!(
                 "run {cli} auth login --hostname {}",
                 repo.host.to_ascii_lowercase()
             )),
-        ),
-        ForgeStatus::NoGh => (
-            format!("{name}: {cli} not found"),
-            Some(format!("install the {name} CLI to see {requests}")),
         ),
         ForgeStatus::Offline => (format!("{name}: offline"), None),
         ForgeStatus::NoAccess => (format!("{name}: repository not found or no access"), None),
@@ -387,6 +389,8 @@ fn log_row(row: &LogRow) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -395,6 +399,7 @@ mod tests {
     use crate::model::{AppState, Context, Focus};
     use crate::test_support::{load_list, reversed_at, spinner_tick};
     use crate::view::{buffer_rows, render};
+    use kika_forge::cli::{CliStatus, CliVersion};
     use kika_forge::url::ForgeKind;
 
     fn draw(state: &AppState, width: u16, height: u16) -> Vec<String> {
@@ -564,8 +569,8 @@ mod tests {
                 "GitHub: not logged in · run gh auth login --hostname github.com",
             ),
             (
-                ForgeStatus::NoGh,
-                "GitHub: gh not found · install the GitHub CLI to see pull requests",
+                ForgeStatus::Cli(CliStatus::NotInstalled),
+                "GitHub: gh not installed · install the GitHub CLI to see pull requests",
             ),
             (ForgeStatus::Offline, "GitHub: offline"),
             (
@@ -581,7 +586,8 @@ mod tests {
         for (problem, want) in cases {
             state.forge.status = ForgeView::Problem(problem);
             let cached = match problem {
-                ForgeStatus::RateLimited => want.to_string(),
+                // The CLI's hint fills the panel: `cached` gives way.
+                ForgeStatus::RateLimited | ForgeStatus::Cli(_) => want.to_string(),
                 _ => format!("{want} · cached"),
             };
             assert_eq!(
@@ -656,8 +662,8 @@ mod tests {
                 "GitLab: not logged in · run glab auth login --hostname gitlab.example.com",
             ),
             (
-                ForgeStatus::NoGh,
-                "GitLab: glab not found · install the GitLab CLI to see merge requests",
+                ForgeStatus::Cli(CliStatus::NotInstalled),
+                "GitLab: glab not installed · install the GitLab CLI to see merge requests",
             ),
             (ForgeStatus::Offline, "GitLab: offline"),
             (
@@ -685,6 +691,73 @@ mod tests {
     }
 
     #[test]
+    fn a_cli_check_that_failed_is_said_before_any_forge_call() {
+        let too_old = CliStatus::TooOld {
+            found: CliVersion {
+                major: 1,
+                minor: 2,
+                patch: 0,
+            },
+            needed: CliVersion {
+                major: 1,
+                minor: 5,
+                patch: 0,
+            },
+        };
+        // GitLab, before any load asked the forge: the row comes from the
+        // check alone, whatever the last load said.
+        let mut state = on_gitlab(&[("main", None)]);
+        state.forge.status = ForgeView::Cached;
+        let line = |state: &AppState| line_from(state, 240, "GitLab:");
+        for (status, want) in [
+            (
+                CliStatus::NotInstalled,
+                "GitLab: glab not installed · install the GitLab CLI to see merge requests",
+            ),
+            (
+                CliStatus::Unusable,
+                "GitLab: glab not working · check that glab --version runs",
+            ),
+            (
+                too_old,
+                "GitLab: glab 1.2.0 is too old · update to glab 1.5.0 or newer",
+            ),
+        ] {
+            state.forge.cli = Some(HashMap::from([(ForgeKind::GitLab, status)]));
+            assert_eq!(line(&state).as_deref(), Some(want), "{status:?}");
+            assert!(!contains(&draw(&state, 240, 24), "GitHub"), "{status:?}");
+            // A load that ended in the same status draws the same row.
+            state.forge.cli = Some(HashMap::new());
+            state.forge.status = ForgeView::Problem(ForgeStatus::Cli(status));
+            assert_eq!(line(&state).as_deref(), Some(want), "{status:?}");
+            state.forge.status = ForgeView::Cached;
+        }
+        // Ready, or another kind's problem, says nothing.
+        state.forge.cli = Some(HashMap::from([
+            (ForgeKind::GitLab, CliStatus::Ready),
+            (ForgeKind::GitHub, CliStatus::NotInstalled),
+        ]));
+        assert_eq!(line(&state), None);
+
+        // GitHub's own words.
+        let mut state = with_badges(&[("main", None)]);
+        state.forge.status = ForgeView::Fresh;
+        state.forge.cli = Some(HashMap::from([(
+            ForgeKind::GitHub,
+            CliStatus::NotInstalled,
+        )]));
+        assert_eq!(
+            forge_line_at(&state, 240).as_deref(),
+            Some("GitHub: gh not installed · install the GitHub CLI to see pull requests")
+        );
+        state.forge.cli = Some(HashMap::from([(ForgeKind::GitHub, CliStatus::Unusable)]));
+        assert_eq!(
+            forge_line_at(&state, 240).as_deref(),
+            Some("GitHub: gh not working · check that gh --version runs")
+        );
+    }
+
+    #[test]
     fn at_80_by_24_the_side_panel_line_says_what_is_wrong_first() {
         let mut state = with_badges(&[("main", Some(pr(1, PrState::Open, None)))]);
         let mut at_80 = |problem| {
@@ -698,8 +771,8 @@ mod tests {
             Some("GitHub: not logged in")
         );
         assert_eq!(
-            at_80(ForgeStatus::NoGh).as_deref(),
-            Some("GitHub: gh not found")
+            at_80(ForgeStatus::Cli(CliStatus::NotInstalled)).as_deref(),
+            Some("GitHub: gh not installed")
         );
         assert_eq!(
             at_80(ForgeStatus::NoAccess).as_deref(),

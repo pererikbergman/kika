@@ -1,6 +1,7 @@
 //! The one forge client. Every `gh` and `glab` call goes through
-//! [`ForgeContext`]: it checks the repository is on the host and that the
-//! host's `[forge.allow]` lets it through, and only then hands out the
+//! [`ForgeContext`]: it checks the repository is on the host, that the
+//! host's `[forge.allow]` lets it through and that the last CLI check of
+//! its forge kind did not shut it, and only then hands out the
 //! host's forge adapter ([`GitHubForge`](crate::forge::GitHubForge) or
 //! [`GitLabForge`](crate::forge::GitLabForge)) as a [`Forge`]. The adapter
 //! runs its CLI in the cache directory and reads the clock, so no caller
@@ -9,6 +10,7 @@
 use std::path::PathBuf;
 
 use super::cache;
+use super::cli::CliStatus;
 use super::discussion_write::{DiscussionWrite, Written};
 use super::forge::{self, Forge};
 use super::github::Gh;
@@ -17,6 +19,26 @@ use super::merge::MergeMethod;
 use super::task::ForgeContext;
 use super::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
 use kika_git::commit_files::CommitId;
+
+/// Why [`ForgeContext::forge`] hands out no adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shut {
+    /// The repository is on another host, or the allow-list leaves it out.
+    Outside,
+    /// The forge kind's CLI is missing, broken or too old.
+    Cli(CliStatus),
+}
+
+impl Shut {
+    /// What a create, merge or write answers: an outside repository
+    /// fails as ever, a shut CLI says why.
+    fn refused(self) -> CreateError {
+        match self {
+            Shut::Outside => CreateError::Status(ForgeStatus::Failed),
+            Shut::Cli(status) => CreateError::Status(ForgeStatus::Cli(status)),
+        }
+    }
+}
 
 impl ForgeContext {
     /// Seconds since the epoch, for rate limits and the cache.
@@ -41,16 +63,32 @@ impl ForgeContext {
         repo.host.eq_ignore_ascii_case(host.as_str()) && host.allows(repo)
     }
 
-    /// The forge adapter of `host`'s kind for `repo`, or `None` when
-    /// `repo` is on another host or the host's allow-list leaves it out:
-    /// then nothing may reach the network.
+    /// The forge adapter of `host`'s kind for `repo`, or why not: `repo`
+    /// is on another host or the host's allow-list leaves it out, or the
+    /// last check of the kind's CLI was not `Ready`. Then nothing may
+    /// reach the network.
     pub fn forge<'a>(
         &'a self,
         host: &'a ForgeHost,
         repo: &ForgeRepo,
         now: i64,
-    ) -> Option<Box<dyn Forge + 'a>> {
-        Self::opens(host, repo).then(|| forge::adapter(self, host, now))
+    ) -> Result<Box<dyn Forge + 'a>, Shut> {
+        if !Self::opens(host, repo) {
+            return Err(Shut::Outside);
+        }
+        if let Some(status) = self.cli.shut(host.kind()) {
+            return Err(Shut::Cli(status));
+        }
+        Ok(forge::adapter(self, host, now))
+    }
+
+    /// Check `host`'s forge kind's CLI (see [`Forge::check`]) and keep the
+    /// answer in the gate, which opens or shuts the kind's calls. Local
+    /// only: the version command names no host and reads no token.
+    pub fn check_cli(&self, host: &ForgeHost) -> CliStatus {
+        let status = forge::adapter(self, host, self.now()).check();
+        self.cli.set(host.kind(), status);
+        status
     }
 
     /// The `gh` calls for `host`. Only [`forge::adapter`] builds one,
@@ -88,7 +126,7 @@ impl ForgeContext {
         title: &str,
     ) -> Result<(u64, String), CreateError> {
         self.forge(host, repo, self.now())
-            .ok_or(CreateError::Status(ForgeStatus::Failed))?
+            .map_err(Shut::refused)?
             .create_pull(repo, head, base, title)
     }
 
@@ -103,7 +141,7 @@ impl ForgeContext {
         head_oid: &CommitId,
     ) -> Result<(), CreateError> {
         self.forge(host, repo, self.now())
-            .ok_or(CreateError::Status(ForgeStatus::Failed))?
+            .map_err(Shut::refused)?
             .merge_pull(repo, number, method, head_oid)
     }
 
@@ -118,7 +156,7 @@ impl ForgeContext {
         viewed: bool,
     ) -> Result<(), CreateError> {
         self.forge(host, repo, self.now())
-            .ok_or(CreateError::Status(ForgeStatus::Failed))?
+            .map_err(Shut::refused)?
             .set_file_viewed(node_id, path, viewed)
     }
 
@@ -132,7 +170,7 @@ impl ForgeContext {
         write: &DiscussionWrite,
     ) -> Result<Written, CreateError> {
         self.forge(host, repo, self.now())
-            .ok_or(CreateError::Status(ForgeStatus::Failed))?
+            .map_err(Shut::refused)?
             .write_discussion(write)
     }
 }
@@ -145,7 +183,7 @@ mod tests {
     use crate::allow::AllowRule;
     use crate::forge::{Capability, Unsupported};
     use crate::github::fixtures::CREATE_201;
-    use crate::github::{FakeGh, answer};
+    use crate::github::{FakeGh, GhCall, answer};
     use crate::gitlab::FakeGlab;
     use crate::url::ForgeKind;
     use kika_git::fake::TempDir;
@@ -165,6 +203,7 @@ mod tests {
             glab: Arc::new(FakeGlab::new()),
             sink: CommandSink::new(),
             cache_dir,
+            cli: crate::cli::CliGate::default(),
         }
     }
 
@@ -177,7 +216,7 @@ mod tests {
             .with_allow(vec![AllowRule::parse("someone-else").unwrap()]);
         let failed = Err(CreateError::Status(ForgeStatus::Failed));
 
-        assert!(ctx.forge(&host, &repo(), 0).is_none());
+        assert!(matches!(ctx.forge(&host, &repo(), 0), Err(Shut::Outside)));
         assert_eq!(
             ctx.create_pull(&host, &repo(), "topic", "main", "Add login")
                 .map(|_| ()),
@@ -198,7 +237,7 @@ mod tests {
         let host = ForgeHost::parse("gitlab.example").unwrap();
         let failed = Err(CreateError::Status(ForgeStatus::Failed));
 
-        assert!(ctx.forge(&host, &repo(), 0).is_none());
+        assert!(matches!(ctx.forge(&host, &repo(), 0), Err(Shut::Outside)));
         assert_eq!(
             ctx.create_pull(&host, &repo(), "topic", "main", "Add login")
                 .map(|_| ()),
@@ -217,7 +256,7 @@ mod tests {
             host: "GitHub.com".into(),
             ..repo()
         };
-        assert!(ctx.forge(&github, &shown, 0).is_some());
+        assert!(ctx.forge(&github, &shown, 0).is_ok());
     }
 
     fn gitlab_repo() -> ForgeRepo {
@@ -240,11 +279,13 @@ mod tests {
             glab: glab.clone(),
             sink: CommandSink::new(),
             cache_dir: None,
+            cli: crate::cli::CliGate::default(),
         };
         let failed = Err(CreateError::Status(ForgeStatus::Failed));
         let lab = gitlab("gitlab.example.com");
 
-        let kind = |host: &ForgeHost, repo: &ForgeRepo| ctx.forge(host, repo, 0).map(|f| f.kind());
+        let kind =
+            |host: &ForgeHost, repo: &ForgeRepo| ctx.forge(host, repo, 0).ok().map(|f| f.kind());
 
         // A GitLab-kind host gets the GitLab adapter, which never reaches
         // `gh`, not even to create or merge.
@@ -391,5 +432,64 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(runner.calls()[0].cwd, std::env::temp_dir());
+    }
+
+    #[test]
+    fn a_shut_cli_blocks_every_call_until_a_check_opens_it_again() {
+        let gh = Arc::new(
+            FakeGh::new()
+                .missing()
+                .reply(answer("gh version 2.40.1 (2023-12-13)\n"))
+                .reply(answer(CREATE_201)),
+        );
+        let ctx = context(gh.clone(), None);
+        let host = ForgeHost::parse("github.com").unwrap();
+        // Open until a check answers.
+        assert!(ctx.forge(&host, &repo(), 0).is_ok());
+        assert_eq!(ctx.check_cli(&host), CliStatus::NotInstalled);
+        let not_installed = CliStatus::NotInstalled;
+        assert!(matches!(
+            ctx.forge(&host, &repo(), 0),
+            Err(Shut::Cli(status)) if status == not_installed
+        ));
+        // Every clone shares the gate.
+        assert!(ctx.clone().forge(&host, &repo(), 0).is_err());
+        let shut = Err(CreateError::Status(ForgeStatus::Cli(not_installed)));
+        assert_eq!(
+            ctx.create_pull(&host, &repo(), "topic", "main", "Add login")
+                .map(|_| ()),
+            shut
+        );
+        let head = CommitId::parse(&"a".repeat(40)).unwrap();
+        assert_eq!(
+            ctx.merge_pull(&host, &repo(), 7, MergeMethod::Merge, &head),
+            shut
+        );
+        assert_eq!(
+            ctx.set_file_viewed(&host, &repo(), "PR_kwDOA1", "src/a.rs", true),
+            shut
+        );
+        let write = DiscussionWrite::Comment {
+            subject: "PR_kwDOA1".into(),
+            body: "Thanks".into(),
+        };
+        assert_eq!(
+            ctx.write_discussion(&host, &repo(), &write).map(|_| ()),
+            shut
+        );
+        // `gh`'s answer shuts GitHub only.
+        let lab = gitlab("gitlab.example.com");
+        assert!(ctx.forge(&lab, &gitlab_repo(), 0).is_ok());
+        assert_eq!(gh.calls().len(), 1);
+
+        // Installed since: the next check opens it again.
+        assert_eq!(ctx.check_cli(&host), CliStatus::Ready);
+        assert!(
+            ctx.create_pull(&host, &repo(), "topic", "main", "Add login")
+                .is_ok()
+        );
+        let kinds: Vec<_> = gh.calls().into_iter().map(|c| c.kind).collect();
+        assert_eq!(kinds[..2], [GhCall::Version, GhCall::Version]);
+        assert_eq!(kinds.len(), 3);
     }
 }

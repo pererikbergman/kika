@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::json;
 
+use super::cli::CliStatus;
 use super::head::Head;
 use super::url::pull_url;
 use super::{CiState, CreateError, ForgeHost, ForgeRepo, ForgeStatus, PrBadge, PrState};
@@ -75,6 +76,9 @@ pub enum GhCall {
     /// A REST `PUT` to a pull request's merge `path`; `body` is the JSON
     /// for stdin, holding the method and the head commit it must merge.
     Merge { path: String, body: Vec<u8> },
+    /// `gh --version`: local, with no host and no stdin, to learn that
+    /// `gh` is installed and usable.
+    Version,
 }
 
 /// One `gh api` call: the host, and what it asks.
@@ -135,6 +139,7 @@ impl GhCommand {
             ]
             .map(String::from)
             .into(),
+            GhCall::Version => vec!["--version".to_string()],
         };
         args.into_iter().map(OsString::from).collect()
     }
@@ -167,6 +172,7 @@ impl GhCommand {
                 "gh api --include --hostname {} --method PUT {path} --input -",
                 self.host
             ),
+            GhCall::Version => "gh --version".to_string(),
         }
     }
 
@@ -176,7 +182,7 @@ impl GhCommand {
             GhCall::Graphql { body } | GhCall::Create { body, .. } | GhCall::Merge { body, .. } => {
                 body.clone()
             }
-            GhCall::Probe { .. } => Vec::new(),
+            GhCall::Probe { .. } | GhCall::Version => Vec::new(),
         }
     }
 }
@@ -371,7 +377,9 @@ impl Gh<'_> {
             |answer| answer,
             |answer| match answer {
                 Answer::NotModified | Answer::Body { .. } => CommandOutcome::Ok,
-                Answer::Failed(ForgeStatus::NoGh) => CommandOutcome::NotStarted,
+                Answer::Failed(ForgeStatus::Cli(CliStatus::NotInstalled)) => {
+                    CommandOutcome::NotStarted
+                }
                 _ => CommandOutcome::Failed(None),
             },
         )
@@ -398,7 +406,9 @@ impl Gh<'_> {
                 },
                 |result| match result {
                     Ok(_) => CommandOutcome::Ok,
-                    Err(Refusal::Status(ForgeStatus::NoGh)) => CommandOutcome::NotStarted,
+                    Err(Refusal::Status(ForgeStatus::Cli(CliStatus::NotInstalled))) => {
+                        CommandOutcome::NotStarted
+                    }
                     Err(_) => CommandOutcome::Failed(None),
                 },
             );
@@ -435,7 +445,9 @@ impl Gh<'_> {
             |output| read_created(output, now, host, repo),
             |result| match result {
                 Ok(_) => CommandOutcome::Ok,
-                Err(CreateError::Status(ForgeStatus::NoGh)) => CommandOutcome::NotStarted,
+                Err(CreateError::Status(ForgeStatus::Cli(CliStatus::NotInstalled))) => {
+                    CommandOutcome::NotStarted
+                }
                 Err(_) => CommandOutcome::Failed(None),
             },
         )
@@ -774,7 +786,9 @@ pub fn valid_etag(value: &str) -> Option<String> {
 pub fn classify(output: io::Result<GhOutput>, now: i64) -> Answer {
     let output = match output {
         Ok(output) => output,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Answer::Failed(ForgeStatus::NoGh),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Answer::Failed(ForgeStatus::Cli(CliStatus::NotInstalled));
+        }
         Err(_) => return Answer::Failed(ForgeStatus::Failed),
     };
     if output.timed_out {
@@ -1599,7 +1613,10 @@ mod tests {
                 }),
                 ForgeStatus::NoAccess,
             ),
-            (FakeGh::new().missing(), ForgeStatus::NoGh),
+            (
+                FakeGh::new().missing(),
+                ForgeStatus::Cli(CliStatus::NotInstalled),
+            ),
             (
                 FakeGh::new().reply(failure(1, OTHER_STDERR)),
                 ForgeStatus::Failed,
@@ -1733,7 +1750,10 @@ mod tests {
             })
         );
         let cases = [
-            (FakeGh::new().missing(), ForgeStatus::NoGh),
+            (
+                FakeGh::new().missing(),
+                ForgeStatus::Cli(CliStatus::NotInstalled),
+            ),
             (
                 FakeGh::new().reply(failure(1, HTTP_401_STDERR)),
                 ForgeStatus::NotLoggedIn,
@@ -1800,7 +1820,10 @@ mod tests {
         let runner = FakeGh::new().reply(answer(STATES)).missing();
         let host = host();
         let result = gh(&runner, &sink, &host).fetch_badges(&repo(), &own(&names(60)));
-        assert_eq!(result, Err(Refusal::Status(ForgeStatus::NoGh)));
+        assert_eq!(
+            result,
+            Err(Refusal::Status(ForgeStatus::Cli(CliStatus::NotInstalled)))
+        );
         let events = events.lock().unwrap();
         let line = "gh api graphql --include --hostname github.com --input -";
         match events.as_slice() {

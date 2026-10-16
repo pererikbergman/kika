@@ -11,7 +11,9 @@ use crate::background;
 use crate::effect::{Tag, log_program};
 use crate::features::pull_requests::PullRequestsIntent;
 use crate::intent::AppIntent;
+use kika_forge::cli::CliStatus;
 use kika_forge::task::{ForgeContext, Load, LoadEvent, run_load};
+use kika_forge::url::ForgeKind;
 use kika_forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
 use kika_git::GitRunner;
 use kika_git::branches::BranchName;
@@ -71,6 +73,36 @@ pub(crate) fn load(
             );
         }
     }
+}
+
+/// Check the CLI of each forge kind among `hosts`, once per kind with its
+/// first host, writing each answer into the gate before it is sent back
+/// as one `PullRequestsIntent::CliChecked`. A kind with no host is never
+/// run. With no `forge` client nothing runs and nothing answers.
+pub(crate) fn check_clis(
+    forge: Option<ForgeContext>,
+    tx: UnboundedSender<AppIntent>,
+    hosts: Vec<ForgeHost>,
+) {
+    let Some(forge) = forge else {
+        return;
+    };
+    background::run(
+        tx,
+        move || {
+            let mut statuses: Vec<(ForgeKind, CliStatus)> = Vec::new();
+            for host in &hosts {
+                if statuses.iter().all(|(kind, _)| *kind != host.kind()) {
+                    statuses.push((host.kind(), forge.check_cli(host)));
+                }
+            }
+            statuses
+        },
+        // A panic still answers, or no refresh would run; the gate keeps
+        // whatever was checked.
+        |_| Vec::new(),
+        |statuses| AppIntent::PullRequests(PullRequestsIntent::CliChecked { statuses }),
+    );
 }
 
 /// The intent that reports `event` of the load tagged `tag`.
@@ -196,6 +228,7 @@ mod tests {
             glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
             sink: CommandSink::new(),
             cache_dir: Some(cache_dir.clone()),
+            cli: kika_forge::cli::CliGate::default(),
         }));
         let load = |hosts| Effect::LoadPullRequests {
             tag: forge_tag(),
@@ -285,6 +318,88 @@ mod tests {
         }
     }
 
+    /// Run `CheckForgeClis` for `hosts` against `gh` and `glab`; what it
+    /// answered, and the context, whose gate it wrote.
+    async fn check(
+        gh: Arc<kika_forge::github::FakeGh>,
+        glab: Arc<kika_forge::gitlab::FakeGlab>,
+        hosts: Vec<ForgeHost>,
+    ) -> (Option<AppIntent>, ForgeContext) {
+        let ctx = ForgeContext {
+            gh,
+            glab,
+            sink: CommandSink::new(),
+            cache_dir: None,
+            cli: kika_forge::cli::CliGate::default(),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(FakeRunner::new()), tx).with_forge(Some(ctx.clone()));
+        runtime.spawn(Effect::CheckForgeClis { hosts });
+        (rx.recv().await, ctx)
+    }
+
+    #[tokio::test]
+    async fn a_cli_check_runs_only_the_cli_of_a_kind_with_a_host() {
+        use kika_forge::cli::CliStatus;
+        use kika_forge::github::{FakeGh, GhCall, answer};
+        use kika_forge::gitlab::{FakeGlab, GlabCall};
+        use kika_forge::url::ForgeKind;
+
+        // GitHub hosts only: `gh` once for both, `glab` never.
+        let gh = Arc::new(FakeGh::new().reply(answer("gh version 2.40.1 (2023-12-13)\n")));
+        let glab = Arc::new(FakeGlab::new());
+        let hosts = vec![
+            ForgeHost::parse("github.com").unwrap(),
+            ForgeHost::parse("github.example.com").unwrap(),
+        ];
+        let (answered, ctx) = check(gh.clone(), glab.clone(), hosts).await;
+        assert_eq!(
+            answered,
+            Some(AppIntent::PullRequests(PullRequestsIntent::CliChecked {
+                statuses: vec![(ForgeKind::GitHub, CliStatus::Ready)],
+            }))
+        );
+        let calls = gh.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].kind, GhCall::Version);
+        assert_eq!(calls[0].args(), ["--version"]);
+        assert_eq!(glab.calls(), []);
+        assert_eq!(ctx.cli.shut(ForgeKind::GitHub), None);
+
+        // GitLab hosts only, with no `glab`: `gh` never, and the gate is
+        // shut before the answer is sent.
+        let gh = Arc::new(FakeGh::new());
+        let glab = Arc::new(FakeGlab::new().missing());
+        let hosts = vec![ForgeHost::parse_gitlab("gitlab.example.com").unwrap()];
+        let (answered, ctx) = check(gh.clone(), glab.clone(), hosts).await;
+        assert_eq!(
+            answered,
+            Some(AppIntent::PullRequests(PullRequestsIntent::CliChecked {
+                statuses: vec![(ForgeKind::GitLab, CliStatus::NotInstalled)],
+            }))
+        );
+        assert_eq!(gh.calls(), []);
+        let calls = glab.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].kind, GlabCall::Version);
+        assert_eq!(calls[0].args(), ["--version"]);
+        assert_eq!(
+            ctx.cli.shut(ForgeKind::GitLab),
+            Some(CliStatus::NotInstalled)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cli_check_with_no_forge_client_runs_and_answers_nothing() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bare = Runtime::new(Arc::new(FakeRunner::new()), tx);
+        bare.spawn(Effect::CheckForgeClis {
+            hosts: vec![ForgeHost::parse("github.com").unwrap()],
+        });
+        drop(bare);
+        assert_eq!(rx.recv().await, None);
+    }
+
     /// `gh` holds a token and prints it; none of it may reach the app
     /// state or the screen. The log, the cache and the forge state are
     /// checked by `forge::task`'s own test.
@@ -306,6 +421,7 @@ mod tests {
             glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
             sink: CommandSink::new(),
             cache_dir: Some(tmp.path().join("forge")),
+            cli: kika_forge::cli::CliGate::default(),
         };
         let branches: Vec<BranchName> = vec!["main".into()];
         let mut state = forge_state(&branches);
@@ -387,6 +503,7 @@ mod tests {
             glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
             sink: CommandSink::new(),
             cache_dir: Some(cache_dir.clone()),
+            cli: kika_forge::cli::CliGate::default(),
         }));
         let create = Effect::CreatePullRequest {
             tag: forge_tag(),
@@ -438,6 +555,7 @@ mod tests {
             glab: Arc::new(kika_forge::gitlab::FakeGlab::new()),
             sink: CommandSink::new(),
             cache_dir: None,
+            cli: kika_forge::cli::CliGate::default(),
         }));
         let other = AllowRule::parse("other").unwrap();
         runtime.spawn(Effect::CreatePullRequest {
