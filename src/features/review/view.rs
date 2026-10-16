@@ -756,6 +756,7 @@ fn check_look(palette: &Palette, status: CheckStatus) -> (&'static str, &'static
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
 
     const GITHUB: &Words = &kika_forge::forge::GitHubForge::WORDS;
 
@@ -1294,8 +1295,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_review_diff_marks_search_matches_like_the_workspace_diff() {
+    /// `files_state` with `src/cache.rs`'s diff shown and searched for
+    /// `cache`, the first of its two matches current.
+    fn searched_files_state() -> AppState {
         use crate::diff_search::DiffSearch;
         use kika_git::diff::{DiffLine, LineKind};
         let mut state = files_state();
@@ -1316,27 +1318,53 @@ mod tests {
         let files = state.review.files.as_mut().unwrap();
         files.focus = FilesFocus::Diff;
         state.diff.search = Some(DiffSearch::new("cache", &texts, 0));
+        state
+    }
+
+    /// The style of the cell where `cache` starts on the row showing `needle`.
+    fn cache_style(buffer: &Buffer, needle: &str) -> Style {
+        let rows = buffer_rows(buffer);
+        let y = rows.iter().position(|r| r.contains(needle)).unwrap();
+        let at = rows[y].find(needle).unwrap() + needle.find("cache").unwrap();
+        let col = rows[y][..at].chars().count();
+        buffer[(col as u16, y as u16)].style()
+    }
+
+    fn draw_buffer(state: &AppState) -> Buffer {
         let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
         terminal
-            .draw(|frame| crate::view::render(&state, frame))
+            .draw(|frame| crate::view::render(state, frame))
             .unwrap();
-        let buffer = terminal.backend().buffer();
-        let rows = buffer_rows(buffer);
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn the_review_diff_marks_search_matches_like_the_workspace_diff() {
+        let state = searched_files_state();
+        let buffer = draw_buffer(&state);
+        let rows = buffer_rows(&buffer);
         assert!(
             contains(&rows, "Diff src/cache.rs · 1/3 · match 1 of 2"),
             "{rows:#?}"
         );
-        // The cell where "cache" starts on the row showing `needle`.
-        let style_of = |needle: &str| {
-            let y = rows.iter().position(|r| r.contains(needle)).unwrap();
-            let at = rows[y].find(needle).unwrap() + needle.find("cache").unwrap();
-            let col = rows[y][..at].chars().count();
-            buffer[(col as u16, y as u16)].style()
-        };
-        let current = style_of("-old cache");
-        let other = style_of("+new cache");
+        let current = cache_style(&buffer, "-old cache");
+        let other = cache_style(&buffer, "+new cache");
         assert_eq!(current.bg, Some(Palette::DEFAULT.current_match_bg));
         assert_eq!(other.bg, Some(Palette::DEFAULT.match_bg));
+    }
+
+    #[test]
+    fn under_no_color_the_review_screen_draws_no_colour_but_keeps_its_marks() {
+        let mut state = searched_files_state();
+        state.palette = Palette::NO_COLOR;
+        let buffer = draw_buffer(&state);
+        crate::test_support::assert_no_colour(&buffer);
+        let current = cache_style(&buffer, "-old cache").add_modifier;
+        assert!(current.contains(Modifier::BOLD | Modifier::UNDERLINED));
+        assert!(crate::test_support::reversed_somewhere(
+            &buffer,
+            "src/cache.rs"
+        ));
     }
 
     #[test]

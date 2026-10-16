@@ -746,6 +746,10 @@ emoji_zwj_terminals = ["WezTerm", "ghostty"]
 theme, and `[theme.colors]` changes single roles on top of it. Without a
 `[theme]` table Kika draws as it always has.
 
+A non-empty `NO_COLOR` environment variable (no-color.org) turns off all
+colour, an external diff pager's or tool's included, and wins over
+`[theme]` and `[theme.colors]`.
+
 ```toml
 [theme]
 name = "light"
