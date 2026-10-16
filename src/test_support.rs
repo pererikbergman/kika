@@ -1466,6 +1466,40 @@ pub(crate) fn draw_branches(state: &AppState, width: u16, height: u16) -> Vec<St
     buffer_rows(terminal.backend().buffer())
 }
 
+/// Panics, naming the cell, if any cell of `buffer` draws a foreground or
+/// background colour other than the terminal's own: what `NO_COLOR` asks.
+pub(crate) fn assert_no_colour(buffer: &ratatui::buffer::Buffer) {
+    use ratatui::style::Color;
+    let rows = buffer_rows(buffer);
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            let cell = &buffer[(x, y)];
+            assert!(
+                cell.fg == Color::Reset && cell.bg == Color::Reset,
+                "cell ({x}, {y}) {:?} has fg {:?} bg {:?} in row {:?}",
+                cell.symbol(),
+                cell.fg,
+                cell.bg,
+                rows[y as usize],
+            );
+        }
+    }
+}
+
+/// Whether `needle` is drawn reversed where it starts, in any of the rows
+/// that show it: a selected row's text may also be in a title.
+pub(crate) fn reversed_somewhere(buffer: &ratatui::buffer::Buffer, needle: &str) -> bool {
+    buffer_rows(buffer).iter().enumerate().any(|(y, row)| {
+        row.match_indices(needle).any(|(b, _)| {
+            let x = row[..b].chars().count();
+            buffer[(x as u16, y as u16)]
+                .style()
+                .add_modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        })
+    })
+}
+
 /// Whether the row holding `needle` is drawn reversed where it starts.
 pub(crate) fn reversed_at(buffer: &ratatui::buffer::Buffer, needle: &str) -> bool {
     let rows = buffer_rows(buffer);

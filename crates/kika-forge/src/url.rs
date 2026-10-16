@@ -5,7 +5,7 @@
 //! anything a parser upstream let slip.
 
 use super::anchor::{GhLine, GhSide};
-use super::remote::{matches, parse_remote};
+use super::remote::{MAX_PARTS, matches, parse_remote};
 use super::{ForgeHost, ForgeRepo};
 use kika_git::branches::BranchName;
 use kika_git::commit_files::CommitId;
@@ -29,8 +29,9 @@ impl ForgeKind {
 }
 
 /// `https://<host>/<owner>/<name>`, or `None` when a part is not plain:
-/// the host must be ASCII letters, digits, `-` and dots, and the owner and
-/// name `[A-Za-z0-9._-]`, not dots only.
+/// the host must be ASCII letters, digits, `-` and dots, and each part of
+/// the owner (a GitLab group path may have several) and the name
+/// `[A-Za-z0-9._-]`, not dots only. In a nested path no part is `-`.
 pub fn https_base(repo: &ForgeRepo) -> Option<String> {
     let host_ok = !repo.host.is_empty()
         && repo.host.split('.').all(|label| {
@@ -39,7 +40,13 @@ pub fn https_base(repo: &ForgeRepo) -> Option<String> {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-')
         });
-    if !host_ok || !segment_ok(&repo.owner) || !segment_ok(&repo.name) {
+    let owner: Vec<&str> = repo.owner.split('/').collect();
+    let nested = owner.len() > 1;
+    let owner_ok = owner.len() < MAX_PARTS
+        && owner
+            .iter()
+            .all(|part| segment_ok(part) && !(nested && *part == "-"));
+    if !host_ok || !owner_ok || !segment_ok(&repo.name) || (nested && repo.name == "-") {
         return None;
     }
     Some(format!(
@@ -69,8 +76,12 @@ pub fn commit_url(kind: ForgeKind, repo: &ForgeRepo, id: &CommitId) -> Option<St
     })
 }
 
-/// GitHub pull request `number`'s page.
+/// GitHub pull request `number`'s page. GitHub owners are one part, so a
+/// nested owner gives `None`.
 pub fn pull_url(repo: &ForgeRepo, number: u64) -> Option<String> {
+    if repo.owner.contains('/') {
+        return None;
+    }
     Some(format!("{}/pull/{number}", https_base(repo)?))
 }
 
@@ -275,7 +286,10 @@ mod tests {
     #[test]
     fn a_bad_owner_name_or_host_gives_none() {
         for bad in [
-            repo("github.com", "o/x", "r"),
+            repo("github.com", "o//x", "r"),
+            repo("github.com", "o/-", "r"),
+            repo("github.com", "o/x", "-"),
+            repo("github.com", "o/..", "r"),
             repo("github.com", "o", "r?x"),
             repo("github.com", "..", "r"),
             repo("github.com", "", "r"),
@@ -395,7 +409,7 @@ mod tests {
         );
         assert_eq!(on("https://gitlab.com/grp/proj"), None);
         assert_eq!(on("https://github.com.evil.io/o/r"), None);
-        // Nested groups stay unrecognised.
+        // Nested groups need a GitLab-kind host.
         assert_eq!(on("https://gitlab.example.com/a/b/c"), None);
         // With no hosts listed, nothing is a forge.
         let origin = remote("origin", "https://github.com/o/r");
@@ -426,6 +440,50 @@ mod tests {
         assert_eq!(
             forge_for(&[origin], &first, &[]),
             Some((ForgeKind::GitLab, repo("gitlab.example.com", "g", "p")))
+        );
+    }
+
+    #[test]
+    fn a_project_in_nested_groups_gets_gitlab_links_and_no_github_ones() {
+        let lab = [ForgeHost::parse_gitlab("gitlab.example.com").unwrap()];
+        let origin = remote("origin", "git@gitlab.example.com:acme/sub/x.git");
+        let nested = repo("gitlab.example.com", "acme/sub", "x");
+        assert_eq!(
+            repo_of(&origin, &[], &lab),
+            Some((ForgeKind::GitLab, nested.clone()))
+        );
+        let id = CommitId::parse(OID).unwrap();
+        assert_eq!(
+            commit_url(ForgeKind::GitLab, &nested, &id),
+            Some(format!(
+                "https://gitlab.example.com/acme/sub/x/-/commit/{OID}"
+            ))
+        );
+        let mrs =
+            "https://gitlab.example.com/acme/sub/x/-/merge_requests?scope=all&source_branch=a%2Fb";
+        let branch: BranchName = "a/b".into();
+        assert_eq!(gitlab_mrs_url(&nested, &branch).as_deref(), Some(mrs));
+        assert_eq!(
+            branch_page_url(ForgeKind::GitLab, &nested, &branch, None),
+            Ok(mrs.into())
+        );
+        let deep = repo("gitlab.example.com", "a/b/c/d/e", "f");
+        assert_eq!(
+            https_base(&deep).as_deref(),
+            Some("https://gitlab.example.com/a/b/c/d/e/f")
+        );
+        let too_deep = repo("gitlab.example.com", &vec!["g"; MAX_PARTS].join("/"), "f");
+        assert_eq!(https_base(&too_deep), None);
+        // GitHub owners are one part: no pull request page to build.
+        assert_eq!(pull_url(&nested, 7), None);
+        let line = GhLine {
+            side: GhSide::Right,
+            line: 1,
+        };
+        assert_eq!(pr_line_url(&nested, 7, None, "a", line), None);
+        assert_eq!(
+            branch_page_url(ForgeKind::GitHub, &nested, &branch, Some(7)),
+            Err(NoBranchPage::Unbuildable)
         );
     }
 

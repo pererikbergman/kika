@@ -566,6 +566,26 @@ mod tests {
     }
 
     #[test]
+    fn under_no_color_a_menu_draws_no_colour_and_keeps_its_cursor() {
+        let mut state = workspace(&[]);
+        state.palette = crate::theme::Palette::NO_COLOR;
+        state.popups = vec![Popup::Menu {
+            id: MenuId::Actions,
+            cursor: 4,
+        }];
+        let (buffer, rows) = draw(&state, 80, 24);
+        assert!(contains(&rows, " Commit…  Nothing to commit "), "{rows:#?}");
+        crate::test_support::assert_no_colour(&buffer);
+        let (x, y) = find(&rows, "Refresh");
+        assert!(
+            buffer[(x, y)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+    }
+
+    #[test]
     fn the_stash_menus_refusal_of_a_mixed_range_shows_whole_at_80_columns() {
         let mut state = workspace(&["gone.rs", "u.txt"]);
         state.files.rows[0].index = 'D';
