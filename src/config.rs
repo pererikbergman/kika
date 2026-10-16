@@ -33,10 +33,16 @@
 //! emoji_zwj_terminals = ["WezTerm"]  # terminals that draw an emoji sequence as one picture
 //! [clipboard]
 //! command = ["pbcopy"]      # absent = off: copies use OSC 52. Gets the text on stdin.
+//! [theme]
+//! name = "light"            # a built-in palette; absent = "default"
+//! [theme.colors]
+//! added = "light_green"     # one role's colour, over the theme
 //! ```
 //!
 //! `[watch]`, `[diff]`, `[commit]`, `[forge]`, `[display]` and
 //! `[clipboard]` are read from the global file only, at startup.
+//! So is `[theme]`: a repository file that could restyle the UI could
+//! hide a warning.
 //! `[display] emoji_zwj_terminals` is off (empty) by default;
 //! [`emoji_zwj`] matches it against the running terminal once.
 //! `[[commands]]` is read from the global file only. A repository file
@@ -70,6 +76,7 @@ use serde::Deserialize;
 use crate::features::custom_commands::CommandTable;
 use crate::features::diff::renderers::external_diff::{check_argv, parse_command};
 use crate::keymap::{Keymap, KeysTable, Trust};
+use crate::theme::{self, ColourValue, Palette};
 use crate::watch::{DEFAULT_WATCH, WatchConfig};
 use kika_forge::ForgeHost;
 use kika_forge::allow::AllowRule;
@@ -160,6 +167,8 @@ pub struct Loaded {
     /// The global `[clipboard] command` argv, checked by `check_argv`;
     /// `None` keeps copying on OSC 52.
     pub clipboard_command: Option<Vec<OsString>>,
+    /// The global `[theme]`: a built-in palette with any overrides on top.
+    pub palette: Palette,
     pub errors: Vec<ConfigError>,
 }
 
@@ -178,6 +187,7 @@ struct GlobalSettings {
     commit_hooks_detached: bool,
     emoji_zwj_terminals: Vec<String>,
     clipboard_command: Option<Vec<OsString>>,
+    palette: Palette,
 }
 
 /// The global file. Unknown fields are errors, so a typo is reported
@@ -201,6 +211,8 @@ struct GlobalFile {
     forge: ForgeTable,
     #[serde(default)]
     clipboard: ClipboardTable,
+    #[serde(default)]
+    theme: ThemeTable,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -241,6 +253,17 @@ struct ClipboardTable {
     command: Option<Vec<String>>,
 }
 
+/// The palette views draw with: a built-in theme, then single roles
+/// overridden. Only here, in the user's own file.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ThemeTable {
+    name: Option<String>,
+    /// Role name to colour, applied in key order over the theme.
+    #[serde(default)]
+    colors: BTreeMap<String, ColourValue>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DisplayTable {
@@ -263,10 +286,11 @@ struct WatchTable {
 }
 
 /// A repository's file: keys only. A `[watch]`, `[diff]`, `[commit]`,
-/// `[forge]`, `[display]` or `[clipboard]` table, or `[[commands]]`, here
-/// is an unknown field, so a cloned repository can neither turn on
-/// fetching, name or run a program, take the terminal away from its own hooks, make Kika contact
-/// a forge, nor change how text is drawn.
+/// `[forge]`, `[display]`, `[clipboard]` or `[theme]` table, or
+/// `[[commands]]`, here is an unknown field, so a cloned repository can
+/// neither turn on fetching, name or run a program, take the terminal away
+/// from its own hooks, make Kika contact a forge, change how text is drawn,
+/// nor recolour the UI to hide a warning.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RepoFile {
@@ -288,6 +312,7 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
         commit_hooks_detached: false,
         emoji_zwj_terminals: Vec::new(),
         clipboard_command: None,
+        palette: Palette::DEFAULT,
         errors: Vec::new(),
     };
     let global = layer(&paths.global, Trust::Global, &mut loaded.errors, |text| {
@@ -313,6 +338,7 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
         loaded.browser = global.browser;
         loaded.emoji_zwj_terminals = global.emoji_zwj_terminals;
         loaded.clipboard_command = global.clipboard_command;
+        loaded.palette = global.palette;
     }
     let repo = layer(&paths.repo, Trust::Repo, &mut loaded.errors, |text| {
         apply_repo(text, &loaded.keymap)
@@ -466,6 +492,7 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
     if emoji_zwj_terminals.iter().any(String::is_empty) {
         return Err("display.emoji_zwj_terminals: a terminal name cannot be empty".into());
     }
+    let palette = theme(&file.theme)?;
     Ok(GlobalSettings {
         keymap,
         dropped,
@@ -478,7 +505,41 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
         commit_hooks_detached: file.commit.hooks_detached.unwrap_or(false),
         emoji_zwj_terminals,
         clipboard_command,
+        palette,
     })
+}
+
+/// The palette `table` picks: its built-in theme, `default` when it names
+/// none, with each `[theme.colors]` override laid on in key order.
+fn theme(table: &ThemeTable) -> Result<Palette, String> {
+    let name = table.name.as_deref().unwrap_or("default");
+    let mut palette = theme::builtin(name).ok_or_else(|| {
+        let last = theme::THEMES.len() - 1;
+        let list: String = theme::THEMES
+            .iter()
+            .enumerate()
+            .map(|(i, n)| match i {
+                0 => format!("{n:?}"),
+                i if i == last => format!(" or {n:?}"),
+                _ => format!(", {n:?}"),
+            })
+            .collect();
+        format!("theme.name: {name:?} is not a built-in theme; use {list}")
+    })?;
+    for (role, value) in &table.colors {
+        let unknown = || {
+            format!(
+                "theme.colors: {role:?} is not a colour role; the roles are listed under [theme] in docs/configuration.md"
+            )
+        };
+        // The role first, so a mistyped name is reported before its value.
+        if !theme::ROLES.contains(&role.as_str()) {
+            return Err(unknown());
+        }
+        let colour = theme::parse_colour(value).map_err(|e| format!("theme.colors.{role}: {e}"))?;
+        palette.set(role, colour).map_err(|()| unknown())?;
+    }
+    Ok(palette)
 }
 
 /// Each `gitlab_ask` host must be a `gitlab` one, so asking is an
@@ -586,6 +647,7 @@ mod tests {
     use crate::keymap::{KeyPattern, parse_key, registry};
     use kika_forge::ForgeRepo;
     use kika_forge::allow::AllowRule;
+    use ratatui::style::Color;
 
     fn keys_of<'a>(keymap: &'a Keymap, id: &str) -> &'a [KeyPattern] {
         keymap.keys(registry().iter().find(|b| b.id == id).unwrap())
@@ -711,7 +773,8 @@ mod tests {
             err("[watch]\nfiles = 0\n"),
             "watch.files must be at least 1 second"
         );
-        assert!(err("[theme]\n").contains("unknown field `theme`"));
+        let theme_typo = err("[theme]\nnam = \"light\"\n");
+        assert!(theme_typo.contains("unknown field `nam`"), "{theme_typo}");
     }
 
     #[test]
@@ -829,6 +892,7 @@ mod tests {
                 commit_hooks_detached: false,
                 emoji_zwj_terminals: vec![],
                 clipboard_command: None,
+                palette: Palette::DEFAULT,
                 errors: vec![],
             }
         );
@@ -1947,5 +2011,167 @@ output = "none"
         // The global keys still apply; the repository file's do not.
         assert_eq!(keys_of(&loaded.keymap, "files.stage"), [key("x")]);
         assert_eq!(keys_of(&loaded.keymap, "files.commit"), [key("c")]);
+    }
+
+    fn palette(text: &str) -> Result<Palette, String> {
+        apply_global(text, &Keymap::default(), DEFAULT_WATCH).map(|g| g.palette)
+    }
+
+    #[test]
+    fn without_a_theme_table_the_default_palette_loads() {
+        let files = Files::new("theme-none");
+        files.global("[watch]\nrefs = 3\n");
+        let loaded = files.load();
+        assert_eq!(loaded.errors, []);
+        assert_eq!(loaded.palette, Palette::DEFAULT);
+        assert_eq!(palette(""), Ok(Palette::DEFAULT));
+        assert_eq!(palette("[theme]\n"), Ok(Palette::DEFAULT));
+    }
+
+    #[test]
+    fn the_theme_name_picks_a_built_in_palette() {
+        assert_eq!(
+            palette("[theme]\nname = \"default\"\n"),
+            Ok(Palette::DEFAULT)
+        );
+        assert_eq!(palette("[theme]\nname = \"light\"\n"), Ok(Palette::LIGHT));
+        assert_eq!(
+            palette("[theme]\nname = \"high-contrast\"\n"),
+            Ok(Palette::HIGH_CONTRAST)
+        );
+        let files = Files::new("theme-light");
+        files.global("[theme]\nname = \"light\"\n");
+        let loaded = files.load();
+        assert_eq!(loaded.errors, []);
+        assert_eq!(loaded.palette, Palette::LIGHT);
+    }
+
+    #[test]
+    fn theme_colors_override_only_the_named_roles_over_the_theme() {
+        let got = palette(
+            "[theme]\nname = \"light\"\n[theme.colors]\nadded = \"light_green\"\nmatch_bg = 17\nhash = \"#AbCdEf\"\n",
+        )
+        .unwrap();
+        let mut want = Palette::LIGHT;
+        want.added = Color::LightGreen;
+        want.match_bg = Color::Indexed(17);
+        want.hash = Color::Rgb(0xab, 0xcd, 0xef);
+        assert_eq!(got, want);
+
+        // Without a name the overrides land on the default theme.
+        let got = palette("[theme.colors]\nfocused = \"255\"\ndim = \"#3a3a3a\"\n").unwrap();
+        let mut want = Palette::DEFAULT;
+        want.focused = Color::Indexed(255);
+        want.dim = Color::Rgb(0x3a, 0x3a, 0x3a);
+        assert_eq!(got, want);
+        let got = palette("[theme]\nname = \"light\"\n[theme.colors]\ntext = \"reset\"\n").unwrap();
+        let mut want = Palette::LIGHT;
+        want.text = Color::Reset;
+        assert_eq!(got, want);
+        let got = palette("[theme.colors]\nerror = 0\n").unwrap();
+        assert_eq!(got.error, Color::Indexed(0));
+
+        for name in [
+            "black",
+            "red",
+            "green",
+            "yellow",
+            "blue",
+            "magenta",
+            "cyan",
+            "gray",
+            "dark_gray",
+            "light_red",
+            "light_green",
+            "light_yellow",
+            "light_blue",
+            "light_magenta",
+            "light_cyan",
+            "white",
+        ] {
+            let got = palette(&format!("[theme.colors]\ntext = \"{name}\"\n"));
+            assert!(got.is_ok(), "{name}: {got:?}");
+            assert_ne!(got.unwrap().text, Color::Reset, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_bad_theme_names_the_key_and_what_to_use() {
+        let err = |text: &str| palette(text).unwrap_err();
+        assert_eq!(
+            err("[theme]\nname = \"solarized\"\n"),
+            r#"theme.name: "solarized" is not a built-in theme; use "default", "light" or "high-contrast""#
+        );
+        assert_eq!(
+            err("[theme.colors]\naddded = \"green\"\n"),
+            r#"theme.colors: "addded" is not a colour role; the roles are listed under [theme] in docs/configuration.md"#
+        );
+        // The renamed roles' old names are gone.
+        for old in ["renamed", "copied"] {
+            assert!(
+                err(&format!("[theme.colors]\n{old} = \"red\"\n")).contains("is not a colour role")
+            );
+        }
+        let hint = r##"is not a colour; use a colour name such as "green" or "light_red", "reset", a number 0-255, or "#rrggbb""##;
+        for (value, shown) in [
+            (r#""grene""#, r#""grene""#),
+            (r#""Green""#, r#""Green""#),
+            (r#""Reset""#, r#""Reset""#),
+            (r#""none""#, r#""none""#),
+            ("256", "256"),
+            ("-1", "-1"),
+            (r##""#fff""##, r##""#fff""##),
+            (r##""#12345g""##, r##""#12345g""##),
+            ("true", "true"),
+        ] {
+            assert_eq!(
+                err(&format!("[theme.colors]\nadded = {value}\n")),
+                format!("theme.colors.added: {shown} {hint}"),
+                "{value}"
+            );
+        }
+        let typo = err("[theme]\nname = \"light\"\ncolours = {}\n");
+        assert!(typo.contains("unknown field `colours`"), "{typo}");
+    }
+
+    #[test]
+    fn a_bad_theme_drops_the_whole_global_file() {
+        let files = Files::new("theme-bad");
+        files.global(
+            "[keys]\n\"files.stage\" = [\"x\"]\n[theme]\nname = \"light\"\n[theme.colors]\nadded = \"grene\"\n",
+        );
+        let loaded = files.load();
+        assert_eq!(loaded.keymap, Keymap::default());
+        assert_eq!(loaded.palette, Palette::DEFAULT);
+        let [error] = loaded.errors.as_slice() else {
+            panic!("expected one error, got {:?}", loaded.errors);
+        };
+        assert!(!error.dropped_binding);
+        assert!(
+            error.message.starts_with("theme.colors.added: "),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn only_the_global_file_sets_the_theme() {
+        for text in [
+            "[theme]\nname = \"light\"\n",
+            "[theme.colors]\nadded = \"green\"\n",
+        ] {
+            let refused = repo(text).unwrap_err();
+            assert!(refused.contains("unknown field `theme`"), "{refused}");
+        }
+        let files = Files::new("repo-theme");
+        files
+            .global("[theme]\nname = \"high-contrast\"\n")
+            .repo("[keys]\n\"files.commit\" = [\"C\"]\n[theme]\nname = \"light\"\n");
+        let loaded = files.load();
+        assert_eq!(loaded.palette, Palette::HIGH_CONTRAST);
+        // Ignored as a whole: its `[keys]` did not apply either.
+        assert_eq!(keys_of(&loaded.keymap, "files.commit"), [key("c")]);
+        assert_eq!(loaded.errors.len(), 1, "{:?}", loaded.errors);
+        assert!(loaded.errors[0].message.contains("unknown field `theme`"));
     }
 }

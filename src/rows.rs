@@ -29,7 +29,7 @@ pub(crate) fn status_colour(palette: &Palette, status: char) -> Color {
         'A' => palette.added,
         'D' => palette.removed,
         'M' => palette.modified,
-        'R' | 'C' => palette.renamed,
+        'R' | 'C' => palette.status_renamed,
         _ => palette.text,
     }
 }
