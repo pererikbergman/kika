@@ -56,9 +56,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use crossterm::event::{
-    DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
-};
+use crossterm::event::{DisableFocusChange, EnableFocusChange};
 use crossterm::execute;
 
 use crate::cli::Cli;
@@ -144,11 +142,11 @@ fn main() -> color_eyre::Result<ExitCode> {
     // selection, so it can be turned off.
     let mouse = config.mouse;
     if mouse {
-        let _ = execute!(std::io::stdout(), EnableMouseCapture);
+        let _ = execute!(std::io::stdout(), app::EnableClickReports);
         // A panic must not leave the shell receiving mouse reports.
         let hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            let _ = execute!(std::io::stdout(), DisableMouseCapture);
+            let _ = execute!(std::io::stdout(), app::DisableClickReports);
             hook(info);
         }));
     }
@@ -162,7 +160,7 @@ fn main() -> color_eyre::Result<ExitCode> {
         config,
     ));
     if mouse {
-        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        let _ = execute!(std::io::stdout(), app::DisableClickReports);
     }
     let _ = execute!(std::io::stdout(), DisableFocusChange);
     ratatui::restore();

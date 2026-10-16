@@ -5,9 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use crossterm::event::{
-    self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
-};
+use crossterm::event::{self, DisableFocusChange, EnableFocusChange};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{cursor, execute};
 use ratatui::backend::Backend;
@@ -254,9 +252,49 @@ impl Suspended {
 
 impl Drop for Suspended {
     fn drop(&mut self) {
+        // A panic in the hand-off is on its way out of Kika: leave the
+        // terminal released, mouse capture off, rather than take it back.
+        if std::thread::panicking() {
+            return;
+        }
         // Nothing to do with an error here: the next draw shows what is left.
         let _ = take_screen(&mut io::stdout(), self.mouse);
         let _ = terminal::enable_raw_mode();
+    }
+}
+
+/// Turn on mouse reports for presses and the wheel only, SGR encoded:
+/// Kika reads nothing else, and with no motion or drag reports none can be
+/// left queued for the next process to read as typed text.
+pub(crate) struct EnableClickReports;
+
+/// Turn off what [`EnableClickReports`] turned on.
+pub(crate) struct DisableClickReports;
+
+/// Press and release reports (wheel included), then SGR coordinates.
+const CLICK_REPORTS_ON: &str = "\x1b[?1000h\x1b[?1006h";
+const CLICK_REPORTS_OFF: &str = "\x1b[?1006l\x1b[?1000l";
+
+impl crossterm::Command for EnableClickReports {
+    fn write_ansi(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
+        f.write_str(CLICK_REPORTS_ON)
+    }
+
+    /// The legacy console has only all-or-nothing mouse input.
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> io::Result<()> {
+        crossterm::Command::execute_winapi(&crossterm::event::EnableMouseCapture)
+    }
+}
+
+impl crossterm::Command for DisableClickReports {
+    fn write_ansi(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
+        f.write_str(CLICK_REPORTS_OFF)
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> io::Result<()> {
+        crossterm::Command::execute_winapi(&crossterm::event::DisableMouseCapture)
     }
 }
 
@@ -264,7 +302,7 @@ impl Drop for Suspended {
 /// focus reports and mouse reports as typed text, so both stop.
 fn leave_screen(out: &mut impl Write, mouse: bool) -> io::Result<()> {
     if mouse {
-        execute!(out, DisableMouseCapture)?;
+        execute!(out, DisableClickReports)?;
     }
     execute!(out, DisableFocusChange, LeaveAlternateScreen, cursor::Show)
 }
@@ -273,7 +311,7 @@ fn leave_screen(out: &mut impl Write, mouse: bool) -> io::Result<()> {
 fn take_screen(out: &mut impl Write, mouse: bool) -> io::Result<()> {
     execute!(out, EnterAlternateScreen, cursor::Hide, EnableFocusChange)?;
     if mouse {
-        execute!(out, EnableMouseCapture)?;
+        execute!(out, EnableClickReports)?;
     }
     Ok(())
 }
@@ -525,17 +563,26 @@ mod tests {
     }
 
     #[test]
+    fn mouse_reports_are_presses_and_the_wheel_only_in_sgr() {
+        assert_eq!(bytes_of(EnableClickReports), b"\x1b[?1000h\x1b[?1006h");
+        assert_eq!(bytes_of(DisableClickReports), b"\x1b[?1006l\x1b[?1000l");
+        // Never motion (1003) or drag (1002) tracking.
+        let on = bytes_of(EnableClickReports);
+        assert!(!contains(&on, b"1002") && !contains(&on, b"1003"), "{on:?}");
+    }
+
+    #[test]
     fn a_hand_off_releases_mouse_capture_and_takes_it_back_after() {
         let (mut left, mut taken) = (Vec::new(), Vec::new());
         leave_screen(&mut left, true).unwrap();
         take_screen(&mut taken, true).unwrap();
-        assert!(contains(&left, &bytes_of(DisableMouseCapture)), "{left:?}");
+        assert!(contains(&left, &bytes_of(DisableClickReports)), "{left:?}");
         assert!(contains(&left, &bytes_of(DisableFocusChange)), "{left:?}");
-        assert!(!contains(&left, &bytes_of(EnableMouseCapture)), "{left:?}");
-        assert!(contains(&taken, &bytes_of(EnableMouseCapture)), "{taken:?}");
+        assert!(!contains(&left, &bytes_of(EnableClickReports)), "{left:?}");
+        assert!(contains(&taken, &bytes_of(EnableClickReports)), "{taken:?}");
         assert!(contains(&taken, &bytes_of(EnableFocusChange)), "{taken:?}");
         assert!(
-            !contains(&taken, &bytes_of(DisableMouseCapture)),
+            !contains(&taken, &bytes_of(DisableClickReports)),
             "{taken:?}"
         );
     }
@@ -546,8 +593,8 @@ mod tests {
         leave_screen(&mut left, false).unwrap();
         take_screen(&mut taken, false).unwrap();
         for out in [&left, &taken] {
-            assert!(!contains(out, &bytes_of(DisableMouseCapture)), "{out:?}");
-            assert!(!contains(out, &bytes_of(EnableMouseCapture)), "{out:?}");
+            assert!(!contains(out, &bytes_of(DisableClickReports)), "{out:?}");
+            assert!(!contains(out, &bytes_of(EnableClickReports)), "{out:?}");
         }
         // The rest of the hand-off is unchanged.
         let expected_left = [

@@ -36,7 +36,8 @@ impl AppState {
 
     /// The move from the cursor to the branch drawn on `line` of the
     /// listed panel's `rows` inner lines; `None` below the last branch or
-    /// when the panel lists no local branches.
+    /// when the panel lists no local branches. `rows` is used as drawn,
+    /// unclamped (Stash clamps to 1 in both places instead).
     pub(crate) fn branches_step_to(&self, line: usize, rows: usize) -> Option<isize> {
         let list = &self.branches.list;
         self.branches_list_shown()

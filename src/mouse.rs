@@ -175,9 +175,10 @@ mod tests {
     const WIDTH: u16 = 80;
     const HEIGHT: u16 = 24;
 
+    /// The screen drawn at the state's own size, as the hit-test sees it.
     fn drawn(state: &AppState) -> Buffer {
-        assert_eq!(state.size, (WIDTH, HEIGHT), "the state is sized as drawn");
-        let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).unwrap();
+        let (width, height) = state.size;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| render(state, frame)).unwrap();
         terminal.backend().buffer().clone()
     }
@@ -204,7 +205,8 @@ mod tests {
 
     /// The panel's place on the screen as the view lays it out now.
     fn rect(state: &AppState, panel: Panel) -> Rect {
-        let [main, _] = screen_layout(Rect::new(0, 0, WIDTH, HEIGHT));
+        let (width, height) = state.size;
+        let [main, _] = screen_layout(Rect::new(0, 0, width, height));
         workspace_layout(main, state.focus.panel(), state.expanded, state.screen_mode)
             .rect(panel)
             .unwrap()
@@ -252,8 +254,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_click_on_a_scrolled_branch_selects_it_and_focuses_branches() {
+    /// Thirty local branches, the cursor on `b20`, with the Diff pane
+    /// focused and Branches expanded beside it.
+    fn many_branches() -> AppState {
         let mut state = AppState::new(Context::Workspace);
         state.update(AppIntent::Resize {
             width: WIDTH,
@@ -268,6 +271,12 @@ mod tests {
         state.update(AppIntent::Branches(BranchesIntent::MoveBy(20)));
         state.expanded = SidePanel::Branches;
         state.focus = Focus::Diff;
+        state
+    }
+
+    #[test]
+    fn a_click_on_a_scrolled_branch_selects_it_and_focuses_branches() {
+        let mut state = many_branches();
         let buffer = drawn(&state);
         let effects = click(&mut state, at(&buffer, "b17"));
         assert_eq!(selected_name(&state), "b17");
@@ -275,8 +284,9 @@ mod tests {
         assert!(log_load(&effects).is_some(), "{effects:?}");
     }
 
-    #[test]
-    fn a_click_on_a_scrolled_commit_selects_it_and_focuses_commits() {
+    /// Thirty commits, the cursor on `commit 20`, with the Diff pane
+    /// focused and Commits expanded beside it.
+    fn many_commits() -> AppState {
         let mut state = with_log(30);
         state.update(AppIntent::Resize {
             width: WIDTH,
@@ -285,6 +295,12 @@ mod tests {
         state.update(AppIntent::Commits(CommitsIntent::MoveBy(20)));
         assert_eq!(state.commits.list.selected, 20);
         state.focus = Focus::Diff;
+        state
+    }
+
+    #[test]
+    fn a_click_on_a_scrolled_commit_selects_it_and_focuses_commits() {
+        let mut state = many_commits();
         let buffer = drawn(&state);
         click(&mut state, at(&buffer, "commit 17"));
         assert_eq!(state.commits.list.selected, 17);
@@ -426,6 +442,173 @@ mod tests {
         wheel(&mut state, over, false);
         assert_eq!(state.diff.scroll, 3);
         assert_eq!(state.focus, Focus::Files);
+    }
+
+    /// The number drawn right after `prefix` in `text`, if any.
+    fn number_after(text: &str, prefix: &str) -> Option<usize> {
+        let rest = &text[text.find(prefix)? + prefix.len()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse().ok()
+    }
+
+    /// At each size, a click on every line inside `panel` selects the row
+    /// whose number `drawn_row` reads on that line, and leaves the cursor
+    /// alone on a line with none (a cut note, or below the rows). Focus
+    /// goes to the panel either way.
+    fn every_line_selects_what_is_drawn(
+        make: fn() -> AppState,
+        panel: SidePanel,
+        drawn_row: fn(&str) -> Option<usize>,
+        cursor: fn(&AppState) -> usize,
+        sizes: &[(u16, u16)],
+    ) {
+        for &(width, height) in sizes {
+            let mut sized = make();
+            sized.update(AppIntent::Resize { width, height });
+            let area = rect(&sized, Panel::Side(panel));
+            let rows = buffer_rows(&drawn(&sized));
+            let mut hit = 0;
+            for y in area.y..area.bottom() {
+                let column = area.x + 1;
+                let Some(MouseTarget::Side { line: Some(_), .. }) = target(&sized, column, y)
+                else {
+                    continue;
+                };
+                let drawn_line: String = rows[usize::from(y)]
+                    .chars()
+                    .skip(usize::from(area.x) + 1)
+                    .take(usize::from(area.width.saturating_sub(2)))
+                    .collect();
+                let mut state = sized.clone();
+                let before = cursor(&state);
+                click(&mut state, (column, y));
+                let why = format!("{width}x{height}, line {y}: {drawn_line:?}");
+                match drawn_row(&drawn_line) {
+                    Some(n) => {
+                        assert_eq!(cursor(&state), n, "{why}");
+                        hit += 1;
+                    }
+                    None => assert_eq!(cursor(&state), before, "{why}"),
+                }
+                assert_eq!(state.focus.panel(), Panel::Side(panel), "{why}");
+            }
+            assert!(
+                hit > 0,
+                "no row drawn at {width}x{height}:\n{}",
+                rows.join("\n")
+            );
+        }
+    }
+
+    const SIZES: [(u16, u16); 3] = [(60, 14), (80, 24), (160, 50)];
+
+    fn file_row(line: &str) -> Option<usize> {
+        number_after(line, " M f")
+    }
+
+    fn file_number(state: &AppState) -> usize {
+        number_after(&selected_path(state), "f").unwrap()
+    }
+
+    #[test]
+    fn every_files_line_selects_the_file_drawn_on_it_at_any_size() {
+        every_line_selects_what_is_drawn(
+            many_files,
+            SidePanel::Files,
+            file_row,
+            file_number,
+            &SIZES,
+        );
+    }
+
+    #[test]
+    fn a_files_panel_one_or_two_lines_tall_still_selects_what_it_draws() {
+        let tiny: Vec<(u16, u16)> = (4..=9).map(|height| (60, height)).collect();
+        // The sizes reach the one- and two-line windows.
+        let rows_at = |height| {
+            let mut state = many_files();
+            state.update(AppIntent::Resize { width: 60, height });
+            let area = rect(&state, Panel::Side(SidePanel::Files));
+            match target(&state, area.x + 1, area.y) {
+                Some(MouseTarget::Side { rows, .. }) => rows,
+                other => panic!("{other:?}"),
+            }
+        };
+        let heights: Vec<u16> = tiny.iter().map(|&(_, h)| rows_at(h)).collect();
+        assert!(heights.contains(&1) && heights.contains(&2), "{heights:?}");
+        every_line_selects_what_is_drawn(
+            many_files,
+            SidePanel::Files,
+            file_row,
+            file_number,
+            &tiny,
+        );
+    }
+
+    #[test]
+    fn every_branches_line_selects_the_branch_drawn_on_it_at_any_size() {
+        let cursor = |state: &AppState| number_after(&selected_name(state), "b").unwrap();
+        every_line_selects_what_is_drawn(
+            many_branches,
+            SidePanel::Branches,
+            |line| number_after(line, "b"),
+            cursor,
+            &SIZES,
+        );
+    }
+
+    #[test]
+    fn every_commits_line_selects_the_commit_drawn_on_it_at_any_size() {
+        let cursor = |state: &AppState| state.commits.list.selected;
+        every_line_selects_what_is_drawn(
+            many_commits,
+            SidePanel::Commits,
+            // The subject may be cut; the short hash is row `i` in hex.
+            |line| {
+                let hash = line
+                    .split_whitespace()
+                    .find(|word| word.len() == 7 && word.chars().all(|c| c.is_ascii_hexdigit()))?;
+                usize::from_str_radix(hash, 16).ok()
+            },
+            cursor,
+            &SIZES,
+        );
+    }
+
+    #[test]
+    fn every_stash_line_selects_the_entry_drawn_on_it_at_any_size() {
+        let cursor = |state: &AppState| state.stash.list.selected;
+        every_line_selects_what_is_drawn(
+            many_stashes,
+            SidePanel::Stash,
+            |line| number_after(line, "stash@{"),
+            cursor,
+            &SIZES,
+        );
+    }
+
+    #[test]
+    fn clicks_and_the_wheel_on_a_tiny_terminal_never_panic() {
+        let builders: [fn() -> AppState; 4] =
+            [many_files, many_branches, many_commits, many_stashes];
+        for make in builders {
+            for (width, height) in [(0, 0), (1, 1), (3, 2), (10, 4), (12, 3)] {
+                for focus_side in [true, false] {
+                    let mut state = make();
+                    state.update(AppIntent::Resize { width, height });
+                    if focus_side {
+                        state.focus = Focus::side(state.expanded);
+                    }
+                    for row in 0..=height {
+                        for column in 0..=width {
+                            click(&mut state, (column, row));
+                            wheel(&mut state, (column, row), true);
+                            wheel(&mut state, (column, row), false);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Every cell of the screen, the popup's own included.
