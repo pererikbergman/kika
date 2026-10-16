@@ -129,6 +129,8 @@ pub struct ReviewState {
     pub writing: Option<DiscussionWriting>,
     /// The cursor of the pending-comment list, while it is open.
     pub pending_list: Option<usize>,
+    /// The read of the lines a code suggestion starts from.
+    pub suggestion_fetch: ReviewFetch,
 }
 
 /// A description as drawn at `width`.
@@ -165,6 +167,7 @@ impl Default for ReviewState {
             composer: None,
             writing: None,
             pending_list: None,
+            suggestion_fetch: ReviewFetch::default(),
         }
     }
 }

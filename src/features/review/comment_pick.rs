@@ -13,7 +13,7 @@ use crate::model::AppState;
 use kika_forge::anchor::{GhLine, GhSide, RowNumber, row_numbers};
 use kika_git::diff::LineKind;
 
-const ACROSS_HUNKS: &str = "A range must stay inside one hunk";
+pub(super) const ACROSS_HUNKS: &str = "A range must stay inside one hunk";
 
 /// The rows picked, by index into the streamed diff: the cursor, and the
 /// other end of a range once `v` set one. It belongs to one file's diff
@@ -147,9 +147,24 @@ impl AppState {
     /// `enter`: the composer on the rows picked. A range that crosses a
     /// hunk header is refused, and the pick stays.
     pub(crate) fn confirm_comment_pick(&mut self) {
+        let Some(target) = self.picked_target() else {
+            return;
+        };
+        self.end_comment_pick();
+        self.review.composer = Some(Composer::new(ComposerKind::Line {
+            target,
+            editing: None,
+        }));
+    }
+
+    /// Where a comment on the rows picked goes, the pick left open; `None`
+    /// when there is none. A pick whose diff has gone, or whose file has no
+    /// UTF-8 name, is ended; a range across a hunk header says so and
+    /// stays.
+    pub(super) fn picked_target(&mut self) -> Option<CommentTarget> {
         let Some(pick) = live_pick(self).copied() else {
             self.end_comment_pick();
-            return;
+            return None;
         };
         let numbers = row_numbers(&self.diff.lines);
         let (first, last) = pick.span();
@@ -158,11 +173,9 @@ impl AppState {
             .any(|line| matches!(line.kind, LineKind::Hunk | LineKind::Header));
         if crosses {
             self.notice = Some(ACROSS_HUNKS.into());
-            return;
+            return None;
         }
-        let (Some(start), Some(end)) = (gh_line(numbers[first]), gh_line(numbers[last])) else {
-            return;
-        };
+        let (start, end) = (gh_line(numbers[first])?, gh_line(numbers[last])?);
         let target = self.review.files.as_ref().and_then(|files| {
             let path = std::str::from_utf8(files.selected()?.file.path.as_bytes()).ok()?;
             Some(CommentTarget {
@@ -172,13 +185,10 @@ impl AppState {
                 head: files.head.as_str().to_string(),
             })
         });
-        self.end_comment_pick();
-        if let Some(target) = target {
-            self.review.composer = Some(Composer::new(ComposerKind::Line {
-                target,
-                editing: None,
-            }));
+        if target.is_none() {
+            self.end_comment_pick();
         }
+        target
     }
 
     /// `esc`, or a pick whose diff has gone: back to the files screen.

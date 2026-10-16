@@ -446,6 +446,15 @@ pub enum Effect {
         key: PendingKey,
         review: PendingReview,
     },
+    /// Read the lines of `path` at `head` that `target` covers, raw, for
+    /// a code suggestion. Local only. Always answered by one
+    /// `ReviewIntent::SuggestionLinesRead`.
+    ReadSuggestionLines {
+        tag: Tag,
+        target: review::CommentTarget,
+        head: CommitId,
+        path: RepoPath,
+    },
     /// Remove the temp file a review comment was written in, and its
     /// directory. Answered by nothing; a failure leaves a private temp dir.
     RemoveCommentFile(KeptFile),
@@ -1354,6 +1363,12 @@ impl Runtime {
             Effect::SavePendingReview { tag, key, review } => {
                 review::effects::save_pending(self.pending_store.clone(), tx, tag, key, review)
             }
+            Effect::ReadSuggestionLines {
+                tag,
+                target,
+                head,
+                path,
+            } => review::effects::read_suggestion_lines(runner, tx, tag, target, head, path),
             Effect::RemoveCommentFile(file) => review::effects::remove_comment_file(tx, file),
             Effect::LoadPullRequests {
                 tag,

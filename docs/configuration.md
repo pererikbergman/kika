@@ -1962,6 +1962,7 @@ lines changed still read `outdated`.
 | `review_pick.up` | `k`, `up` | Move to the previous numbered line | |
 | `review_pick.range` | `v` | Start a range at this line, or drop it | |
 | `review_pick.confirm` | `enter`, `a` | Write a comment on the line or range picked | |
+| `review_pick.suggest` | `s` | Write a code suggestion for the line or range picked | |
 | `review_pick.cancel` | `esc` | Stop picking and go back to the files | |
 | `review_pick.quit` | `ctrl-c` | Quit Kika | locked |
 
