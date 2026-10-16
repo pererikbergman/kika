@@ -350,6 +350,71 @@ mod tests {
         }
     }
 
+    /// The lines of `text` outside `#[cfg(test)]` items, numbered from 1.
+    /// Only the test items are dropped, so production code after a mid-file
+    /// test module is still scanned. The brace count ignores strings.
+    fn non_test_lines(text: &str) -> Vec<(usize, &str)> {
+        let mut kept = Vec::new();
+        let mut lines = text.lines().enumerate();
+        while let Some((n, line)) = lines.next() {
+            let Some(rest) = line.trim_start().strip_prefix("#[cfg(test)]") else {
+                kept.push((n + 1, line));
+                continue;
+            };
+            // Skip the item: its other attributes, then up to a `;` at
+            // depth 0 or the brace that closes its body.
+            let mut depth = 0usize;
+            let mut opened = false;
+            let item = std::iter::once(rest).chain(lines.by_ref().map(|(_, l)| l));
+            'item: for part in item {
+                if depth == 0 && !opened && part.trim_start().starts_with("#[") {
+                    continue;
+                }
+                for c in part.chars() {
+                    match c {
+                        '{' => {
+                            depth += 1;
+                            opened = true;
+                        }
+                        '}' => depth = depth.saturating_sub(1),
+                        ';' if depth == 0 => break 'item,
+                        _ => {}
+                    }
+                    if opened && depth == 0 {
+                        break 'item;
+                    }
+                }
+            }
+        }
+        kept
+    }
+
+    #[test]
+    fn the_gate_scan_skips_only_test_items() {
+        let text = "\
+use a;
+#[cfg(test)] use b;
+fn live() {}
+#[cfg(test)]
+#[allow(dead_code)]
+fn helper() {
+    if x { y(); }
+}
+mid();
+#[cfg(test)]
+mod tests {
+    fn t() {
+        match x { _ => {} }
+    }
+}
+after();
+#[cfg(any(test, feature = \"test-support\"))]
+fn fixture() {}
+";
+        let kept: Vec<usize> = non_test_lines(text).iter().map(|(n, _)| *n).collect();
+        assert_eq!(kept, [1, 3, 9, 16, 17, 18]);
+    }
+
     #[test]
     fn forge_kind_matches_stay_in_adapters() {
         let forge_src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -374,10 +439,9 @@ mod tests {
         let mut found = Vec::new();
         for path in files.iter().filter(|p| !allowed(p)) {
             let text = std::fs::read_to_string(path).unwrap();
-            let live = text.split("#[cfg(test)]").next().unwrap_or_default();
-            for (n, line) in live.lines().enumerate() {
+            for (n, line) in non_test_lines(&text) {
                 if line.contains("ForgeKind::GitHub") || line.contains("ForgeKind::GitLab") {
-                    found.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
+                    found.push(format!("{}:{n}: {}", path.display(), line.trim()));
                 }
             }
         }
@@ -388,26 +452,103 @@ mod tests {
         );
     }
 
+    /// One way to reach a forge CLI, and the files allowed to use it.
+    struct Rule {
+        pattern: &'static str,
+        matches: fn(&str) -> bool,
+        /// Whether the app crate's sources are scanned too, not just kika-forge's.
+        app_too: bool,
+        allowed: &'static [&'static str],
+    }
+
+    /// Whether `needle` is in `line` with no identifier character before it.
+    fn bare(line: &str, needle: &str) -> bool {
+        line.match_indices(needle).any(|(i, _)| {
+            !line[..i]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        })
+    }
+
     #[test]
     fn forge_cli_calls_go_through_the_gate() {
         let forge_src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let app_src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src");
         let mut files = Vec::new();
         sources(&forge_src, &mut files);
+        let forge_files = files.len();
         sources(&app_src, &mut files);
         assert!(files.len() > 20, "the scan found the sources: {files:?}");
         // Only `adapter` builds a CLI's calls, and only `ForgeContext::forge`
         // and `check_cli` reach it, past the host, allow and CLI gates.
+        let rules: &[Rule] = &[
+            Rule {
+                pattern: "`.gh(`, `.glab(`, `.gh.run(` or `.glab.run(`",
+                matches: |line| {
+                    [".gh(", ".glab(", ".gh.run(", ".glab.run("]
+                        .iter()
+                        .any(|call| line.contains(call))
+                },
+                app_too: true,
+                // `adapter` hands each forge its CLI here.
+                allowed: &["forge.rs"],
+            },
+            Rule {
+                pattern: "`adapter(`",
+                matches: |line| bare(line, "adapter("),
+                app_too: false,
+                // `ForgeContext::forge` and `check_cli` call it after the gates.
+                allowed: &["client.rs"],
+            },
+            Rule {
+                pattern: "`.gh.as_ref()` or `.glab.as_ref()`",
+                matches: |line| line.contains(".gh.as_ref()") || line.contains(".glab.as_ref()"),
+                app_too: false,
+                // `ForgeContext` lends its runners to the gated clients only.
+                allowed: &["client.rs"],
+            },
+            Rule {
+                pattern: "a `Gh {` or `Glab {` struct literal",
+                matches: |line| bare(line, "Gh {") || bare(line, "Glab {"),
+                app_too: false,
+                // The gated clients are built in `ForgeContext` alone.
+                allowed: &["client.rs"],
+            },
+            Rule {
+                pattern: "`.call(`",
+                matches: |line| line.contains(".call("),
+                app_too: false,
+                // A scan cannot tell a `Glab` from a `Gh`, so only the files
+                // holding the clients' own `impl` blocks may call.
+                allowed: &[
+                    "gitlab.rs",
+                    "gitlab_review.rs",
+                    "gitlab_discussion.rs",
+                    "github.rs",
+                    "review.rs",
+                ],
+            },
+        ];
         let mut found = Vec::new();
-        for path in files.iter().filter(|p| **p != forge_src.join("forge.rs")) {
+        for (i, path) in files.iter().enumerate() {
+            let in_forge = i < forge_files;
             let text = std::fs::read_to_string(path).unwrap();
-            let live = text.split("#[cfg(test)]").next().unwrap_or_default();
-            for (n, line) in live.lines().enumerate() {
-                if [".gh(", ".glab(", ".gh.run(", ".glab.run("]
-                    .iter()
-                    .any(|call| line.contains(call))
-                {
-                    found.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
+            for (n, line) in non_test_lines(&text) {
+                for rule in rules {
+                    let scanned = in_forge || rule.app_too;
+                    let allowed = rule
+                        .allowed
+                        .iter()
+                        .any(|name| *path == forge_src.join(name));
+                    if scanned && !allowed && (rule.matches)(line) {
+                        found.push(format!(
+                            "{}:{n}: {}: {}",
+                            path.display(),
+                            rule.pattern,
+                            line.trim()
+                        ));
+                    }
                 }
             }
         }
