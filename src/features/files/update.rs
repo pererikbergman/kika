@@ -18,6 +18,7 @@ pub(crate) fn update(state: &mut AppState, intent: FilesIntent) -> Vec<Effect> {
     match intent {
         FilesIntent::Next => return state.move_selection(1),
         FilesIntent::Prev => return state.move_selection(-1),
+        FilesIntent::MoveBy(delta) => return state.move_selection(delta),
         FilesIntent::ToggleStage => return state.toggle_stage(),
         FilesIntent::ToggleStageAll => return state.toggle_stage_all(),
         FilesIntent::GoToFile(text) => return state.go_to_file(&text),
@@ -285,6 +286,34 @@ mod tests {
 
         diff_tag(&state.update(AppIntent::Files(FilesIntent::Prev)));
         assert_eq!(state.files.selected, 1);
+    }
+
+    #[test]
+    fn move_by_steps_through_the_shown_files_with_one_diff_load() {
+        let files = ["a1", "b2", "a3", "a4"]
+            .map(|p| changed(p, '.', 'M'))
+            .to_vec();
+        let (mut state, _) = with_files(files, 24);
+        // One preview load, however far it moves, as `Next` makes.
+        diff_tag(&state.update(AppIntent::Files(FilesIntent::MoveBy(2))));
+        assert_eq!(state.files.selected, 2);
+        diff_tag(&state.update(AppIntent::Files(FilesIntent::MoveBy(9))));
+        assert_eq!(state.files.selected, 3, "clamped at the end");
+        assert_eq!(
+            state.update(AppIntent::Files(FilesIntent::MoveBy(1))),
+            vec![]
+        );
+
+        state.files.set_filter("a".into());
+        diff_tag(&state.update(AppIntent::Files(FilesIntent::MoveBy(-2))));
+        assert_eq!(
+            state.files.selected, 0,
+            "b2 is hidden, so it is not counted"
+        );
+        assert_eq!(
+            state.update(AppIntent::Files(FilesIntent::MoveBy(-3))),
+            vec![]
+        );
     }
 
     #[test]

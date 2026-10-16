@@ -15,6 +15,9 @@ pub(crate) enum StashIntent {
     /// Move the stash cursor down or up.
     Next,
     Prev,
+    /// Move the stash cursor by this many rows, clamped at both ends: a
+    /// click or a wheel notch.
+    MoveBy(isize),
     /// Show the selected stash's files in place of the list.
     OpenFiles,
     /// Back from a stash's files to the list, at the same entry.

@@ -10,6 +10,9 @@ pub(crate) enum FilesIntent {
     /// Move the file selection down or up.
     Next,
     Prev,
+    /// Move the selection by this many rows, clamped at both ends: a
+    /// click or a wheel notch. One preview load, however far it moves.
+    MoveBy(isize),
     /// Stage the selected file, or unstage it when it is fully staged.
     ToggleStage,
     /// Stage everything, or unstage everything when nothing is left to stage.

@@ -38,6 +38,10 @@ pub(crate) enum CommitsIntent {
     /// Move the commit cursor down or up.
     Next,
     Prev,
+    /// Move the commit cursor by this many rows, through the rebase todo
+    /// as `Next` and `Prev` do, clamped at both ends: a click or a wheel
+    /// notch. At most one page load, however far it moves.
+    MoveBy(isize),
     /// Show the selected commit's files in place of the log.
     OpenFiles,
     /// Back from a commit's files to the log, at the same commit.

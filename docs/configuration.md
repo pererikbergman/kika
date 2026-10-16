@@ -51,6 +51,7 @@ browser = ["open"]        # opens forge pages; leave out to keep it off
 
 [display]
 emoji_zwj_terminals = ["WezTerm"]   # leave out to keep emoji joiners escaped
+mouse = false                       # leave out to click and scroll with the mouse
 
 [clipboard]
 command = ["pbcopy"]   # copies instead of OSC 52; leave out to keep it off
@@ -717,6 +718,7 @@ emoji_zwj_terminals = ["WezTerm", "ghostty"]
 | Setting | Meaning | Default |
 |---|---|---|
 | `emoji_zwj_terminals` | Terminal names, each matched exactly (case counts) against `$TERM_PROGRAM`, or against `$TERM` when `$TERM_PROGRAM` is unset or empty | empty: emoji joiners stay escaped everywhere |
+| `mouse` | `true` or `false`: whether Kika captures the mouse | `true` |
 
 - To find the name to list, run `echo "$TERM_PROGRAM"` in the terminal, or
   `echo "$TERM"` if that prints nothing. An empty name is refused, and the
@@ -737,6 +739,35 @@ emoji_zwj_terminals = ["WezTerm", "ghostty"]
   list.
 - File names, authors, commit headers, hunk headers, the conflict view and a
   `[diff]` program's output always escape emoji joiners.
+
+### The mouse
+
+With `mouse` on, which is the default, a click and the wheel work in the
+workspace:
+
+- **Click** a row in the expanded Files, Branches (Local tab), Commits (Log
+  tab) or Stash list to select it. Clicking another panel, or its border,
+  focuses it; a collapsed panel keeps its selection.
+- **Click** the Diff pane to focus it.
+- **The wheel** over the expanded list moves its selection 3 rows a notch,
+  as `j` and `k` do. Over the Diff pane it scrolls 3 lines a notch. Neither
+  moves focus.
+- While a popup, a question, a prompt, the commit message, help or a
+  filter is open, the mouse does nothing, so a click never answers a
+  question. Review mode ignores the mouse too.
+
+Capturing the mouse stops the terminal's own text selection inside Kika.
+Most terminals select text anyway while you hold Shift as you drag
+(Option on macOS). Or turn capture off:
+
+```toml
+[display]
+mouse = false
+```
+
+Kika releases the mouse whenever another program has the terminal (your
+editor, a commit, git asking a question, a custom command) and when it
+exits, so that program never receives mouse codes.
 
 **Changes to `[display]` take effect after a restart.**
 
@@ -1125,9 +1156,9 @@ Pass values as arguments after the code, and read them from there (`"$1"`,
 - **`[diff]` is allowed only in the global file**, since it names a program
   for Kika to run. A `[diff]` table in `.kika.toml` is an error, and the whole
   file is ignored.
-- **`[display]` is allowed only in the global file.** It is off by default.
-  A `[display]` table in `.kika.toml` is an error, and the whole file is
-  ignored.
+- **`[display]` is allowed only in the global file.** Emoji joiners are
+  escaped and the mouse is on by default. A `[display]` table in
+  `.kika.toml` is an error, and the whole file is ignored.
 - **`[commit]` is allowed only in the global file**, since it decides whether
   hooks get the terminal. A `[commit]` table in `.kika.toml` is an error, and
   the whole file is ignored.

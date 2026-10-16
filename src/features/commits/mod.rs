@@ -37,7 +37,9 @@
 //!   tips_failed}`;
 //! - `effects::{load, load_markers, load_tips, load_files}`;
 //! - `view::{render_commits_panel, patch_mark}`, `git::Tip` and
-//!   `git::detached_checkout`.
+//!   `git::detached_checkout`;
+//! - the mouse's queries `commits_list_shown` and `commits_step_to`
+//!   (`view.rs`), and the handler `move_commit` (`update.rs`).
 //!
 //! Kept cross-feature reads of `state.commits`: `branches/tags`
 //! (`list.rows`, `list.selected`), `stash`, `review` and `diff/renderers`

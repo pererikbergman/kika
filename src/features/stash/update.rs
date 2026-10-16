@@ -29,6 +29,9 @@ pub(crate) fn update(state: &mut AppState, intent: StashIntent) -> Vec<Effect> {
         StashIntent::Prev => {
             state.stash.list.move_by(-1);
         }
+        StashIntent::MoveBy(delta) => {
+            state.stash.list.move_by(delta);
+        }
         StashIntent::OpenFiles => return state.open_stash_files(),
         StashIntent::CloseFiles => return state.close_stash_files(),
         StashIntent::FileNext => return state.move_stash_file(1),
@@ -407,6 +410,25 @@ mod tests {
     use kika_git::commit_files::CommitRange;
     use kika_git::path::RepoPath;
     use kika_git::status::EntryKind;
+
+    #[test]
+    fn move_by_steps_through_the_shown_stashes_clamped() {
+        let mut state = on_stash_one();
+        assert_eq!(
+            state.update(AppIntent::Stash(StashIntent::MoveBy(5))),
+            vec![],
+            "as `Next`, moving loads nothing"
+        );
+        assert_eq!(state.stash.list.selected, 2, "clamped at the end");
+        state.update(AppIntent::Stash(StashIntent::MoveBy(-9)));
+        assert_eq!(state.stash.list.selected, 0);
+
+        // "WIP on main: 1234 zero" and "On main: two" show.
+        state.stash.list.set_filter("w".into());
+        assert_eq!(state.stash.list.visible(), [0, 2]);
+        state.update(AppIntent::Stash(StashIntent::MoveBy(1)));
+        assert_eq!(state.stash.list.selected, 2);
+    }
 
     #[test]
     fn the_diff_cannot_take_focus_from_an_open_stash() {

@@ -29,7 +29,8 @@
 //!   menu binds too;
 //! - `git::{toggle_for, toggle_all, toggle_many, CONFLICTS_REFUSAL}`, the
 //!   ops the stage keys run; their argv stays in core `op_command`;
-//! - `view::render_files_panel`, `effects::load` and `effects::ignore`.
+//! - `view::render_files_panel`, `effects::load` and `effects::ignore`, and
+//!   the mouse's queries `files_list_shown` and `files_step_to` (`view.rs`).
 //!
 //! Its rows are a `FilteredList<FileEntry>` (`list.rs` makes `FileEntry`
 //! a row), which owns their cursor, filter, range and load in flight.

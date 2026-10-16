@@ -477,6 +477,8 @@ impl AppState {
                 }
                 return effects;
             }
+            AppIntent::Click { column, row } => return self.click(column, row),
+            AppIntent::Wheel { column, row, down } => return self.wheel(column, row, down),
             AppIntent::RefreshStatus => return self.reload_repo(),
             AppIntent::StatusLoaded { tag, result } => return self.status_loaded(tag, result),
             AppIntent::ScrollDiff(by) if self.review_files_shown() => {

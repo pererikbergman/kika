@@ -15,6 +15,7 @@ use super::panel::Marker;
 use super::reflog::view::reflog_lines;
 use super::{CommitsPanel, CommitsTab};
 use crate::diff_mark::DiffMark;
+use crate::layout::SidePanel;
 use crate::model::AppState;
 use crate::rows::{DIFF_MARK, commit_file_line, diff_mark_style};
 use crate::theme::Palette;
@@ -301,29 +302,11 @@ fn window(panel: &CommitsPanel, marks: &Marks, area: Rect) -> Vec<Line<'static>>
             )
         })
     };
-    let room = if note.is_some() && height > 1 {
-        height - 1
-    } else {
-        height
-    };
     let head = todo_lines(marks.palette, panel, width);
     let shown = panel.list.visible();
-    let at = shown
-        .iter()
-        .position(|&i| i == panel.list.selected)
-        .unwrap_or(0);
-    let cursor = match (panel.todo_selected, head.len()) {
-        // Below the heading, the list in reverse: row 0 is the lowest.
-        (Some(i), len) if len > 0 => len - 1 - i,
-        (_, len) => len + at,
-    };
-    let start = (cursor + 1).saturating_sub(room);
-    let skip = head.len();
-    let mut lines: Vec<Line> = head.into_iter().skip(start).take(room).collect();
-    let log_start = start.saturating_sub(skip).min(shown.len());
-    let end = (start + room)
-        .saturating_sub(skip)
-        .clamp(log_start, shown.len());
+    let plan = log_window(panel, &shown, height, note.is_some());
+    let (log_start, end) = (plan.log_start, plan.end);
+    let mut lines: Vec<Line> = head.into_iter().skip(plan.start).take(plan.room).collect();
     let range = panel.list.range();
     let selected = panel.todo_selected.is_none().then_some(panel.list.selected);
     lines.extend(commit_lines(
@@ -338,6 +321,93 @@ fn window(panel: &CommitsPanel, marks: &Marks, area: Rect) -> Vec<Line<'static>>
         lines.extend(note);
     }
     lines
+}
+
+/// Where the window over the todo list and the log falls, in lines: the
+/// todo's heading and rows (`head` of them) come first, then the log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LogWindow {
+    /// The first line drawn.
+    start: usize,
+    /// Lines for the todo and the log; a note row takes one of the height.
+    room: usize,
+    /// The todo's lines, its heading included; 0 with no rebase stopped.
+    head: usize,
+    /// The cursor's line.
+    cursor: usize,
+    /// The shown log positions drawn, `log_start..end`.
+    log_start: usize,
+    end: usize,
+}
+
+impl LogWindow {
+    /// The todo lines drawn at the top of the window.
+    fn head_drawn(&self) -> usize {
+        self.head.saturating_sub(self.start).min(self.room)
+    }
+}
+
+/// The window of `height` lines over the todo list and the `shown` log
+/// rows that keeps the cursor in view, with a last row kept for a `note`.
+/// Shared with the mouse hit-test, so a click lands on the row drawn
+/// under it.
+fn log_window(panel: &CommitsPanel, shown: &[usize], height: usize, note: bool) -> LogWindow {
+    let room = if note && height > 1 {
+        height - 1
+    } else {
+        height
+    };
+    let head = panel.todo.as_ref().map_or(0, |todo| todo.len() + 1);
+    let at = shown
+        .iter()
+        .position(|&i| i == panel.list.selected)
+        .unwrap_or(0);
+    let cursor = match (panel.todo_selected, head) {
+        // Below the heading, the list in reverse: row 0 is the lowest.
+        (Some(i), len) if len > 0 => len - 1 - i,
+        (_, len) => len + at,
+    };
+    let start = (cursor + 1).saturating_sub(room);
+    let log_start = start.saturating_sub(head).min(shown.len());
+    let end = (start + room)
+        .saturating_sub(head)
+        .clamp(log_start, shown.len());
+    LogWindow {
+        start,
+        room,
+        head,
+        cursor,
+        log_start,
+        end,
+    }
+}
+
+impl AppState {
+    /// Whether the Commits panel lists the log, expanded with no commit
+    /// opened: what a click or the wheel can move through.
+    pub(crate) fn commits_list_shown(&self) -> bool {
+        let panel = &self.commits;
+        self.expanded == SidePanel::Commits
+            && panel.tab == CommitsTab::Log
+            && panel.open.is_none()
+            && !panel.list.visible().is_empty()
+    }
+
+    /// The `MoveBy` from the cursor, through any todo rows, to the log row
+    /// drawn on `line` of the listed panel's `rows` inner lines. `None` on
+    /// the todo list, the "Loading more…" or error row, below the last
+    /// row, or when the panel lists no log.
+    pub(crate) fn commits_step_to(&self, line: usize, rows: usize) -> Option<isize> {
+        if !self.commits_list_shown() {
+            return None;
+        }
+        let panel = &self.commits;
+        let shown = panel.list.visible();
+        let note = panel.more_in_flight || panel.list.error.is_some();
+        let plan = log_window(panel, &shown, rows, note);
+        let pos = plan.log_start + line.checked_sub(plan.head_drawn())?;
+        (pos < plan.end).then(|| (plan.head + pos) as isize - plan.cursor as isize)
+    }
 }
 
 /// The todo list as rows: a dim heading, then one row per step with the
@@ -993,6 +1063,30 @@ mod tests {
             done: Some(b"pick 0000000 done\n".to_vec()),
             comment: Ok(b"#".to_vec()),
         })));
+    }
+
+    #[test]
+    fn a_click_walks_from_a_todo_row_to_the_log_row_drawn_under_it() {
+        use crate::intent::AppIntent;
+        use crate::test_support::screen::find;
+        let mut state = crate::test_support::with_log(10);
+        state.update(AppIntent::Resize {
+            width: 80,
+            height: 24,
+        });
+        stopped_rebase(&mut state);
+        state.commits.todo_selected = Some(1);
+        let buffer = draw(&state, 80, 24);
+        // A todo row or its heading gives focus only.
+        for text in ["first step", "Rebase todo"] {
+            let (column, row) = find(&buffer, text);
+            state.update(AppIntent::Click { column, row });
+            assert_eq!(state.commits.todo_selected, Some(1), "{text}");
+        }
+        let (column, row) = find(&buffer, "commit 3");
+        state.update(AppIntent::Click { column, row });
+        assert_eq!(state.commits.todo_selected, None);
+        assert_eq!(state.commits.list.selected, 3);
     }
 
     /// A stopped rebase whose todo holds `exec`, so Kika shows it

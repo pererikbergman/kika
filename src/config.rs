@@ -31,6 +31,7 @@
 //! "gitlab.com" = ["acme"]             # a gitlab_ask host is limited the same way
 //! [display]
 //! emoji_zwj_terminals = ["WezTerm"]  # terminals that draw an emoji sequence as one picture
+//! mouse = false             # absent = on. Click to select, wheel to scroll.
 //! [clipboard]
 //! command = ["pbcopy"]      # absent = off: copies use OSC 52. Gets the text on stdin.
 //! [theme]
@@ -164,6 +165,10 @@ pub struct Loaded {
     /// The global `[display] emoji_zwj_terminals`: the terminals that draw
     /// an emoji ZWJ sequence as one two-column picture.
     pub emoji_zwj_terminals: Vec<String>,
+    /// The global `[display] mouse`: capture the mouse, so a click selects
+    /// and the wheel scrolls. On by default; off gives the terminal's own
+    /// text selection back.
+    pub mouse: bool,
     /// The global `[clipboard] command` argv, checked by `check_argv`;
     /// `None` keeps copying on OSC 52.
     pub clipboard_command: Option<Vec<OsString>>,
@@ -186,6 +191,7 @@ struct GlobalSettings {
     diff_tool: Option<String>,
     commit_hooks_detached: bool,
     emoji_zwj_terminals: Vec<String>,
+    mouse: bool,
     clipboard_command: Option<Vec<OsString>>,
     palette: Palette,
 }
@@ -268,6 +274,7 @@ struct ThemeTable {
 #[serde(deny_unknown_fields)]
 struct DisplayTable {
     emoji_zwj_terminals: Option<Vec<String>>,
+    mouse: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -311,6 +318,7 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
         diff_tool: None,
         commit_hooks_detached: false,
         emoji_zwj_terminals: Vec::new(),
+        mouse: true,
         clipboard_command: None,
         palette: Palette::DEFAULT,
         errors: Vec::new(),
@@ -337,6 +345,7 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
         loaded.forge_gitlab_hosts = global.forge_gitlab_hosts;
         loaded.browser = global.browser;
         loaded.emoji_zwj_terminals = global.emoji_zwj_terminals;
+        loaded.mouse = global.mouse;
         loaded.clipboard_command = global.clipboard_command;
         loaded.palette = global.palette;
     }
@@ -504,6 +513,7 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
         browser,
         commit_hooks_detached: file.commit.hooks_detached.unwrap_or(false),
         emoji_zwj_terminals,
+        mouse: file.display.mouse.unwrap_or(true),
         clipboard_command,
         palette,
     })
@@ -891,6 +901,7 @@ mod tests {
                 browser: None,
                 commit_hooks_detached: false,
                 emoji_zwj_terminals: vec![],
+                mouse: true,
                 clipboard_command: None,
                 palette: Palette::DEFAULT,
                 errors: vec![],
@@ -1871,6 +1882,30 @@ output = "none"
         assert!(files.load().emoji_zwj_terminals.is_empty());
         files.global("[display]\n");
         assert!(files.load().emoji_zwj_terminals.is_empty());
+    }
+
+    #[test]
+    fn the_mouse_is_on_unless_the_global_file_turns_it_off() {
+        let files = Files::new("mouse");
+        assert!(files.load().mouse);
+        files.global("[display]\n");
+        assert!(files.load().mouse);
+        files.global("[display]\nmouse = false\n");
+        let loaded = files.load();
+        assert_eq!(loaded.errors, []);
+        assert!(!loaded.mouse);
+        files.global("[display]\nmouse = true\n");
+        assert!(files.load().mouse);
+
+        let mouse =
+            |text: &str| apply_global(text, &Keymap::default(), DEFAULT_WATCH).map(|g| g.mouse);
+        let wrong = mouse("[display]\nmouse = \"no\"\n").unwrap_err();
+        assert!(wrong.starts_with("line 2"), "{wrong}");
+        // A refused file is ignored whole, so the mouse stays on.
+        files.global("[display]\nmouse = \"no\"\n");
+        let loaded = files.load();
+        assert_eq!(loaded.errors.len(), 1);
+        assert!(loaded.mouse);
     }
 
     #[test]
