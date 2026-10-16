@@ -126,6 +126,8 @@ fn main() -> color_eyre::Result<ExitCode> {
         .with_forge_hosts(config.forge_hosts.clone())
         .with_forge_links(config.forge_gitlab_hosts.clone(), config.browser.clone());
     state.emoji_zwj = emoji_zwj;
+    // Startup only: the focus-in reload never restyles a running session.
+    state.palette = config.palette;
     let recent_store = features::repos::recent::default_path(|key| std::env::var_os(key));
     let runtime = tokio::runtime::Runtime::new()?;
 
