@@ -8,7 +8,7 @@ use crate::diff_search::DiffSearch;
 use crate::features::commits;
 use crate::features::diff::view::hunk_title;
 use crate::hunk_view::{HunkView, NO_CHANGES, RowKind, drawn_text};
-use crate::theme::Palette;
+use crate::theme::{Palette, is_reset};
 use crate::view::{PanelLook, clip_cut, continues_glyph, reversed};
 use kika_git::diff::{DiffLine, DiffOptions, EmojiZwj, LineKind};
 use kika_git::patch::{FileKind, PatchError};
@@ -189,21 +189,34 @@ fn search_marks(palette: &Palette, search: &DiffSearch, at: usize) -> Vec<(usize
         .collect()
 }
 
-/// A search match, and the one `n` and `N` step from.
+/// A search match, and the one `n` and `N` step from. With no background
+/// colour (`NO_COLOR`, or `match_bg = "reset"`) it is underlined, as that is
+/// the only mark left.
 pub(crate) const fn search_match(palette: &Palette) -> Style {
-    Style::new().fg(palette.match_fg).bg(palette.match_bg)
+    let style = Style::new().fg(palette.match_fg).bg(palette.match_bg);
+    if is_reset(palette.match_bg) {
+        style.add_modifier(Modifier::UNDERLINED)
+    } else {
+        style
+    }
 }
 
 /// What marks the current match apart without colour.
 const CURRENT_MARK: Modifier = Modifier::BOLD.union(Modifier::UNDERLINED);
 
 /// The current one is also bold and underlined, so it stands out without
-/// colour.
+/// colour. With no background colour it is reversed too: plain matches are
+/// then underlined as well, and bold alone is lost on a bold row.
 pub(crate) const fn current_match(palette: &Palette) -> Style {
-    Style::new()
+    let style = Style::new()
         .fg(palette.match_fg)
         .bg(palette.current_match_bg)
-        .add_modifier(CURRENT_MARK)
+        .add_modifier(CURRENT_MARK);
+    if is_reset(palette.current_match_bg) {
+        style.add_modifier(Modifier::REVERSED)
+    } else {
+        style
+    }
 }
 
 /// Whether a mark is the current match's: known by its modifiers, which
@@ -326,9 +339,51 @@ pub(crate) fn styled_diff_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Color;
 
     const MATCH: Style = search_match(&Palette::DEFAULT);
     const CURRENT_MATCH: Style = current_match(&Palette::DEFAULT);
+
+    #[test]
+    fn under_no_color_plain_matches_are_underlined_and_the_current_one_also_reversed() {
+        let plain = search_match(&Palette::NO_COLOR);
+        assert_eq!(plain.add_modifier, Modifier::UNDERLINED);
+        let current = current_match(&Palette::NO_COLOR);
+        assert_eq!(
+            current.add_modifier,
+            Modifier::BOLD | Modifier::UNDERLINED | Modifier::REVERSED
+        );
+        assert!(!is_current(plain));
+        assert!(is_current(current));
+    }
+
+    #[test]
+    fn with_colours_on_matches_keep_their_colours_and_marks() {
+        for palette in [Palette::DEFAULT, Palette::LIGHT, Palette::HIGH_CONTRAST] {
+            assert_eq!(
+                search_match(&palette),
+                Style::new().fg(palette.match_fg).bg(palette.match_bg)
+            );
+            assert_eq!(
+                current_match(&palette),
+                Style::new()
+                    .fg(palette.match_fg)
+                    .bg(palette.current_match_bg)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            );
+        }
+    }
+
+    #[test]
+    fn each_match_role_decides_its_own_mark() {
+        let mut palette = Palette::DEFAULT;
+        palette.match_bg = Color::Reset;
+        assert_eq!(search_match(&palette).add_modifier, Modifier::UNDERLINED);
+        assert_eq!(
+            current_match(&palette).add_modifier,
+            Modifier::BOLD | Modifier::UNDERLINED
+        );
+    }
 
     #[test]
     fn marks_widen_to_whole_glyphs_and_a_second_mark_in_one_glyph_restyles_it() {

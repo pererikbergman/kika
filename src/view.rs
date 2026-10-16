@@ -3126,7 +3126,18 @@ mod tests {
         crate::test_support::assert_no_colour(&buffer);
         assert!(crate::test_support::reversed_somewhere(&buffer, "a.rs"));
         let current = style_in(&buffer, "alpha one", 6).add_modifier;
-        assert!(current.contains(Modifier::BOLD | Modifier::UNDERLINED));
+        assert!(current.contains(Modifier::BOLD | Modifier::UNDERLINED | Modifier::REVERSED));
+        let plain = style_in(&buffer, "gamma one", 6).add_modifier;
+        assert!(plain.contains(Modifier::UNDERLINED), "{plain:?}");
+        assert!(
+            !plain.intersects(Modifier::BOLD | Modifier::REVERSED),
+            "{plain:?}"
+        );
+        let between = style_in(&buffer, " beta", 1).add_modifier;
+        assert!(
+            !between.intersects(Modifier::BOLD | Modifier::UNDERLINED | Modifier::REVERSED),
+            "{between:?}"
+        );
     }
 
     #[test]

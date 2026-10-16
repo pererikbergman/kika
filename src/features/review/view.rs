@@ -1360,7 +1360,10 @@ mod tests {
         let buffer = draw_buffer(&state);
         crate::test_support::assert_no_colour(&buffer);
         let current = cache_style(&buffer, "-old cache").add_modifier;
-        assert!(current.contains(Modifier::BOLD | Modifier::UNDERLINED));
+        assert!(current.contains(Modifier::BOLD | Modifier::UNDERLINED | Modifier::REVERSED));
+        let plain = cache_style(&buffer, "+new cache").add_modifier;
+        assert!(plain.contains(Modifier::UNDERLINED), "{plain:?}");
+        assert!(!plain.contains(Modifier::BOLD), "{plain:?}");
         assert!(crate::test_support::reversed_somewhere(
             &buffer,
             "src/cache.rs"
