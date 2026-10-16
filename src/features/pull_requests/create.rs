@@ -17,7 +17,10 @@ use crate::popup::{ErrorPopup, LineInput, Popup, PromptKind};
 use kika_forge::forge::{Capability, supports};
 use kika_forge::remote::{allowed, matches};
 use kika_forge::url::{ForgeKind, NoBranchPage, branch_page_url, commit_url, forge_for, repo_of};
-use kika_forge::{CreateError, ForgeHost, ForgeRepo, PrBadge, PrState, REFRESH_LIMITED, same_repo};
+use kika_forge::{
+    CreateError, ForgeHost, ForgeRepo, PrBadge, PrState, REFRESH_LIMITED, refresh_limited,
+    same_repo,
+};
 use kika_git::branches::BranchName;
 use kika_git::commit_files::CommitId;
 use kika_git::remotes::RemoteName;
@@ -168,9 +171,12 @@ pub(crate) fn refresh_disabled(state: &AppState) -> Option<Reason> {
         return Some(REFRESHING.into());
     }
     let limited = forge.limited.get(&repo.host.to_ascii_lowercase());
-    limited
-        .is_some_and(|until| *until > state.now)
-        .then_some(REFRESH_LIMITED.into())
+    limited.is_some_and(|until| *until > state.now).then(|| {
+        forge
+            .kind()
+            .map_or_else(|| REFRESH_LIMITED.into(), refresh_limited)
+            .into()
+    })
 }
 
 /// The most of a title the question shows, in characters.
@@ -804,6 +810,47 @@ mod tests {
         assert_eq!(
             reason(&state, "Create pull request…"),
             Some(unsupported.message())
+        );
+    }
+
+    /// [`on_github`], but with `gitlab.example.com` asked through `glab`
+    /// and the remote on it.
+    fn on_gitlab_ask() -> AppState {
+        let mut state = on_github(vec![remote(
+            "origin",
+            "git@gitlab.example.com:acme/widgets.git",
+            &["main", "topic"],
+        )]);
+        let lab = ForgeHost::parse_gitlab("gitlab.example.com").unwrap();
+        state.forge.hosts = vec![host("github.com"), lab];
+        state.forge.repo = Some(ForgeRepo {
+            host: "gitlab.example.com".into(),
+            ..repo("acme", "widgets")
+        });
+        state
+    }
+
+    #[test]
+    fn on_a_gitlab_ask_host_the_page_is_the_merge_request_list_and_create_is_off() {
+        let mut state = on_gitlab_ask();
+        // A badge is known, yet the page stays the filtered list.
+        state.forge.badges.insert("topic".into(), badge(12));
+        let list = "https://gitlab.example.com/acme/widgets/-/merge_requests?scope=all&source_branch=topic";
+        let effects = state.update(AppIntent::PullRequests(PullRequestsIntent::OpenForgeUrl));
+        let mut argv = browser();
+        argv.push(list.into());
+        assert_eq!(effects, [Effect::OpenUrl { argv }]);
+        let effects = state.update(AppIntent::PullRequests(PullRequestsIntent::CopyForgeUrl));
+        assert_eq!(effects, [Effect::Clipboard(list.into())]);
+        // Create is refused before anything else is looked at.
+        assert_eq!(
+            reason(&state, "Create pull request…").as_deref(),
+            Some("Creating a pull request is not available on GitLab yet")
+        );
+        state.forge.badges.clear();
+        assert_eq!(
+            reason(&state, "Create pull request…").as_deref(),
+            Some("Creating a pull request is not available on GitLab yet")
         );
     }
 

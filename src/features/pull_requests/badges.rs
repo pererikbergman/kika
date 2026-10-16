@@ -717,6 +717,83 @@ mod tests {
         assert_eq!(refreshes(&effects), 1, "{effects:?}");
     }
 
+    fn gitlab() -> Vec<ForgeHost> {
+        vec![ForgeHost::parse_gitlab("gitlab.example.com").unwrap()]
+    }
+
+    /// The hosts of each load in `effects`, with whether it refreshes.
+    fn load_hosts(effects: &[Effect]) -> Vec<(Vec<ForgeHost>, bool)> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::LoadPullRequests { hosts, refresh, .. } => Some((hosts.clone(), *refresh)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Answer the load in flight, so the next one may start.
+    fn answer(state: &mut AppState, effects: &[Effect]) {
+        let [(tag, _)] = loads(effects)[..] else {
+            panic!("{effects:?}")
+        };
+        state.update(AppIntent::PullRequests(PullRequestsIntent::Fetched {
+            tag,
+            result: Ok(HashMap::new()),
+            limited_until: None,
+        }));
+    }
+
+    #[test]
+    fn a_gitlab_host_loads_as_a_github_one_does() {
+        let mut state = in_repo(gitlab());
+        // Opening the repository.
+        let effects = list_branches(&mut state, &["main"]);
+        assert_eq!(load_hosts(&effects), [(gitlab(), true)]);
+        answer(&mut state, &effects);
+        state.forge.repo = Some(ForgeRepo {
+            host: "gitlab.example.com".into(),
+            ..repo()
+        });
+        // `B`, from the Branches panel.
+        state.focus = Focus::Branches;
+        state.files.loaded = true;
+        let effects = press_refresh(&mut state);
+        assert_eq!(load_hosts(&effects), [(gitlab(), true)]);
+        answer(&mut state, &effects);
+        // A finished fetch, pull or push.
+        let push = RemoteOp::Push {
+            force_with_lease: false,
+        };
+        for (intent, op) in [
+            (remote_intent(&RemoteOp::Fetch), RemoteOp::Fetch),
+            (remote_intent(&RemoteOp::Pull), RemoteOp::Pull),
+            (remote_intent(&push), push),
+        ] {
+            let effects = remote_ok(&mut state, intent, op);
+            assert_eq!(load_hosts(&effects), [(gitlab(), true)]);
+            answer(&mut state, &effects);
+        }
+    }
+
+    #[test]
+    fn the_refresh_key_names_gitlab_when_its_host_is_rate_limited() {
+        const T: i64 = 1_700_000_000;
+        let mut state = loaded();
+        state.forge.hosts = gitlab();
+        state.forge.repo = Some(ForgeRepo {
+            host: "gitlab.example.com".into(),
+            ..repo()
+        });
+        state.forge.limited.insert("gitlab.example.com".into(), T);
+        state.now = T - 1;
+        assert_eq!(press_refresh(&mut state), []);
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("GitLab is rate limited; refresh after the limit resets")
+        );
+    }
+
     #[test]
     fn the_refresh_key_does_nothing_outside_the_workspace() {
         let mut state = loaded();
