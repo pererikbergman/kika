@@ -556,12 +556,13 @@ pub enum Effect {
         comment: Vec<u8>,
     },
     /// List the commits only `head` reaches before `op` moves `HEAD` to
-    /// `target`; always answered by one `RewriteIntent::LeftBehindChecked`.
+    /// `target` (`None` when it lands on a branch, which the check keeps
+    /// anyway); always answered by one `RewriteIntent::LeftBehindChecked`.
     CheckLeftBehind {
         tag: Tag,
         op: GitOp,
         head: CommitId,
-        target: CommitId,
+        target: Option<CommitId>,
     },
 
     // --- operation ---

@@ -1644,7 +1644,7 @@ mod tests {
                 op: GitOp::CheckoutCommit(CommitId::parse("abc1234").unwrap()),
                 head: CommitId::parse("fedcba9").unwrap(),
                 head_short_oid: "fedcba9".into(),
-                short_oid: "abc1234".into(),
+                target: "abc1234".into(),
                 left: vec!["c1a2b3c".into(), "d4e5f6a".into(), "0b1c2d3".into()],
             }
             .into_question(),
@@ -1655,6 +1655,34 @@ mod tests {
         for id in ["c1a2b3c", "d4e5f6a", "0b1c2d3"] {
             assert!(contains(&rows, id), "{id}: {rows:#?}");
         }
+        assert!(
+            rows[11].starts_with(" y leave  n stay  ctrl-c quit"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn the_leave_commits_question_for_a_branch_checkout_names_the_branch() {
+        use crate::popup::LeaveCommitsConfirm;
+        use kika_git::commit_files::CommitId;
+        let mut state = workspace(&["a.rs"]);
+        state.popups = vec![Popup::Question(
+            LeaveCommitsConfirm {
+                op: GitOp::Checkout("main".into()),
+                head: CommitId::parse("fedcba9").unwrap(),
+                head_short_oid: "fedcba9".into(),
+                target: "main".into(),
+                left: vec!["c1a2b3c".into()],
+            }
+            .into_question(),
+        )];
+        let (_, rows) = draw(&state, 100, 12);
+        assert!(contains(&rows, " Leave commits behind "), "{rows:#?}");
+        assert!(
+            contains(&rows, "Check out main and leave 1 commit"),
+            "{rows:#?}"
+        );
+        assert!(contains(&rows, "c1a2b3c"), "{rows:#?}");
         assert!(
             rows[11].starts_with(" y leave  n stay  ctrl-c quit"),
             "{rows:#?}"
@@ -1675,7 +1703,7 @@ mod tests {
                 },
                 head: CommitId::parse("fedcba9").unwrap(),
                 head_short_oid: "fedcba9".into(),
-                short_oid: "abc1234".into(),
+                target: "abc1234".into(),
                 left: (0..8).map(|i| format!("{i}{i}{i}{i}{i}{i}{i}")).collect(),
             }
             .into_question(),

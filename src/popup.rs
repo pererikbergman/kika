@@ -278,8 +278,9 @@ pub struct LeaveCommitsConfirm {
     /// `head`'s short id, as the log shows it: the question names it so
     /// the user can branch there before leaving.
     pub head_short_oid: String,
-    /// The target's short id, as the log shows it.
-    pub short_oid: String,
+    /// The target as the user sees it: a commit's short id, as the log
+    /// shows it, or the branch `HEAD` lands on.
+    pub target: String,
     /// The short ids of the commits left behind, newest first.
     pub left: Vec<String>,
 }
@@ -308,7 +309,7 @@ impl LeaveCommitsConfirm {
             "To keep them, press n, then N to create a branch at {}",
             self.head_short_oid
         );
-        let short_oid = &self.short_oid;
+        let target = &self.target;
         match &self.op {
             // The warning comes first, so a small terminal that clips the
             // end still shows it.
@@ -316,17 +317,17 @@ impl LeaveCommitsConfirm {
                 mode: ResetMode::Hard,
                 ..
             } => format!(
-                "Reset hard to {short_oid}: every uncommitted change, staged and unstaged, \
+                "Reset hard to {target}: every uncommitted change, staged and unstaged, \
                  is thrown away, and {count} {noun} that no branch or tag reaches {are} left \
                  behind ({ids}). Afterwards only the reflog has them. {keep} (y/n)"
             ),
             op => {
                 let action = match op {
-                    GitOp::CheckoutCommit(_) => "Check out",
-                    _ => "Reset to",
+                    GitOp::Reset { .. } => "Reset to",
+                    _ => "Check out",
                 };
                 format!(
-                    "{action} {short_oid} and leave {count} {noun} that no branch or tag \
+                    "{action} {target} and leave {count} {noun} that no branch or tag \
                      reaches behind ({ids})? Afterwards only the reflog has them. {keep} (y/n)"
                 )
             }
@@ -815,7 +816,7 @@ mod tests {
             op,
             head: kika_git::commit_files::CommitId::parse("fedcba9").unwrap(),
             head_short_oid: "fedcba9".into(),
-            short_oid: "abc1234".into(),
+            target: "abc1234".into(),
             left: (0..count).map(|i| format!("{i}{i}{i}")).collect(),
         }
         .into_question()
@@ -845,6 +846,40 @@ mod tests {
                 .text
                 .contains("leave 1 commit that no branch")
         );
+    }
+
+    #[test]
+    fn the_branch_checkouts_name_the_branch_head_lands_on() {
+        let branch_ops = [
+            GitOp::Checkout("main".into()),
+            GitOp::CreateBranch {
+                name: "main".into(),
+                from: "topic".into(),
+            },
+            GitOp::CheckoutTracking {
+                name: "main".into(),
+                from: crate::test_support::three_remotes()[1].branches[0].clone(),
+            },
+        ];
+        for op in branch_ops {
+            let ask = LeaveCommitsConfirm {
+                op: op.clone(),
+                head: kika_git::commit_files::CommitId::parse("fedcba9").unwrap(),
+                head_short_oid: "fedcba9".into(),
+                target: "main".into(),
+                left: vec!["000".into()],
+            }
+            .into_question();
+            assert_eq!(ask.title, "Leave commits behind", "{op:?}");
+            assert_eq!(
+                ask.text,
+                "Check out main and leave 1 commit that no branch or tag reaches behind \
+                 (000)? Afterwards only the reflog has them. To keep them, press n, \
+                 then N to create a branch at fedcba9 (y/n)",
+                "{op:?}"
+            );
+            assert_eq!(ask.answer, Answer::YOnly, "{op:?}");
+        }
     }
 
     #[test]

@@ -119,7 +119,7 @@ impl AppState {
             return vec![];
         }
         let name = name.to_string();
-        self.start_op(Ok(Some(GitOp::CheckoutTracking { name, from })))
+        self.move_head_to_branch(GitOp::CheckoutTracking { name, from })
     }
 
     pub(crate) fn ask_remote_name(&mut self) {
@@ -267,18 +267,21 @@ pub(crate) fn remove_remote_question(name: String, op: GitOp) -> ConfirmQuestion
 mod tests {
     use crate::confirm_question::Then;
     use crate::effect::Effect;
+    use crate::effect::Tag;
     use crate::features::branches::BranchesIntent;
     use crate::features::branches::BranchesTab;
     use crate::features::branches::remotes::RemoteLine;
     use crate::features::branches::remotes::RemotesIntent;
     use crate::intent::AppIntent;
     use crate::keymap::{self, KeyScope};
+    use crate::model::AppState;
     use crate::op::GitOp;
     use crate::popup::{Popup, PromptKind};
     use crate::test_support::{
-        branches_loaded, branches_tag, finished, git_remote, log_load, on_remote_row, op_of, press,
-        press_char, reload_remotes, remotes_tag, shift, three_branches, three_remotes, type_text,
-        with_branches, with_remotes,
+        branches_loaded, branches_tag, check_to, detached_on_branch_list, finished, git_remote,
+        ids, left_behind_checked, log_load, on_remote_row, op_of, press, press_char,
+        reload_remotes, remotes_tag, shift, start_bisecting, three_branches, three_remotes,
+        type_text, with_branches, with_remotes,
     };
     use crossterm::event::KeyCode;
 
@@ -410,6 +413,72 @@ mod tests {
             }
         );
         assert_eq!(state.branches.remotes.pending, None);
+    }
+
+    /// From a detached `HEAD` on `c0`, the tracking checkout of
+    /// `origin/topic` as `topic`, up to its left-behind check.
+    fn detached_track_check() -> (AppState, Tag, GitOp) {
+        let mut state = detached_on_branch_list();
+        reload_remotes(&mut state, three_remotes());
+        press_char(&mut state, ']');
+        state.branches.remotes.list.move_by(3);
+        press_char(&mut state, ' ');
+        let (tag, op) = check_to(&press(&mut state, KeyCode::Enter), None);
+        assert_eq!(
+            op,
+            GitOp::CheckoutTracking {
+                name: "topic".into(),
+                from: three_remotes()[1].branches[1].clone(),
+            }
+        );
+        assert_eq!(state.branches.remotes.pending, None);
+        assert_eq!(state.held_seq(), None);
+        (state, tag, op)
+    }
+
+    #[test]
+    fn from_a_detached_head_a_remote_checkout_asks_before_leaving_commits() {
+        let (mut state, tag, op) = detached_track_check();
+        assert_eq!(
+            state.update(left_behind_checked(tag, op.clone(), Ok(ids(2)))),
+            vec![]
+        );
+        assert_eq!(state.key_focus(), KeyScope::LeaveCommits);
+        let [Popup::Question(ask)] = state.popups.as_slice() else {
+            panic!("{:?}", state.popups)
+        };
+        assert_eq!(ask.title, "Leave commits behind");
+        assert!(
+            ask.text.starts_with(
+                "Check out topic and leave 2 commits that no branch or tag reaches behind (a0, a1)?"
+            ),
+            "{}",
+            ask.text
+        );
+        for code in [KeyCode::Enter, KeyCode::Char('n'), KeyCode::Esc] {
+            let mut no = state.clone();
+            assert_eq!(press(&mut no, code), vec![], "{code:?}");
+            assert_eq!(no.held_seq(), None, "{code:?}");
+            assert_eq!(no.branch, state.branch, "{code:?}: HEAD stays");
+        }
+        let (_, ran) = op_of(&press_char(&mut state, 'y'));
+        assert_eq!(ran, op);
+    }
+
+    #[test]
+    fn a_remote_checkout_with_nothing_left_behind_runs_and_a_bisect_refuses_it() {
+        let (mut state, tag, op) = detached_track_check();
+        let (_, ran) = op_of(&state.update(left_behind_checked(tag, op.clone(), Ok(vec![]))));
+        assert_eq!(ran, op);
+
+        let (mut state, tag, op) = detached_track_check();
+        start_bisecting(&mut state);
+        assert_eq!(
+            state.update(left_behind_checked(tag, op, Ok(ids(1)))),
+            vec![]
+        );
+        assert_eq!(state.popups, []);
+        assert_eq!(state.notice, Some(crate::bisect::RESET_FIRST.into()));
     }
 
     #[test]

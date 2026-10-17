@@ -1,6 +1,8 @@
 //! Checking out or resetting to a commit from a detached `HEAD`: before
 //! `HEAD` moves, find the commits nothing else reaches and ask before
-//! leaving them to the reflog.
+//! leaving them to the reflog. The check itself starts in core
+//! (`model/left_behind.rs`), so Branches' checkouts get the same question;
+//! every answer comes back here.
 
 use crate::confirm_question::Answer;
 use crate::effect::{Effect, Tag};
@@ -11,42 +13,15 @@ use crate::op::{GitOp, ResetMode};
 use crate::popup::{ErrorPopup, LeaveCommitsConfirm, Popup};
 use kika_git::commit_files::CommitId;
 
-/// The left-behind check in flight, and where the user was when it
-/// started. Its answer only asks if they are still there, so a key meant
-/// for something else cannot answer the question.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LeftBehindCheck {
-    pub seq: u64,
-    pub popups: Vec<Popup>,
-    pub focus: KeyScope,
-}
-
 impl AppState {
     /// Plan `op`, which moves `HEAD` to `target`. On a detached `HEAD`,
     /// first look for the commits it would leave behind; anywhere else, go
-    /// on as without the check. One check runs at a time, so two quick
-    /// presses never stack two questions.
+    /// on as without the check.
     pub(crate) fn move_head(&mut self, op: GitOp, target: CommitId) -> Vec<Effect> {
-        let Some(head) = self.detached_head() else {
-            return self.move_head_now(op, None);
-        };
-        if self.left_behind_check.is_some() {
-            self.notice = Some("Still checking for commits left behind".into());
-            return vec![];
+        match self.detached_head() {
+            Some(head) => self.check_left_behind(op, head, Some(target)),
+            None => self.move_head_now(op, None),
         }
-        let seq = self.take_seq();
-        let tag = self.user_tag(seq);
-        self.left_behind_check = Some(LeftBehindCheck {
-            seq,
-            popups: self.popups.clone(),
-            focus: self.key_focus(),
-        });
-        vec![Effect::CheckLeftBehind {
-            tag,
-            op,
-            head,
-            target,
-        }]
     }
 
     /// What `op` does once nothing would be left behind: a checkout and a
@@ -120,18 +95,21 @@ impl AppState {
         if left.is_empty() {
             return self.move_head_now(op, Some(head));
         }
+        // The target as the user sees it: a short id, or the branch `HEAD`
+        // lands on.
         let target = match &op {
-            GitOp::CheckoutCommit(id) | GitOp::Reset { to: id, .. } => id,
+            GitOp::CheckoutCommit(id) | GitOp::Reset { to: id, .. } => self.commits.short_oid(id),
+            GitOp::Checkout(name) => name.display(),
+            GitOp::CheckoutTracking { name, .. } | GitOp::CreateBranch { name, .. } => name.clone(),
             _ => return vec![],
         };
-        let short_oid = self.commits.short_oid(target);
         let left = left.iter().map(|id| self.commits.short_oid(id)).collect();
         let head_short_oid = self.commits.short_oid(&head);
         let question = LeaveCommitsConfirm {
             op,
             head,
             head_short_oid,
-            short_oid,
+            target,
             left,
         }
         .into_question();
@@ -265,7 +243,7 @@ mod tests {
                         op: GitOp::CheckoutCommit(cid("c1")),
                         head: cid("c0"),
                         head_short_oid: "c0".into(),
-                        short_oid: "c1".into(),
+                        target: "c1".into(),
                         left: vec!["a0".into(), "a1".into()],
                     }
                     .into_question()
@@ -412,7 +390,7 @@ mod tests {
                         op: planned,
                         head: cid("c0"),
                         head_short_oid: "c0".into(),
-                        short_oid: "c1".into(),
+                        target: "c1".into(),
                         left: vec!["a0".into(), "a1".into(), "a2".into()],
                     }
                     .into_question()

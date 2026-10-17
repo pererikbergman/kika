@@ -209,7 +209,7 @@ src/features/
   commits/{reflog/, rewrite/, copy/, custom_patch/, bisect/, compare/}
 ```
 
-That is 26 feature folders and 179 `.rs` files. `src/model/` holds only `confirm_guard.rs`. `AppIntent` and `Effect` stay flat. Their variants are grouped under `// --- <feature> ---` comments, core first and then the features in the order above.
+That is 26 feature folders and 179 `.rs` files. `src/model/` held only `confirm_guard.rs`; #512 added `left_behind.rs`. `AppIntent` and `Effect` stay flat. Their variants are grouped under `// --- <feature> ---` comments, core first and then the features in the order above.
 
 ### Core files and why they stay
 
@@ -229,6 +229,7 @@ Most of these have importers or callers in two or more sibling features, or in c
 | `rows.rs`, `pick_list.rs`, `popup*.rs`, `menu.rs` | Shared widgets. |
 | `clipboard.rs`, `config.rs`, `program.rs`, `worktree_file.rs`, `sequence_editor.rs` | Plumbing that the loop, `src/git` or several features use. |
 | `model/confirm_guard.rs` | `confirm_refused`, the re-check a `HEAD`-moving question runs on `y`. Only commits and its rewrite call it, so rule 1 would put it in `commits`. #323 kept it in place as planned. Moving it is a candidate for a follow-up. |
+| `model/left_behind.rs` | `LeftBehindCheck` and `check_left_behind`, the start of the check before a detached `HEAD` moves off commits nothing else reaches. Commits (checkout, reset) and branches (checkout, remote checkout, create branch) both start it (#512); the answer is still handled in `commits/rewrite`. |
 
 A few hub items have only one feature caller today and still stay, because they are generic or because moving them would change a test assertion:
 - `AppState::git_has` (`model.rs`) reads core `git_version`; commits and its rewrite ask it.
