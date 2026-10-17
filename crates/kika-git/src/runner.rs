@@ -1603,7 +1603,13 @@ mod tests {
         let tmp = TempDir::new("attached-stdin");
         let dir = tmp.path();
         git(dir, &["init", "-q"]);
-        let runner = CliRunner::isolated(dir);
+        // Its own identity: git would otherwise fall back to the OS account's
+        // name, which some machines leave empty.
+        let runner = CliRunner::isolated(dir)
+            .with_env("GIT_AUTHOR_NAME", "t")
+            .with_env("GIT_AUTHOR_EMAIL", "t@t")
+            .with_env("GIT_COMMITTER_NAME", "t")
+            .with_env("GIT_COMMITTER_EMAIL", "t@t");
         let cmd = GitCommand::new("commit")
             .arg("-q")
             .arg("--allow-empty")

@@ -809,6 +809,7 @@ mod tests {
         assert!(write(tmp.path(), &key(12, "/r"), &review()).is_err());
     }
 
+    #[cfg(unix)]
     fn env<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
         move |key| {
             vars.iter()
