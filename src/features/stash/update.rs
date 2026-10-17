@@ -36,6 +36,7 @@ pub(crate) fn update(state: &mut AppState, intent: StashIntent) -> Vec<Effect> {
         StashIntent::CloseFiles => return state.close_stash_files(),
         StashIntent::FileNext => return state.move_stash_file(1),
         StashIntent::FilePrev => return state.move_stash_file(-1),
+        StashIntent::FileMoveBy(delta) => return state.move_stash_file(delta),
         StashIntent::FilesLoaded { tag, result } => {
             return state.stash_files_loaded(tag, result);
         }
@@ -541,6 +542,23 @@ mod tests {
         let request = diff_request(&press(&mut state, KeyCode::Up));
         assert_eq!(request.path, "src/lib.rs".into());
         assert_eq!(state.stash.list.selected, 1);
+    }
+
+    #[test]
+    fn file_move_by_moves_the_file_cursor_clamped_with_one_diff_load() {
+        let mut state = on_stash_one();
+        let (tag, _) = stash_files_load(&press(&mut state, KeyCode::Enter));
+        state.update(AppIntent::Stash(StashIntent::FilesLoaded {
+            tag,
+            result: Ok(tracked_and_untracked()),
+        }));
+        let by = |delta| AppIntent::Stash(StashIntent::FileMoveBy(delta));
+        let request = diff_request(&state.update(by(9)));
+        assert_eq!(request.path, "notes.txt".into(), "clamped at the end");
+        assert_eq!(state.update(by(1)), vec![], "no move, no load");
+        let request = diff_request(&state.update(by(-9)));
+        assert_eq!(request.path, "src/lib.rs".into(), "clamped at the start");
+        assert_eq!(state.stash.list.selected, 1, "the entry stays");
     }
 
     #[test]

@@ -19,6 +19,9 @@ pub(crate) enum ReposIntent {
     /// Move the recent list's cursor down or up.
     Next,
     Prev,
+    /// Move the cursor by this many rows, clamped at both ends: a click
+    /// or a wheel notch.
+    MoveBy(isize),
     /// Open the row under the recent list's cursor.
     Select,
     /// Make the launch directory a repository.

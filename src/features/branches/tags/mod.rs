@@ -16,7 +16,8 @@
 //!   `keys::{tag_commit_disabled, delete_tag_disabled}`;
 //! - `effects::load`;
 //! - `git::{create_command, delete_command}`;
-//! - `view::list_body`.
+//! - `view::list_body`, and the mouse's queries `tags_list_shown` and
+//!   `tags_step_to` (`view.rs`).
 //!
 //! Kept cross-feature reads and calls:
 //! - `commits.list.rows` and `commits.list.selected` (commits), to take the commit a

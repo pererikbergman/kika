@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
@@ -35,21 +35,24 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
         let area = nudge(area, depth);
         let top = depth + 1 == count;
         match popup {
-            Popup::Menu { id, cursor } => {
-                let cursor = top.then_some(*cursor);
-                render_menu(state, *id, cursor, frame, area)
+            Popup::Submodules(_) | Popup::Recent(_) => {
+                if let Some(popup) = list_popup(state, popup, top, area) {
+                    draw_list_popup(popup, false, frame);
+                }
+            }
+            Popup::Menu { .. } | Popup::PickList(_) => {
+                if let Some(popup) = list_popup(state, popup, top, area) {
+                    draw_list_popup(popup, true, frame);
+                }
             }
             Popup::Prompt { kind, input } => {
                 render_prompt(&state.prompt_title(*kind), input, top, frame, area)
             }
             Popup::Error(error) => render_error(&state.palette, error, frame, area),
             Popup::Question(q) => render_question(&format!(" {} ", q.title), &q.text, frame, area),
-            Popup::Submodules(list) => render_submodules(list, top, frame, area),
             Popup::Worktrees(list) => {
                 crate::features::worktrees::view::render_worktrees(state, list, top, frame, area)
             }
-            Popup::Recent(list) => render_recent(state, list, top, frame, area),
-            Popup::PickList(list) => render_pick_list(list, top, frame, area),
             Popup::Credential(prompt) if prompt.confirm => {
                 let text = format!("{}\n(y/n)", prompt.prompt);
                 render_question(CREDENTIAL_TITLE, &text, frame, area)
@@ -67,6 +70,152 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
             ),
         }
     }
+}
+
+/// Where a list popup is drawn and which of its lines are rows. The view
+/// draws from it and the mouse tests a click against it, so a click lands
+/// on the row drawn under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ListBox {
+    /// The popup's outer rect, its border included.
+    pub rect: Rect,
+    /// The first line shown inside the border, the header counted.
+    pub first: usize,
+    /// Lines above the rows that are not rows: a note, or what the list
+    /// waits for or why it failed.
+    pub header: usize,
+    /// How many rows there are to select.
+    pub len: usize,
+    /// The cursor's row, while it is marked.
+    pub cursor: Option<usize>,
+}
+
+impl ListBox {
+    /// The row drawn at `at`; `None` on the border, on the header and
+    /// below the last row.
+    pub(crate) fn row_at(&self, at: Position) -> Option<usize> {
+        let inner = Block::bordered().inner(self.rect);
+        if !inner.contains(at) {
+            return None;
+        }
+        let line = self.first + usize::from(at.y - inner.y);
+        line.checked_sub(self.header).filter(|&row| row < self.len)
+    }
+}
+
+/// A list popup laid out: its box, its title and every line it holds,
+/// which the box's `first` scrolls through.
+pub(crate) struct ListPopup {
+    pub list: ListBox,
+    pub title: String,
+    pub lines: Vec<Line<'static>>,
+}
+
+/// The list box of the top popup, nudged as it is drawn over `area`, when
+/// that popup is a list; `None` for any other popup or none.
+pub(crate) fn top_list_box(state: &AppState, area: Rect) -> Option<ListBox> {
+    let depth = state.popups.len().checked_sub(1)?;
+    let area = nudge(area, depth);
+    match state.popups.last()? {
+        Popup::Worktrees(list) => {
+            Some(crate::features::worktrees::view::worktrees_popup(state, list, true, area).list)
+        }
+        Popup::CommandLog(view) => Some(command_log::view::log_box(&state.command_log, view, area)),
+        popup => list_popup(state, popup, true, area).map(|popup| popup.list),
+    }
+}
+
+/// The menu, submodule, recent or pick list `popup` laid out in `area`.
+fn list_popup(state: &AppState, popup: &Popup, top: bool, area: Rect) -> Option<ListPopup> {
+    match popup {
+        Popup::Menu { id, cursor } => Some(menu_popup(state, *id, top.then_some(*cursor), area)),
+        Popup::Submodules(list) => Some(submodules_popup(list, top, area)),
+        Popup::Recent(list) => Some(recent_popup(state, list, top, area)),
+        Popup::PickList(list) => Some(pick_list_popup(list, top, area)),
+        _ => None,
+    }
+}
+
+/// The shape of a list popup's lines: `header` notes, then `len` rows,
+/// then any notes below them.
+#[derive(Clone, Copy)]
+struct Rows {
+    header: usize,
+    len: usize,
+}
+
+impl Rows {
+    /// Every line a row.
+    fn all(len: usize) -> Self {
+        Rows { header: 0, len }
+    }
+
+    /// Only notes, no row.
+    fn none() -> Self {
+        Rows { header: 0, len: 0 }
+    }
+}
+
+/// `lines` padded to one `width`, shaped as `rows` says, the `cursor` row
+/// reversed, centred in `area` and scrolled so the cursor's line shows.
+fn fitted(
+    area: Rect,
+    title: String,
+    lines: Vec<(String, Style)>,
+    width: usize,
+    Rows { header, len }: Rows,
+    cursor: Option<usize>,
+) -> ListPopup {
+    let cursor = cursor.filter(|&row| row < len);
+    let lines: Vec<Line<'static>> = lines
+        .into_iter()
+        .enumerate()
+        .map(|(i, (text, mut style))| {
+            let pad = " ".repeat(width.saturating_sub(width_of(&text)));
+            if cursor.is_some_and(|row| header + row == i) {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            Line::styled(format!("{text}{pad}"), style)
+        })
+        .collect();
+    let rect = centered(
+        area,
+        u16::try_from(width + 2).unwrap_or(u16::MAX),
+        u16::try_from(lines.len() + 2).unwrap_or(u16::MAX),
+    );
+    let shown = usize::from(rect.height.saturating_sub(2)).max(1);
+    let first = cursor.map_or(0, |row| (header + row).saturating_sub(shown - 1));
+    ListPopup {
+        list: ListBox {
+            rect,
+            first,
+            header,
+            len,
+            cursor,
+        },
+        title,
+        lines,
+    }
+}
+
+/// Draw a laid-out list popup over what is below it, with `▲`/`▼` on the
+/// border where lines are cut when `marks` asks for them.
+pub(crate) fn draw_list_popup(popup: ListPopup, marks: bool, frame: &mut Frame) {
+    let ListPopup { list, title, lines } = popup;
+    frame.render_widget(Clear, list.rect);
+    let shown = usize::from(list.rect.height.saturating_sub(2)).max(1);
+    let mut block = Block::bordered().title(title);
+    if marks && list.first > 0 {
+        block = block.title(Line::raw("▲").right_aligned());
+    }
+    if marks && list.first + shown < lines.len() {
+        block = block.title_bottom(Line::raw("▼").right_aligned());
+    }
+    let first = u16::try_from(list.first).unwrap_or(u16::MAX);
+    frame.render_widget(
+        Paragraph::new(lines).scroll((first, 0)).block(block),
+        list.rect,
+    );
 }
 
 /// `area` with its top-left corner pulled in, so a popup centred in it
@@ -92,19 +241,25 @@ fn nudge(area: Rect, depth: usize) -> Rect {
 /// first, so the label stays whole while it fits. A reason ending in a
 /// path keeps the file name, and one with marked advice keeps the advice
 /// (`fit_reason`).
-fn render_menu(state: &AppState, id: MenuId, cursor: Option<usize>, frame: &mut Frame, area: Rect) {
+fn menu_popup(state: &AppState, id: MenuId, cursor: Option<usize>, area: Rect) -> ListPopup {
     let title = format!(" {} ", id.title());
     let room = usize::from(area.width.saturating_sub(2));
-    let rows: Vec<(String, bool)> = menu::items(id)
+    let disabled = Style::new()
+        .fg(state.palette.dim)
+        .add_modifier(Modifier::DIM | Modifier::ITALIC);
+    let rows: Vec<(String, Style)> = menu::items(id)
         .iter()
         .map(|item| match (item.disabled)(state) {
             Some(reason) => {
                 let head = format!(" {}  ", item.label);
                 let left = room.saturating_sub(width_of(&head) + 1);
                 let row = format!("{head}{} ", fit_reason(&reason, left));
-                (elide_right(&row, room), true)
+                (elide_right(&row, room), disabled)
             }
-            None => (elide_right(&format!(" {} ", item.label), room), false),
+            None => (
+                elide_right(&format!(" {} ", item.label), room),
+                Style::new(),
+            ),
         })
         .collect();
     let width = rows
@@ -113,42 +268,8 @@ fn render_menu(state: &AppState, id: MenuId, cursor: Option<usize>, frame: &mut 
         .chain([width_of(&title)])
         .max()
         .unwrap_or(0);
-    let lines: Vec<Line> = rows
-        .into_iter()
-        .enumerate()
-        .map(|(i, (text, disabled))| {
-            let pad = " ".repeat(width - width_of(&text));
-            let mut style = Style::new();
-            if disabled {
-                style = style
-                    .fg(state.palette.dim)
-                    .add_modifier(Modifier::DIM | Modifier::ITALIC);
-            }
-            if Some(i) == cursor {
-                style = style.add_modifier(Modifier::REVERSED);
-            }
-            Line::styled(format!("{text}{pad}"), style)
-        })
-        .collect();
-    let popup = centered(
-        area,
-        u16::try_from(width + 2).unwrap_or(u16::MAX),
-        u16::try_from(lines.len() + 2).unwrap_or(u16::MAX),
-    );
-    frame.render_widget(Clear, popup);
-    let rows = usize::from(popup.height.saturating_sub(2)).max(1);
-    let total = lines.len();
-    let first = cursor.map_or(0, |cursor| cursor.saturating_sub(rows - 1));
-    // Rows cut off are marked on the border they are hidden behind.
-    let mut block = Block::bordered().title(title);
-    if first > 0 {
-        block = block.title(Line::raw("▲").right_aligned());
-    }
-    if first + rows < total {
-        block = block.title_bottom(Line::raw("▼").right_aligned());
-    }
-    let first = u16::try_from(first).unwrap_or(u16::MAX);
-    frame.render_widget(Paragraph::new(lines).scroll((first, 0)).block(block), popup);
+    let len = rows.len();
+    fitted(area, title, rows, width, Rows::all(len), cursor)
 }
 
 /// Hex digits of a commit the list shows, enough to tell commits apart.
@@ -160,71 +281,54 @@ const SHORT_OID: usize = 7;
 /// The cursor row is reversed while the list is on top, and kept in view
 /// on a short screen. Until a load lands, and when it fails or finds
 /// nothing, that is said instead; a failure wraps to the box.
-fn render_submodules(list: &SubmoduleList, top: bool, frame: &mut Frame, area: Rect) {
+fn submodules_popup(list: &SubmoduleList, top: bool, area: Rect) -> ListPopup {
     let title = " Submodules ";
     // Text columns inside the borders.
     let room = usize::from(area.width.saturating_sub(2));
     let items = &list.list.rows;
-    let rows: Vec<String> = match (list.list.loaded, &list.list.error) {
+    let (notes, rows): (Vec<String>, Vec<String>) = match (list.list.loaded, &list.list.error) {
         (_, Some(error)) => {
             let safe: Vec<String> = error.lines().map(|l| sanitize(l.as_bytes())).collect();
-            wrap(&safe.join("\n"), room.saturating_sub(2).max(1))
+            let notes = wrap(&safe.join("\n"), room.saturating_sub(2).max(1))
                 .into_iter()
                 .map(|row| format!(" {row} "))
-                .collect()
+                .collect();
+            (notes, Vec::new())
         }
-        (false, None) => vec![" Loading… ".into()],
-        (true, None) if items.is_empty() => vec![" No submodules ".into()],
-        (true, None) => items
-            .iter()
-            .map(|sub| {
-                let oid: String = sub.oid.chars().take(SHORT_OID).collect();
-                let head = format!(" {} ", sub.state.marker());
-                let tail = format!(" {oid} {} ", sub.state.word());
-                let path_room = room
-                    .saturating_sub(width_of(&head) + width_of(&tail))
-                    .max(1);
-                format!("{head}{}{tail}", elide_left(sub.path.display(), path_room))
-            })
-            .collect(),
+        (false, None) => (vec![" Loading… ".into()], Vec::new()),
+        (true, None) if items.is_empty() => (vec![" No submodules ".into()], Vec::new()),
+        (true, None) => {
+            let rows = items
+                .iter()
+                .map(|sub| {
+                    let oid: String = sub.oid.chars().take(SHORT_OID).collect();
+                    let head = format!(" {} ", sub.state.marker());
+                    let tail = format!(" {oid} {} ", sub.state.word());
+                    let path_room = room
+                        .saturating_sub(width_of(&head) + width_of(&tail))
+                        .max(1);
+                    format!("{head}{}{tail}", elide_left(sub.path.display(), path_room))
+                })
+                .collect();
+            (Vec::new(), rows)
+        }
     };
     let cursor = (top && list.selected().is_some()).then_some(list.list.selected);
-    let width = rows
+    let shape = if rows.is_empty() {
+        Rows::none()
+    } else {
+        Rows::all(rows.len())
+    };
+    let lines: Vec<String> = notes.into_iter().chain(rows).collect();
+    let width = lines
         .iter()
         .map(|row| width_of(row))
         .chain([width_of(title)])
         .max()
         .unwrap_or(0)
         .min(room);
-    let lines: Vec<Line> = rows
-        .iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let pad = width.saturating_sub(width_of(row));
-            let text = format!("{row}{}", " ".repeat(pad));
-            let style = if Some(i) == cursor {
-                Style::new().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::new()
-            };
-            Line::styled(text, style)
-        })
-        .collect();
-    let popup = centered(
-        area,
-        u16::try_from(width + 2).unwrap_or(u16::MAX),
-        u16::try_from(lines.len() + 2).unwrap_or(u16::MAX),
-    );
-    frame.render_widget(Clear, popup);
-    let shown = usize::from(popup.height.saturating_sub(2)).max(1);
-    let first = cursor.map_or(0, |cursor| cursor.saturating_sub(shown - 1));
-    let first = u16::try_from(first).unwrap_or(u16::MAX);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .scroll((first, 0))
-            .block(Block::bordered().title(title)),
-        popup,
-    );
+    let lines = lines.into_iter().map(|row| (row, Style::new())).collect();
+    fitted(area, title.into(), lines, width, shape, cursor)
 }
 
 /// A path as one safe row: control characters, newlines included, cannot
@@ -237,69 +341,48 @@ fn path_text(path: &Path) -> String {
 /// here" first when Kika started outside one, and that said above them.
 /// Long paths lose their start to `…`, where the name that tells them
 /// apart is not. The cursor row is reversed while the list is on top.
-fn render_recent(state: &AppState, list: &RecentList, top: bool, frame: &mut Frame, area: Rect) {
+fn recent_popup(state: &AppState, list: &RecentList, top: bool, area: Rect) -> ListPopup {
     let title = " Recent repositories ";
     let room = usize::from(area.width.saturating_sub(2));
     let fit = |text: &str| format!(" {} ", elide_left(text, room.saturating_sub(2).max(1)));
-    let mut header = Vec::new();
+    let mut lines = Vec::new();
     if state.repo.is_none() {
         // The path gives way, never the words that say what is wrong.
         let said = "Not a git repository: ";
         let path_room = room.saturating_sub(2 + width_of(said)).max(1);
         let path = elide_left(&path_text(&state.launch), path_room);
-        header.push(format!(" {said}{path} "));
+        lines.push(format!(" {said}{path} "));
     }
+    let header = lines.len();
     let rows = list.rows(&state.recent, state.repo.as_deref());
-    let mut lines_text: Vec<String> = header.clone();
-    lines_text.extend(rows.iter().map(|row| match row {
+    lines.extend(rows.iter().map(|row| match row {
         RecentRow::Init => fit("Initialise a repository here"),
         RecentRow::Repo(path) => fit(&path_text(path)),
     }));
+    // Said below the rows, so it is not one of them.
     if !rows.iter().any(|row| matches!(row, RecentRow::Repo(_))) {
-        lines_text.push(fit("No recent repositories"));
+        lines.push(fit("No recent repositories"));
     }
-    let cursor = (top && list.cursor < rows.len()).then_some(header.len() + list.cursor);
-    let width = lines_text
+    let cursor = (top && list.cursor < rows.len()).then_some(list.cursor);
+    let width = lines
         .iter()
         .map(|row| width_of(row))
         .chain([width_of(title)])
         .max()
         .unwrap_or(0)
         .min(room);
-    let lines: Vec<Line> = lines_text
-        .iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let pad = width.saturating_sub(width_of(row));
-            let style = if Some(i) == cursor {
-                Style::new().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::new()
-            };
-            Line::styled(format!("{row}{}", " ".repeat(pad)), style)
-        })
-        .collect();
-    let popup = centered(
-        area,
-        u16::try_from(width + 2).unwrap_or(u16::MAX),
-        u16::try_from(lines.len() + 2).unwrap_or(u16::MAX),
-    );
-    frame.render_widget(Clear, popup);
-    let shown = usize::from(popup.height.saturating_sub(2)).max(1);
-    let first = cursor.map_or(0, |cursor| cursor.saturating_sub(shown - 1));
-    let first = u16::try_from(first).unwrap_or(u16::MAX);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .scroll((first, 0))
-            .block(Block::bordered().title(title)),
-        popup,
-    );
+    let shape = Rows {
+        header,
+        len: rows.len(),
+    };
+    let lines = lines.into_iter().map(|row| (row, Style::new())).collect();
+    fitted(area, title.into(), lines, width, shape, cursor)
 }
 
 /// The rows to pick from, under the list's purpose, with the cursor row
 /// reversed while the list is on top. Long rows are cut at the end, and
 /// rows scrolled out of a short screen are marked `▲`/`▼` on the border.
-fn render_pick_list(list: &PickList, top: bool, frame: &mut Frame, area: Rect) {
+fn pick_list_popup(list: &PickList, top: bool, area: Rect) -> ListPopup {
     let title = format!(" {} ", list.purpose.title());
     let room = usize::from(area.width.saturating_sub(2));
     let rows: Vec<String> = list
@@ -314,41 +397,9 @@ fn render_pick_list(list: &PickList, top: bool, frame: &mut Frame, area: Rect) {
         .max()
         .unwrap_or(0)
         .min(room);
-    let lines: Vec<Line> = rows
-        .iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let pad = width.saturating_sub(width_of(row));
-            let style = if top && i == list.cursor {
-                Style::new().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::new()
-            };
-            Line::styled(format!("{row}{}", " ".repeat(pad)), style)
-        })
-        .collect();
-    let popup = centered(
-        area,
-        u16::try_from(width + 2).unwrap_or(u16::MAX),
-        u16::try_from(lines.len() + 2).unwrap_or(u16::MAX),
-    );
-    frame.render_widget(Clear, popup);
-    let shown = usize::from(popup.height.saturating_sub(2)).max(1);
-    let total = lines.len();
-    let first = if top {
-        list.cursor.saturating_sub(shown - 1)
-    } else {
-        0
-    };
-    let mut block = Block::bordered().title(title);
-    if first > 0 {
-        block = block.title(Line::raw("▲").right_aligned());
-    }
-    if first + shown < total {
-        block = block.title_bottom(Line::raw("▼").right_aligned());
-    }
-    let first = u16::try_from(first).unwrap_or(u16::MAX);
-    frame.render_widget(Paragraph::new(lines).scroll((first, 0)).block(block), popup);
+    let shape = Rows::all(rows.len());
+    let lines = rows.into_iter().map(|row| (row, Style::new())).collect();
+    fitted(area, title, lines, width, shape, top.then_some(list.cursor))
 }
 
 /// A one-line box holding the typed text, and the terminal cursor when it

@@ -23,6 +23,7 @@ pub(crate) fn update(state: &mut AppState, intent: WorktreesIntent) -> Vec<Effec
         WorktreesIntent::Loaded { tag, result } => state.worktrees_loaded(tag, result),
         WorktreesIntent::Next => state.move_worktree_cursor(1),
         WorktreesIntent::Prev => state.move_worktree_cursor(-1),
+        WorktreesIntent::MoveBy(delta) => state.move_worktree_cursor(delta),
         WorktreesIntent::Open => return state.open_worktree(),
         WorktreesIntent::Add => state.ask_worktree_path(),
         WorktreesIntent::AddAt(text) => return state.add_worktree_at(text),
@@ -530,6 +531,32 @@ mod tests {
         // Opened again, the list starts unfiltered.
         worktrees_tag(&press_char(&mut state, 'W'));
         assert_eq!(the_worktree_list(&state).list.filter, "");
+    }
+
+    #[test]
+    fn move_by_moves_over_the_shown_worktrees_clamped_and_switches_nothing() {
+        let mut state = with_worktrees(four_worktrees(), 0);
+        let by = |delta| AppIntent::Worktrees(WorktreesIntent::MoveBy(delta));
+        assert_eq!(
+            state.update(by(2)),
+            vec![],
+            "as `Next`, moving runs nothing"
+        );
+        assert_eq!(the_worktree_list(&state).list.selected, 2);
+        state.update(by(9));
+        assert_eq!(
+            the_worktree_list(&state).list.selected,
+            3,
+            "clamped at the end"
+        );
+        state.update(by(-9));
+        assert_eq!(
+            the_worktree_list(&state).list.selected,
+            0,
+            "clamped at the start"
+        );
+        assert_eq!(state.repo, Some("/r/a".into()));
+        assert!(matches!(state.popups[..], [Popup::Worktrees(_)]));
     }
 
     #[test]

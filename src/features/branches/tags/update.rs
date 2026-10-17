@@ -23,6 +23,7 @@ pub(crate) fn update(state: &mut AppState, intent: TagsIntent) -> Vec<Effect> {
         TagsIntent::Loaded { tag, result } => return state.tags_loaded(tag, result),
         TagsIntent::Next => return state.move_tag(1),
         TagsIntent::Prev => return state.move_tag(-1),
+        TagsIntent::MoveBy(delta) => return state.move_tag(delta),
         TagsIntent::New => state.ask_tag_name(false),
         TagsIntent::NewAnnotated => state.ask_tag_name(true),
         TagsIntent::Named(text) => return state.tag_named(text),
@@ -263,6 +264,17 @@ mod tests {
         press_char(&mut state, ']');
         assert_eq!(state.branches.tab, BranchesTab::Tags);
         state
+    }
+
+    #[test]
+    fn move_by_moves_the_tag_cursor_clamped_with_one_log_load() {
+        let mut state = on_tags();
+        let by = |delta| AppIntent::Branches(TagsIntent::MoveBy(delta).into());
+        let (_, refname) = log_load(&state.update(by(5))).unwrap();
+        assert_eq!(refname, b"refs/tags/v1", "clamped at the end");
+        assert_eq!(state.update(by(1)), vec![], "no move, no load");
+        let (_, refname) = log_load(&state.update(by(-5))).unwrap();
+        assert_eq!(refname, b"refs/tags/v2", "clamped at the start");
     }
 
     #[test]

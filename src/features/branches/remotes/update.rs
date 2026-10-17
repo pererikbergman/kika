@@ -22,6 +22,7 @@ pub(crate) fn update(state: &mut AppState, intent: RemotesIntent) -> Vec<Effect>
         RemotesIntent::Loaded { tag, result } => return state.remotes_loaded(tag, result),
         RemotesIntent::Next => return state.move_remote(1),
         RemotesIntent::Prev => return state.move_remote(-1),
+        RemotesIntent::MoveBy(delta) => return state.move_remote(delta),
         RemotesIntent::Track => state.ask_track_name(),
         RemotesIntent::TrackNamed(text) => return state.track_named(&text),
         RemotesIntent::Add => state.ask_remote_name(),
@@ -302,6 +303,25 @@ mod tests {
         )));
         assert!(!state.branches.remotes.list.loaded);
         assert_eq!(state.branches.remotes.remotes().count(), 0);
+    }
+
+    #[test]
+    fn move_by_moves_over_remotes_and_branches_clamped_with_one_log_load() {
+        let mut state = with_remotes();
+        press_char(&mut state, ']');
+        let by = |delta| AppIntent::Branches(RemotesIntent::MoveBy(delta).into());
+        // Two rows down, as `j` twice: origin's first branch, one log load.
+        let (_, refname) = log_load(&state.update(by(2))).unwrap();
+        assert_eq!(refname, b"refs/remotes/origin/main");
+        state.update(by(99));
+        let list = &state.branches.remotes.list;
+        assert_eq!(list.selected, list.rows.len() - 1, "clamped at the end");
+        assert_eq!(state.update(by(1)), vec![], "no move, no load");
+        state.update(by(-99));
+        assert_eq!(
+            state.branches.remotes.list.selected, 0,
+            "clamped at the start"
+        );
     }
 
     #[test]

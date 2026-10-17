@@ -7,8 +7,45 @@ use ratatui::text::{Line, Span};
 
 use super::git::ReflogEntry;
 use super::list::{ReflogList, short_id};
+use crate::features::commits::CommitsTab;
+use crate::layout::SidePanel;
+use crate::model::AppState;
 use crate::theme::Palette;
-use crate::view::{elide_right, no_matches, reversed, scrolled, width_of};
+use crate::view::{elide_right, no_matches, reversed, scrolled, scrolled_step_to, width_of};
+
+impl AppState {
+    /// Whether the Commits panel lists the reflog, expanded on its tab:
+    /// what a click or the wheel can move through.
+    pub(crate) fn reflog_list_shown(&self) -> bool {
+        let list = &self.commits.reflog;
+        self.expanded == SidePanel::Commits
+            && self.commits.tab == CommitsTab::Reflog
+            && list.head.is_some()
+            && !list.list.visible().is_empty()
+    }
+
+    /// The move from the cursor to the entry drawn on `line` of the
+    /// listed panel's `rows` inner lines, below any error; `None` on the
+    /// error, below the last entry or when the tab lists none.
+    pub(crate) fn reflog_step_to(&self, line: usize, rows: usize) -> Option<isize> {
+        if !self.reflog_list_shown() {
+            return None;
+        }
+        let list = &self.commits.reflog;
+        let head = error_lines(list);
+        let line = line.checked_sub(head)?;
+        let room = rows.saturating_sub(head).max(1);
+        scrolled_step_to(&list.list.visible(), list.list.selected, room, line)
+    }
+}
+
+/// Lines the error and its hint take above the entries; 0 without one.
+fn error_lines(list: &ReflogList) -> usize {
+    list.list
+        .error
+        .as_ref()
+        .map_or(0, |error| error.lines().count() + 1)
+}
 
 /// The tab's lines for an inside of `height` by `width`: a placeholder
 /// until the first read, then the rows the filter shows around the cursor,
@@ -46,6 +83,7 @@ pub(crate) fn reflog_lines(
         lines.push(no_matches(palette));
         return lines;
     }
+    debug_assert_eq!(lines.len(), error_lines(list));
     let room = height.saturating_sub(lines.len()).max(1);
     lines.extend(
         scrolled(&visible, Some(list.list.selected), room)

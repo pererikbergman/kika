@@ -782,19 +782,47 @@ emoji_zwj_terminals = ["WezTerm", "ghostty"]
 
 ### The mouse
 
-With `mouse` on, which is the default, a click and the wheel work in the
-workspace:
+With `mouse` on, which is the default, a click selects and the wheel
+scrolls. Help says so in its last line.
 
-- **Click** a row in the expanded Files, Branches (Local tab), Commits (Log
-  tab) or Stash list to select it. Clicking another panel, or its border,
-  focuses it; a collapsed panel keeps its selection.
+In the workspace:
+
+- **Click** a row in the expanded panel's list to select it: Files,
+  Branches (the Local, Remotes and Tags tabs; a remote's own row too),
+  Commits (the Log and Reflog tabs, and an opened commit's or compare's
+  files) or Stash (the list, and an opened entry's files). Clicking another
+  panel, or its border, focuses it; a collapsed panel keeps its selection.
 - **Click** the Diff pane to focus it.
 - **The wheel** over the expanded list moves its selection 3 rows a notch,
   as `j` and `k` do. Over the Diff pane it scrolls 3 lines a notch. Neither
   moves focus.
-- While a popup, a question, a prompt, the commit message, help or a
-  filter is open, the mouse does nothing, so a click never answers a
-  question. Review mode ignores the mouse too.
+
+In a menu, the pick list, and the Submodules, Worktrees, Recent
+repositories and Command log popups:
+
+- **Click** a row to move the cursor there. It never runs, picks or opens
+  the row: `Enter` still does that.
+- **The wheel** inside the popup moves its cursor 3 rows a notch.
+- A click outside the popup, or on a popup below the top one, does
+  nothing. While the popup's filter is being typed, the mouse does nothing.
+
+In help, the wheel scrolls 3 lines a notch; a click does nothing.
+
+In review mode:
+
+- **Click** a row of the queue to move the cursor there; the tabs line
+  does nothing.
+- On the files screen, **click** a file to select it and give the list the
+  keys, or click the diff to give it the keys. **The wheel** over the list
+  moves its selection 3 rows, and over the diff scrolls it 3 lines.
+- On a pull request's detail and its conversation, the wheel scrolls 3
+  lines a notch.
+- The pending comments list, the thread reader, picking a comment's lines
+  and typing a comment ignore the mouse.
+
+A click never answers a question. While a question, a prompt, an error, a
+password or host-key prompt, the commit message or a filter is open, the
+mouse does nothing.
 
 Capturing the mouse stops the terminal's own text selection inside Kika.
 Most terminals select text anyway while you hold Shift as you drag

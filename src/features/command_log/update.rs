@@ -16,6 +16,7 @@ pub(crate) fn update(state: &mut AppState, intent: CommandLogIntent) -> Vec<Effe
         CommandLogIntent::Open => state.open_command_log(),
         CommandLogIntent::Next => state.move_command_log(1),
         CommandLogIntent::Prev => state.move_command_log(-1),
+        CommandLogIntent::MoveBy(delta) => state.move_command_log(delta),
         CommandLogIntent::PageDown => state.move_command_log(state.command_log_page()),
         CommandLogIntent::PageUp => state.move_command_log(-state.command_log_page()),
     }
@@ -131,6 +132,24 @@ mod tests {
             },
         )));
         assert_eq!(state.command_log, before);
+    }
+
+    #[test]
+    fn move_by_moves_the_log_cursor_clamped_and_follows_only_at_the_newest() {
+        let mut state = AppState::new(Context::Workspace);
+        for id in 0..5 {
+            log_started(&mut state, id);
+        }
+        state.update(AppIntent::CommandLog(CommandLogIntent::Open));
+        let by = |delta| AppIntent::CommandLog(CommandLogIntent::MoveBy(delta));
+        assert_eq!(state.update(by(-3)), vec![]);
+        assert_eq!(command_log_view(&state).cursor, 1);
+        assert!(!command_log_view(&state).follow);
+        state.update(by(-9));
+        assert_eq!(command_log_view(&state).cursor, 0, "clamped at the start");
+        state.update(by(9));
+        assert_eq!(command_log_view(&state).cursor, 4, "clamped at the end");
+        assert!(command_log_view(&state).follow);
     }
 
     #[test]

@@ -25,6 +25,9 @@ pub(crate) enum StashIntent {
     /// Move the cursor in a stash's files down or up.
     FileNext,
     FilePrev,
+    /// Move the file cursor by this many rows, clamped at both ends: a
+    /// click or a wheel notch. One diff load, however far it moves.
+    FileMoveBy(isize),
     /// A stash's files were read; `tag` says which load.
     FilesLoaded {
         tag: Tag,

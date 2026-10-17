@@ -20,6 +20,7 @@ pub(crate) fn update(state: &mut AppState, intent: ReposIntent) -> Vec<Effect> {
         ReposIntent::Loaded { seq, list } => state.recent_loaded(seq, list),
         ReposIntent::Next => state.move_recent_cursor(1),
         ReposIntent::Prev => state.move_recent_cursor(-1),
+        ReposIntent::MoveBy(delta) => state.move_recent_cursor(delta),
         ReposIntent::Select => return state.recent_select(),
         ReposIntent::Init => return state.init_repo(),
         ReposIntent::Initialised { tag, result } => {
@@ -393,6 +394,26 @@ mod tests {
 
         assert_eq!(state.recent, newer);
         assert!(!state.recent_pending());
+    }
+
+    #[test]
+    fn move_by_moves_the_recent_cursor_clamped_and_opens_nothing() {
+        let mut state = outside("/w");
+        state.update(AppIntent::Start);
+        recent_loaded(&mut state, vec!["/r/a".into(), "/r/b".into()]);
+        let by = |delta| AppIntent::Repos(ReposIntent::MoveBy(delta));
+        assert_eq!(
+            state.update(by(9)),
+            vec![],
+            "as `Next`, moving opens nothing"
+        );
+        assert_eq!(recent_list(&state).cursor, 2, "clamped at the end");
+        state.update(by(-1));
+        assert_eq!(recent_list(&state).cursor, 1);
+        state.update(by(-9));
+        assert_eq!(recent_list(&state).cursor, 0, "clamped at the start");
+        assert_eq!(state.repo, None);
+        assert!(matches!(state.popups[..], [Popup::Recent(_)]));
     }
 
     #[test]

@@ -19,6 +19,9 @@ pub(crate) enum WorktreesIntent {
     /// Move the worktree cursor down or up.
     Next,
     Prev,
+    /// Move the cursor by this many rows, clamped at both ends: a click
+    /// or a wheel notch.
+    MoveBy(isize),
     /// Switch Kika to the worktree under the cursor.
     Open,
     /// Ask where to add a worktree for the Branches panel's local branch.

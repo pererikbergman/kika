@@ -16,6 +16,9 @@ pub(crate) enum TagsIntent {
     /// Move the Tags tab's selection down or up.
     Next,
     Prev,
+    /// Move the cursor by this many rows, clamped at both ends: a click
+    /// or a wheel notch.
+    MoveBy(isize),
     /// Ask for a name, to tag the selected commit with a lightweight tag.
     New,
     /// Ask for a name and then a message, to tag the selected commit with

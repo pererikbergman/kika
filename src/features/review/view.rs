@@ -188,12 +188,7 @@ fn queue_lines(
         }));
         return lines;
     }
-    let room = usize::from(inner.height).saturating_sub(1).max(1);
-    let at = visible
-        .iter()
-        .position(|&i| i == review.cursor)
-        .unwrap_or(0);
-    let skip = at.saturating_sub(room - 1);
+    let QueueWindow { skip, room, .. } = queue_window(&visible, review.cursor, inner.height);
     let width = usize::from(inner.width);
     let digits = visible
         .iter()
@@ -210,6 +205,60 @@ fn queue_lines(
         ));
     }
     lines
+}
+
+/// Where the queue's rows sit below the tabs line in an inside `height`
+/// tall: the cursor's place among the `visible` rows, the first shown and
+/// how many fit. Shared with the mouse, so a click lands on the row drawn.
+struct QueueWindow {
+    at: usize,
+    skip: usize,
+    room: usize,
+}
+
+fn queue_window(visible: &[usize], cursor: usize, height: u16) -> QueueWindow {
+    let room = usize::from(height).saturating_sub(1).max(1);
+    let at = visible.iter().position(|&i| i == cursor).unwrap_or(0);
+    QueueWindow {
+        at,
+        skip: at.saturating_sub(room - 1),
+        room,
+    }
+}
+
+impl AppState {
+    /// The move from the queue's cursor to the row drawn on `line` of the
+    /// review panel's inside, `height` lines tall; `None` on the tabs
+    /// line, below the last row, or when the queue shows no rows.
+    pub(crate) fn review_queue_step_to(&self, line: usize, height: u16) -> Option<isize> {
+        let review = &self.review;
+        let listed = review.screen == ReviewScreen::Queue
+            && review.queues_fetch.error.is_none()
+            && !(review.queues_fetch.loading && review.queues.is_none());
+        if !listed || line >= usize::from(height) {
+            return None;
+        }
+        let visible = review.visible();
+        let QueueWindow { at, skip, room } = queue_window(&visible, review.cursor, height);
+        let row = line.checked_sub(1).filter(|&row| row < room)?;
+        let pos = skip + row;
+        (pos < visible.len()).then(|| pos as isize - at as isize)
+    }
+
+    /// The move from the file cursor to the file drawn on `line` of the
+    /// files screen's list, `height` lines inside its border; `None` below
+    /// the last file or while the list shows no files.
+    pub(crate) fn review_files_step_to(&self, line: usize, height: u16) -> Option<isize> {
+        let files = self.review.files.as_ref()?;
+        let listed = matches!(self.review.screen, ReviewScreen::Files(_))
+            && files.stage == FilesStage::Ready
+            && !files.rows.is_empty();
+        if !listed || line >= usize::from(height) {
+            return None;
+        }
+        let pos = file_start(files.cursor, height) + line;
+        (pos < files.rows.len()).then(|| pos as isize - files.cursor as isize)
+    }
 }
 
 /// The longest author a queue row shows, in columns.
@@ -303,6 +352,12 @@ fn detail_screen(
 fn files_areas(inner: Rect) -> [Rect; 2] {
     let list = (inner.width / 3).clamp(inner.width.min(24), inner.width.min(60));
     Layout::horizontal([Constraint::Length(list), Constraint::Min(0)]).areas(inner)
+}
+
+/// The files screen's list and diff in `main`, each with its border:
+/// where the mouse finds them.
+pub(crate) fn files_screen_areas(main: Rect) -> [Rect; 2] {
+    files_areas(detail_area(main))
 }
 
 /// Text rows of the files screen's diff in `main`, which the stream's
@@ -500,7 +555,7 @@ fn file_lines(
         return vec![Line::raw(text.to_string())];
     }
     let height = usize::from(inner.height).max(1);
-    let start = (files.cursor + 1).saturating_sub(height);
+    let start = file_start(files.cursor, inner.height);
     files
         .rows
         .iter()
@@ -516,6 +571,12 @@ fn file_lines(
             file_row(palette, row, i == files.cursor, pending, width)
         })
         .collect()
+}
+
+/// The first file the list draws in `height` lines, scrolled just enough
+/// to keep the cursor's in view. Shared with the mouse.
+fn file_start(cursor: usize, height: u16) -> usize {
+    (cursor + 1).saturating_sub(usize::from(height).max(1))
 }
 
 /// The fewest columns of path a row keeps before its counts give way.

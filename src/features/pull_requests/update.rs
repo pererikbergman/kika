@@ -40,6 +40,7 @@ pub(crate) fn update(state: &mut AppState, intent: PullRequestsIntent) -> Vec<Ef
         PullRequestsIntent::CreateStart => state.create_pr_start(),
         PullRequestsIntent::PickNext => state.move_pick_cursor(1),
         PullRequestsIntent::PickPrev => state.move_pick_cursor(-1),
+        PullRequestsIntent::PickMoveBy(delta) => state.move_pick_cursor(delta),
         PullRequestsIntent::PickSelect => return state.pick_select(),
         PullRequestsIntent::Titled(text) => state.pull_request_titled(&text),
         PullRequestsIntent::ConfirmCreate => return state.confirm_create_pull_request(),

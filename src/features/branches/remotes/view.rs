@@ -8,8 +8,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use super::{RemoteLine, RemotesList};
+use crate::features::branches::BranchesTab;
+use crate::layout::SidePanel;
+use crate::model::AppState;
 use crate::theme::Palette;
-use crate::view::{PanelLook, elide_right, no_matches, range_row, scrolled};
+use crate::view::{PanelLook, elide_right, no_matches, range_row, scrolled, scrolled_step_to};
 use kika_git::remotes::Remote;
 
 /// What the tab shows when there are no remotes.
@@ -17,6 +20,30 @@ const NO_REMOTES: &str = "No remotes. Press a to add one.";
 
 /// What a remote with no branches says, since adding one never fetches.
 pub const NO_BRANCHES: &str = "No branches yet. Press f to fetch.";
+
+impl AppState {
+    /// Whether the Branches panel lists the Remotes tab's rows, expanded:
+    /// what a click or the wheel can move through. Remote headers are
+    /// rows too, as for the keys.
+    pub(crate) fn remotes_list_shown(&self) -> bool {
+        let list = &self.branches.remotes.list;
+        self.expanded == SidePanel::Branches
+            && self.branches.tab == BranchesTab::Remotes
+            && list.error.is_none()
+            && list.loaded
+            && !list.visible().is_empty()
+    }
+
+    /// The move from the cursor to the row drawn on `line` of the listed
+    /// panel's `rows` inner lines, as `list_body` scrolls them; `None`
+    /// below the last row or when the tab lists none.
+    pub(crate) fn remotes_step_to(&self, line: usize, rows: usize) -> Option<isize> {
+        let list = &self.branches.remotes.list;
+        self.remotes_list_shown()
+            .then(|| scrolled_step_to(&list.visible(), list.selected, rows, line))
+            .flatten()
+    }
+}
 
 /// The tab's body in `rows` by `width`: why the load failed, a
 /// placeholder, or a header row per remote with its branches indented

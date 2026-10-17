@@ -4,11 +4,11 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::git::Worktree;
 use super::list::{WorktreeList, is_current, label};
 use crate::model::AppState;
+use crate::popup_view::{ListBox, ListPopup, draw_list_popup};
 use crate::view::{centered, clip, elide_left, elide_right, width_of, wrap};
 use kika_git::safe_text::sanitize;
 
@@ -24,9 +24,21 @@ pub fn render_worktrees(
     frame: &mut Frame,
     area: Rect,
 ) {
+    draw_list_popup(worktrees_popup(state, list, top, area), false, frame);
+}
+
+/// The Worktrees popup laid out in `area`: what it draws and where a
+/// click finds its rows.
+pub(crate) fn worktrees_popup(
+    state: &AppState,
+    list: &WorktreeList,
+    top: bool,
+    area: Rect,
+) -> ListPopup {
     let room = usize::from(area.width.saturating_sub(2));
     let visible = list.list.visible();
     let items = &list.list.rows;
+    let listed = list.list.loaded && list.list.error.is_none() && !visible.is_empty();
     let rows: Vec<String> = match (list.list.loaded, &list.list.error) {
         (_, Some(error)) => {
             let safe: Vec<String> = error.lines().map(|l| sanitize(l.as_bytes())).collect();
@@ -59,7 +71,7 @@ pub fn render_worktrees(
         .max()
         .unwrap_or(0)
         .min(room);
-    let lines: Vec<Line> = rows
+    let lines: Vec<Line<'static>> = rows
         .iter()
         .enumerate()
         .map(|(i, row)| {
@@ -72,20 +84,23 @@ pub fn render_worktrees(
             Line::styled(text, style)
         })
         .collect();
-    let popup = centered(
+    let rect = centered(
         area,
         u16::try_from(width + 2).unwrap_or(u16::MAX),
         u16::try_from(height).unwrap_or(u16::MAX),
     );
-    frame.render_widget(Clear, popup);
     let first = cursor.map_or(0, |cursor| cursor.saturating_sub(shown - 1));
-    let first = u16::try_from(first).unwrap_or(u16::MAX);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .scroll((first, 0))
-            .block(Block::bordered().title(title)),
-        popup,
-    );
+    ListPopup {
+        list: ListBox {
+            rect,
+            first,
+            header: 0,
+            len: if listed { visible.len() } else { 0 },
+            cursor,
+        },
+        title,
+        lines,
+    }
 }
 
 /// ` Worktrees `, or with a filter ` Worktrees · /<filter> <n> of <total> `.
