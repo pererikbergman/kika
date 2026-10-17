@@ -924,3 +924,4 @@ marked "(writes)" change GitLab: run them only on a test project, by hand.
 - [ ] GITLAB-34 `o` on the files screen `[gitlab]`: opens `/-/merge_requests/<n>/diffs` at the line; with `?commit_id=` in a commit's view
 - [ ] GITLAB-35 Rate limited `[gitlab]`: `GitLab: rate limited · until HH:MM UTC`; `B` says `GitLab is rate limited; refresh after the limit resets`
 - [ ] GITLAB-36 A project not found or no access `[gitlab]`: `GitLab: repository not found or no access`
+- [ ] GITLAB-37 The detail's merge line `[gitlab]`: names the methods as the `M` pick list does (`Merge: merge · squash`), never "merge commit"
