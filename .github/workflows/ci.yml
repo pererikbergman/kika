@@ -18,8 +18,11 @@ jobs:
   check:
     name: check (${{ matrix.os }})
     # macos-self-hosted runs on the owner's Mac runner (labels self-hosted, mac),
-    # which is not billed; the other legs use GitHub-hosted runners.
-    runs-on: ${{ matrix.os == 'macos-self-hosted' && fromJSON('["self-hosted","mac"]') || matrix.os }}
+    # which is not billed; the other legs use GitHub-hosted runners. The runner is
+    # picked only for pushes and PRs from branches in this repository, so even if the
+    # matrix offered macos-self-hosted to a fork PR, it would ask for a label no runner
+    # has. A deleted fork has no head repo and counts as a fork. See docs/ci.md.
+    runs-on: ${{ (matrix.os == 'macos-self-hosted' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","mac"]') || matrix.os }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -29,7 +32,9 @@ jobs:
         # Only the unbilled self-hosted Mac runs by default. Ready PRs and pushes add
         # GitHub-hosted Linux and Windows when the repository variable
         # HOSTED_RUNNERS is "true" (turned off while Actions billing is blocked).
-        os: ${{ fromJSON((github.event.pull_request.draft || vars.HOSTED_RUNNERS != 'true') && '["macos-self-hosted"]' || '["macos-self-hosted","ubuntu-latest","windows-latest"]') }}
+        # Fork PRs never get the self-hosted Mac: they use GitHub-hosted macos-latest
+        # instead, so a stranger's code never runs on the owner's machine.
+        os: ${{ fromJSON((github.event.pull_request.draft || vars.HOSTED_RUNNERS != 'true') && ((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["macos-self-hosted"]' || '["macos-latest"]') || ((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["macos-self-hosted","ubuntu-latest","windows-latest"]' || '["macos-latest","ubuntu-latest","windows-latest"]')) }}
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
@@ -75,8 +80,10 @@ jobs:
   # committed baseline; see docs/architecture-checks.md.
   architecture:
     name: architecture
-    # The owner's self-hosted Mac runner (Apple silicon), which is not billed.
-    runs-on: [self-hosted, mac]
+    # The owner's self-hosted Mac runner (Apple silicon), which is not billed, for
+    # pushes and PRs from branches in this repository. Fork PRs use GitHub-hosted
+    # macos-latest, also Apple silicon, so the pinned noupling binary still fits.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","mac"]') || 'macos-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read
