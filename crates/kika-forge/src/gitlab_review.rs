@@ -70,12 +70,15 @@ project(fullPath:$path){mergeRequests(state:opened,sort:UPDATED_DESC,first:50)\
 {nodes{iid title draft updatedAt author{username}}}}}";
 
 /// The detail query: fixed text; the project path and iid are variables.
+/// Only the latest attempt of a retried job counts, so the jobs leave out
+/// superseded ones (`retried:false`); each job's `retried` is read too, so
+/// the parse can drop one if a host ignores the argument.
 const DETAIL_QUERY: &str = "query($path:ID!,$iid:String!){project(fullPath:$path)\
 {squashReadOnly mergeRequest(iid:$iid){id title description state draft sourceBranch \
 targetBranch conflicts detailedMergeStatus squashOnMerge author{username} \
 labels(first:20){nodes{title}} reviewers(first:20){nodes{username}} \
 approvedBy(first:20){nodes{username}} diffRefs{headSha startSha baseSha} \
-diffStatsSummary{fileCount} headPipeline{jobs(first:100){nodes{name status webPath}}}}}}";
+diffStatsSummary{fileCount} headPipeline{jobs(first:100,retried:false){nodes{name status webPath retried}}}}}}";
 
 #[derive(Deserialize)]
 pub(crate) struct User {
@@ -237,6 +240,8 @@ struct Job {
     name: Option<String>,
     status: Option<String>,
     web_path: Option<String>,
+    /// `true` on an attempt a retry superseded; missing or null keeps the job.
+    retried: Option<bool>,
 }
 
 /// The detail of merge request `number`, from a body [`classify`] passed
@@ -287,6 +292,7 @@ fn read_detail(body: &[u8], number: u64, host: &str) -> Result<Option<PrDetail>,
         .and_then(|p| p.jobs)
         .into_iter()
         .flat_map(Nodes::items)
+        .filter(|job| job.retried != Some(true))
         .map(|job| check_of(job, host))
         .take(MAX_CHECKS)
         .collect();
@@ -631,6 +637,67 @@ mod tests {
                 job("retry", CheckStatus::Failure, 7),
             ]
         );
+    }
+
+    /// `DETAIL` with its head pipeline's job nodes replaced by `nodes`.
+    fn with_jobs(nodes: &str) -> String {
+        let (head, rest) = DETAIL.split_once("\"jobs\":{\"nodes\":[").unwrap();
+        let (_, tail) = rest.split_once("]}").unwrap();
+        format!("{head}\"jobs\":{{\"nodes\":[{nodes}]}}{tail}")
+    }
+
+    #[test]
+    fn the_detail_query_asks_only_for_each_jobs_latest_attempt() {
+        assert!(
+            DETAIL_QUERY
+                .contains("jobs(first:100,retried:false){nodes{name status webPath retried}}"),
+            "{DETAIL_QUERY}"
+        );
+    }
+
+    #[test]
+    fn a_retried_job_shows_once_with_its_latest_attempt() {
+        let first = r#"{"name":"build","status":"FAILED","webPath":"/acme/widgets/-/jobs/1"},"#;
+        let attempts = concat!(
+            r#"{"name":"build","status":"FAILED","webPath":"/acme/widgets/-/jobs/1","retried":true},"#,
+            r#"{"name":"build","status":"SUCCESS","webPath":"/acme/widgets/-/jobs/8","retried":false},"#,
+        );
+        assert!(DETAIL.contains(first));
+        let retried = DETAIL.replace(first, attempts);
+        let pr = detail(&FakeGlab::new().reply(answer(&retried)), 42)
+            .unwrap()
+            .unwrap();
+        let today = detail(&FakeGlab::new().reply(answer(DETAIL)), 42)
+            .unwrap()
+            .unwrap();
+        let build = Check {
+            name: "build".into(),
+            status: CheckStatus::Success,
+            details_url: Some("https://gitlab.example.com/acme/widgets/-/jobs/8".into()),
+        };
+        assert_eq!(pr.checks[0], build);
+        assert_eq!(pr.checks[1..], today.checks[1..]);
+        assert_eq!(pr.checks.len(), 7);
+    }
+
+    #[test]
+    fn a_dropped_attempt_does_not_use_up_the_checks_cap() {
+        let dropped = (0..3).map(|n| {
+            format!(r#"{{"name":"old{n}","status":"FAILED","webPath":"/acme/widgets/-/jobs/{n}","retried":true}}"#)
+        });
+        let kept = (0..MAX_CHECKS).map(|n| {
+            format!(
+                r#"{{"name":"job{n}","status":"SUCCESS","webPath":"/acme/widgets/-/jobs/{n}"}}"#
+            )
+        });
+        let nodes: Vec<String> = dropped.chain(kept).collect();
+        let body = with_jobs(&nodes.join(","));
+        let pr = detail(&FakeGlab::new().reply(answer(&body)), 42)
+            .unwrap()
+            .unwrap();
+        let names: Vec<&str> = pr.checks.iter().map(|c| c.name.as_str()).collect();
+        let want: Vec<String> = (0..MAX_CHECKS).map(|n| format!("job{n}")).collect();
+        assert_eq!(names, want);
     }
 
     #[test]

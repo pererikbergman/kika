@@ -931,3 +931,4 @@ marked "(writes)" change GitLab: run them only on a test project, by hand.
 - [ ] GITLAB-35 Rate limited `[gitlab]`: `GitLab: rate limited · until HH:MM UTC`; `B` says `GitLab is rate limited; refresh after the limit resets`
 - [ ] GITLAB-36 A project not found or no access `[gitlab]`: `GitLab: repository not found or no access`
 - [ ] GITLAB-37 The detail's merge line `[gitlab]`: names the methods as the `M` pick list does (`Merge: merge · squash`), never "merge commit"
+- [ ] GITLAB-38 A retried job `[gitlab]` (writes): retry a failed job on a real merge request, let it finish, reopen the detail (enter): one row for that job, showing the retried result and linking to the new job's page
