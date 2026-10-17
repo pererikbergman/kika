@@ -424,13 +424,15 @@ mod tests {
             "{rows:#?}"
         );
         assert!(!bar.contains("https://"), "{bar}");
-        // A long path is what gives way, not the line.
+        // A long path is what gives way, not the line: its dirs are cut
+        // from the left so the file name stays.
         let long = format!("src/{}/main.rs", "deep/".repeat(20));
         let mut state = shown(&[long.as_str()], fixture_discussion(), main_diff());
         state.size = (80, 24);
         opened(&mut state);
         let bar = &draw(&state, 80, 24)[23];
-        assert!(bar.contains("Opening R12 on GitHub: src/deep"), "{bar}");
+        assert!(bar.contains("Opening R12 on GitHub: …"), "{bar}");
+        assert!(bar.trim_end().ends_with("/main.rs"), "{bar}");
     }
 
     #[cfg(unix)]

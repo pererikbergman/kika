@@ -59,16 +59,27 @@ impl Notice {
 
     /// `lead` then `path`, stored as `owned` would store them joined, with
     /// the path's start marked. Sanitising is per char, so the two halves
-    /// sanitise to the joined text. Capped text keeps no mark: its path
-    /// end is gone.
+    /// sanitise to the joined text. Over the cap, the lead is cut with `…`
+    /// instead, so the file name the path ends in is still stored; only a
+    /// path too long to leave a lead char keeps no mark, capped as `owned`.
     pub fn with_path(lead: &str, path: &str) -> Self {
         let lead = sanitize(lead.as_bytes());
-        let at = lead.len();
-        let safe = lead + &sanitize(path.as_bytes());
-        let cut = safe.chars().nth(MAX_NOTICE_CHARS).is_some();
+        let path = sanitize(path.as_bytes());
+        let path_chars = path.chars().count();
+        let lead = if lead.chars().count() + path_chars <= MAX_NOTICE_CHARS {
+            lead
+        } else if path_chars + 2 <= MAX_NOTICE_CHARS {
+            let keep: String = lead
+                .chars()
+                .take(MAX_NOTICE_CHARS - path_chars - 1)
+                .collect();
+            keep + "…"
+        } else {
+            return Self::owned(lead + &path);
+        };
         Self {
-            text: Cow::Owned(cap(safe)),
-            path_at: (!cut).then_some(at),
+            path_at: Some(lead.len()),
+            text: Cow::Owned(lead + &path),
             advice_at: None,
         }
     }
@@ -237,6 +248,29 @@ mod tests {
         let marked = Notice::with_path("Lead: ", &path);
         assert_eq!(&*marked, &*Notice::owned(format!("Lead: {path}")));
         assert_eq!(marked.path_split(), None);
+    }
+
+    #[test]
+    fn a_long_lead_is_cut_so_the_path_keeps_its_mark() {
+        let lead = format!("{} remove ", "w".repeat(MAX_NOTICE_CHARS - 10));
+        let path = "/a/b\tc/0123456789abcdef.json";
+        let safe = sanitize(path.as_bytes());
+        let marked = Notice::with_path(&lead, path);
+        assert_eq!(marked.chars().count(), MAX_NOTICE_CHARS, "{marked}");
+        assert!(marked.ends_with(safe.as_str()), "{marked}");
+        let (cut, kept) = marked.path_split().expect("the path stays marked");
+        assert_eq!(kept, safe);
+        assert!(cut.ends_with('…'), "{cut}");
+        assert!(lead.starts_with(cut.trim_end_matches('…')), "{cut}");
+    }
+
+    #[test]
+    fn a_path_that_leaves_one_lead_char_keeps_its_mark() {
+        let path = "p".repeat(MAX_NOTICE_CHARS - 2);
+        let marked = Notice::with_path("Lead: ", &path);
+        assert_eq!(marked.path_split(), Some(("L…", path.as_str())));
+        let path = "p".repeat(MAX_NOTICE_CHARS - 1);
+        assert_eq!(Notice::with_path("Lead: ", &path).path_split(), None);
     }
 
     #[test]
