@@ -668,13 +668,17 @@ pub(crate) fn byte_at(text: &str, col: usize) -> usize {
     text.char_indices().nth(col).map_or(text.len(), |(i, _)| i)
 }
 
-/// Something failed: what, git's own words, and what to do now.
+/// Something failed: what, git's own words, and what to do now. A
+/// command's captured output is shown the same way, marked as no failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ErrorPopup {
     pub title: String,
     pub message: String,
     /// Usually fixed text; owned when it names a key from the user's keymap.
     pub next: Cow<'static, str>,
+    /// Only a failure gets the error colour; a command's own output reuses
+    /// this popup and must not look like one.
+    pub failed: bool,
 }
 
 impl ErrorPopup {
@@ -689,6 +693,15 @@ impl ErrorPopup {
             title: title.into(),
             message: terminal_safe(message.as_bytes()),
             next: next.into(),
+            failed: true,
+        }
+    }
+
+    /// What a command that succeeded printed: no next step, plain border.
+    pub fn output(title: impl Into<String>, message: &str) -> Self {
+        Self {
+            failed: false,
+            ..Self::new(title, message, "")
         }
     }
 }

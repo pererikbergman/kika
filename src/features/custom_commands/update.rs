@@ -166,11 +166,9 @@ impl AppState {
                 &message,
                 "Check the command in your config file, then try again.",
             )),
-            Err(CommandFailure::Exited(message)) => self.push_error(ErrorPopup::new(
-                format!("{title} failed"),
-                &message,
-                "Press Esc to close",
-            )),
+            Err(CommandFailure::Exited(message)) => {
+                self.push_error(ErrorPopup::new(format!("{title} failed"), &message, ""))
+            }
             Err(CommandFailure::Cancelled) => self.notice = Some("Command cancelled".into()),
             Ok(text) if output == OutputMode::Popup => {
                 let text = if text.is_empty() {
@@ -178,7 +176,7 @@ impl AppState {
                 } else {
                     &text
                 };
-                self.push_error(ErrorPopup::new(title, text, "Press Esc to close"));
+                self.push_error(ErrorPopup::output(title, text));
             }
             Ok(_) => {}
         }
@@ -520,6 +518,9 @@ mod tests {
                 assert!(!popup.message.contains('\x1b'), "{popup:?}");
                 assert!(popup.message.starts_with("red "), "{popup:?}");
                 assert!(popup.message.ends_with("text\nline 2"), "{popup:?}");
+                // A success is not drawn as a failure, and has no next step.
+                assert!(!popup.failed, "{popup:?}");
+                assert_eq!(popup.next, "");
             }
             other => panic!("expected the output popup, got {other:?}"),
         }
@@ -548,7 +549,8 @@ mod tests {
                     assert_eq!(popup.title, "Show it failed");
                     assert_eq!(popup.message, "exited with exit status: 3\nno");
                     // It ran as configured: the config is not to blame.
-                    assert_eq!(popup.next, "Press Esc to close");
+                    assert_eq!(popup.next, "");
+                    assert!(popup.failed, "{popup:?}");
                 }
                 other => panic!("expected the failure popup, got {other:?}"),
             }
