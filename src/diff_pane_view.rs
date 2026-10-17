@@ -39,6 +39,9 @@ pub(crate) fn diff_pane_body(
     inner: Rect,
 ) -> Paragraph<'static> {
     let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
+    if let Some(notice) = diff.notice {
+        return Paragraph::new(notice).wrap(Wrap { trim: false });
+    }
     if let Some(error) = &diff.error {
         let lines = error.lines().map(|l| Line::from(l.to_string()));
         return Paragraph::new(lines.collect::<Vec<_>>()).wrap(Wrap { trim: false });
@@ -343,6 +346,25 @@ mod tests {
 
     const MATCH: Style = search_match(&Palette::DEFAULT);
     const CURRENT_MATCH: Style = current_match(&Palette::DEFAULT);
+
+    #[test]
+    fn an_untracked_folder_draws_its_notice_and_no_git_error() {
+        use crate::diff_pane::UNTRACKED_REPO_FOLDER;
+        use crate::test_support::screen::draw;
+        use crate::test_support::{changed, untracked, with_files};
+        let (mut state, _) = with_files(
+            vec![changed("a.rs", '.', 'M'), untracked("vendor/lib/")],
+            24,
+        );
+        state.select(1);
+        let screen = draw(&state, 160, 24).join("\n");
+        assert!(screen.contains(UNTRACKED_REPO_FOLDER), "{screen}");
+        assert!(
+            !screen.contains("null") && !screen.contains("error:"),
+            "{screen}"
+        );
+        assert!(!screen.contains("No diff"), "{screen}");
+    }
 
     #[test]
     fn under_no_color_plain_matches_are_underlined_and_the_current_one_also_reversed() {
