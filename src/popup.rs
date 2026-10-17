@@ -305,10 +305,16 @@ impl LeaveCommitsConfirm {
         if count > Self::LISTED {
             ids.push_str(&format!(" and {} more", count - Self::LISTED));
         }
-        let keep = format!(
-            "To keep them, press n, then N to create a branch at {}",
-            self.head_short_oid
-        );
+        let head = &self.head_short_oid;
+        // Review mode has no Commits panel: `n` leaves the user in review,
+        // so the hint says how to get back to where `N` works.
+        let keep = match &self.op {
+            GitOp::CheckoutPrBranch { .. } => format!(
+                "To keep them, press n, then esc until you are back in the workspace, \
+                 then N in Commits to create a branch at {head}"
+            ),
+            _ => format!("To keep them, press n, then N to create a branch at {head}"),
+        };
         let target = &self.target;
         match &self.op {
             // The warning comes first, so a small terminal that clips the
@@ -900,6 +906,37 @@ mod tests {
             );
             assert_eq!(ask.answer, Answer::YOnly, "{op:?}");
         }
+    }
+
+    #[test]
+    fn the_review_mode_question_says_how_to_keep_them_from_review() {
+        use kika_git::commit_files::CommitId;
+        // The op review mode's `b` plans for request 7.
+        let op = GitOp::CheckoutPrBranch {
+            number: 7,
+            branch: "pr/7".into(),
+            head: CommitId::parse("abc1234").unwrap(),
+            old: None,
+            current: false,
+            from: Some(CommitId::parse("fedcba9").unwrap()),
+        };
+        let ask = LeaveCommitsConfirm {
+            op,
+            head: CommitId::parse("fedcba9").unwrap(),
+            head_short_oid: "fedcba9".into(),
+            target: "pr/7".into(),
+            left: vec!["000".into(), "111".into()],
+        }
+        .into_question();
+        assert_eq!(
+            ask.text,
+            "Check out pr/7 and leave 2 commits that no branch or tag reaches behind \
+             (000, 111)? Afterwards only the reflog has them. To keep them, press n, \
+             then esc until you are back in the workspace, then N in Commits to create \
+             a branch at fedcba9 (y/n)"
+        );
+        assert!(!ask.text.contains("press n, then N"), "{}", ask.text);
+        assert_eq!(ask.answer, Answer::YOnly);
     }
 
     #[test]
