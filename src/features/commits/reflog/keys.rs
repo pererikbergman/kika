@@ -174,7 +174,7 @@ pub(crate) static REFLOG_LOG_FILTER: &[Binding] = &[
         keys: &[KeyPattern::any(KeyCode::Char('L'))],
         scope: KeyScope::Reflog,
         intent: AppIntent::Commits(CommitsIntent::OpenLogFilter(LogFilterField::Path)),
-        description: "Show only the commits that changed a typed path, across renames",
+        description: "Does not filter here; only says that path filters work on the log tab",
         label: "log of path",
         bar: false,
         disabled: reflog_filter_disabled,
@@ -184,7 +184,7 @@ pub(crate) static REFLOG_LOG_FILTER: &[Binding] = &[
         keys: &[KeyPattern::any(KeyCode::Char('A'))],
         scope: KeyScope::Reflog,
         intent: AppIntent::Commits(CommitsIntent::OpenLogFilter(LogFilterField::Author)),
-        description: "Show only the commits by a typed author",
+        description: "Does not filter here; only says that author filters work on the log tab",
         label: "log by author",
         bar: false,
         disabled: reflog_filter_disabled,
@@ -293,6 +293,29 @@ mod tests {
         );
         state.hold_op(1);
         assert_eq!(undo_disabled(&state), Some(OP_RUNNING.into()));
+    }
+
+    #[test]
+    fn help_in_the_reflog_tab_says_l_and_a_only_point_to_the_log_tab() {
+        let mut state = AppState::new(Context::Workspace);
+        state.focus = crate::model::Focus::Commits;
+        state.commits.tab = crate::features::commits::CommitsTab::Reflog;
+        // The same rows the `?` popup draws.
+        let help = crate::keymap::available(registry(), &state.keymap, state.panel_focus(), &state);
+        for (id, what) in [
+            ("reflog.filter_path", "path"),
+            ("reflog.filter_author", "author"),
+        ] {
+            let (binding, _) = help
+                .iter()
+                .find(|(b, _)| b.id == id)
+                .unwrap_or_else(|| panic!("{id} is not in the Reflog help"));
+            assert_eq!(
+                binding.description,
+                format!("Does not filter here; only says that {what} filters work on the log tab"),
+                "{id}"
+            );
+        }
     }
 
     #[test]
