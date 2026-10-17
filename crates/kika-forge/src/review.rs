@@ -1117,10 +1117,11 @@ pub enum NoFetchRemote {
 }
 
 /// The remote a pull request's commits may be fetched from: the one
-/// whose one URL names `repo` itself, on one of `hosts`. `NotNamed` when
-/// the remote names another repository or host, or has a name git could
-/// read as an option; `SeveralUrls` when it has several URLs, even if
-/// one of them names `repo`. Then nothing may be fetched.
+/// whose one URL names `repo` itself, on one of `hosts`. ASCII case is
+/// ignored, as the forges ignore it. `NotNamed` when the remote names
+/// another repository or host, or has a name git could read as an
+/// option; `SeveralUrls` when it has several URLs, even if one of them
+/// names `repo`. Then nothing may be fetched.
 pub fn fetch_remote(
     git: &dyn GitRunner,
     hosts: &[ForgeHost],
@@ -1134,8 +1135,8 @@ pub fn fetch_remote(
     };
     let named = parse_remote(&url).ok_or(NoFetchRemote::NotNamed)?;
     let same = named.host.eq_ignore_ascii_case(&repo.host)
-        && named.owner == repo.owner
-        && named.name == repo.name;
+        && named.owner.eq_ignore_ascii_case(&repo.owner)
+        && named.name.eq_ignore_ascii_case(&repo.name);
     if same && matches(&named, hosts).is_some() && !name.0.starts_with(b"-") {
         Ok(name)
     } else {
@@ -2367,6 +2368,52 @@ pub(crate) mod tests {
         let git = remote_named("-x", b"https://github.com/acme/widgets");
         assert_eq!(
             fetch_remote(&git, &hosts, &repo()),
+            Err(NoFetchRemote::NotNamed)
+        );
+    }
+
+    #[test]
+    fn a_remote_differing_only_in_case_is_the_reviewed_repository() {
+        let hosts = [host()];
+        for url in [
+            &b"git@github.com:Acme/Widgets.git"[..],
+            b"https://github.com/ACME/widgets",
+        ] {
+            let git = remote_named("origin", url);
+            assert_eq!(
+                fetch_remote(&git, &hosts, &repo()),
+                Ok(RemoteName::from("origin")),
+                "{url:?}"
+            );
+            git.assert_done();
+        }
+        let (lab, nested) = nested_lab();
+        let git = remote_named("origin", b"https://gitlab.example.com/Acme/SUB/Widgets");
+        assert_eq!(
+            fetch_remote(&git, &[lab], &nested),
+            Ok(RemoteName::from("origin"))
+        );
+        git.assert_done();
+        // Ignoring case loosens nothing else: a name git would read as an
+        // option is still refused.
+        let git = remote_named("-x", b"https://github.com/Acme/Widgets");
+        assert_eq!(
+            fetch_remote(&git, &hosts, &repo()),
+            Err(NoFetchRemote::NotNamed)
+        );
+    }
+
+    #[test]
+    fn a_remote_differing_only_in_non_ascii_case_is_another_repository() {
+        // Only ASCII case is ignored. Today the remote's parser refuses a
+        // non-ASCII path outright; either way this stays refused.
+        let known = ForgeRepo {
+            owner: "ägare".into(),
+            ..repo()
+        };
+        let git = remote_named("origin", "https://github.com/Ägare/widgets".as_bytes());
+        assert_eq!(
+            fetch_remote(&git, &[host()], &known),
             Err(NoFetchRemote::NotNamed)
         );
     }
