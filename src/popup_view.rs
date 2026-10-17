@@ -1768,6 +1768,46 @@ mod tests {
     }
 
     #[test]
+    fn the_review_mode_leave_commits_hint_wraps_whole_at_a_normal_terminal() {
+        use crate::popup::LeaveCommitsConfirm;
+        use kika_git::commit_files::CommitId;
+        let mut state = workspace(&["a.rs"]);
+        state.popups = vec![Popup::Question(
+            LeaveCommitsConfirm {
+                op: GitOp::CheckoutPrBranch {
+                    number: 7,
+                    branch: "pr/7".into(),
+                    head: CommitId::parse("abc1234").unwrap(),
+                    old: None,
+                    current: false,
+                    from: Some(CommitId::parse("fedcba9").unwrap()),
+                },
+                head: CommitId::parse("fedcba9").unwrap(),
+                head_short_oid: "fedcba9".into(),
+                target: "pr/7".into(),
+                left: (0..8).map(|i| format!("{i}{i}{i}{i}{i}{i}{i}")).collect(),
+            }
+            .into_question(),
+        )];
+        let (_, rows) = draw(&state, 80, 24);
+        let warning = rows
+            .iter()
+            .position(|r| r.contains("Check out pr/7"))
+            .unwrap_or_else(|| panic!("{rows:#?}"));
+        let end = rows
+            .iter()
+            .position(|r| r.contains("fedcba9 (y/n)"))
+            .unwrap_or_else(|| panic!("{rows:#?}"));
+        assert!(warning < end, "{rows:#?}");
+        // Wrapping may split the hint, so look for its pieces.
+        assert!(contains(&rows, "you are back in"), "{rows:#?}");
+        assert!(contains(&rows, "the workspace, then N"), "{rows:#?}");
+        assert!(contains(&rows, "in Commits to"), "{rows:#?}");
+        assert!(!contains(&rows, "press n, then N"), "{rows:#?}");
+        assert!(rows[23].starts_with(" y leave  n stay"), "{rows:#?}");
+    }
+
+    #[test]
     fn a_tiny_terminal_still_shows_the_hard_reset_warning() {
         let (_, rows) = draw(&hard_reset_leaving_eight(), 24, 8);
         assert!(contains(&rows, "uncommitted"), "{rows:#?}");
