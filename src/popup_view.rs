@@ -1483,6 +1483,7 @@ mod tests {
                         },
                         host: kika_forge::ForgeHost::parse("github.com").unwrap(),
                         unstable: true,
+                        words: kika_forge::forge::words_or_default(None),
                     }
                     .into_question(),
                 ),
@@ -1547,6 +1548,40 @@ mod tests {
         );
         assert!(contains(merge, "into main by squash?"), "{merge:#?}");
         assert!(contains(merge, "Some checks have not passed"), "{merge:#?}");
+    }
+
+    #[test]
+    fn the_merge_question_on_gitlab_names_the_merge_request_and_gitlab() {
+        let mut state = AppState::new(Context::Workspace);
+        state.popups = vec![Popup::Question(
+            crate::popup::MergePrConfirm {
+                number: 12,
+                title: "Add widget caching".into(),
+                base: "main".into(),
+                head: "topic".into(),
+                method: kika_forge::merge::MergeMethod::Merge,
+                head_oid: kika_git::commit_files::CommitId::parse(&"a".repeat(40)).unwrap(),
+                repo: kika_forge::ForgeRepo {
+                    host: "gitlab.example.com".into(),
+                    owner: "acme".into(),
+                    name: "widgets".into(),
+                },
+                host: kika_forge::ForgeHost::parse_gitlab("gitlab.example.com").unwrap(),
+                unstable: false,
+                words: kika_forge::forge::words(kika_forge::url::ForgeKind::GitLab),
+            }
+            .into_question(),
+        )];
+        let rows = draw(&state, 80, 24).1;
+        assert!(contains(&rows, " Merge merge request "), "{rows:#?}");
+        assert!(
+            contains(&rows, "Press y to merge it on GitLab"),
+            "{rows:#?}"
+        );
+        assert!(
+            contains(&rows, "Merge !12 Add widget caching into main by merge?"),
+            "{rows:#?}"
+        );
     }
 
     #[test]

@@ -218,6 +218,7 @@ impl AppState {
         };
         let text = composer.text.text();
         let kind = composer.kind.clone();
+        let words = self.review_words();
         let question = match &kind {
             ComposerKind::Line { editing, .. } => {
                 // Refused: the composer stays, so the text can be tried again.
@@ -227,10 +228,11 @@ impl AppState {
                 }
                 None
             }
-            ComposerKind::Reply { .. } => Some("Post this reply to GitHub? (y/n)".to_string()),
-            ComposerKind::General { number, .. } => {
-                Some(format!("Post this comment on #{number} to GitHub? (y/n)"))
-            }
+            ComposerKind::Reply { .. } => Some(format!("Post this reply to {}? (y/n)", words.name)),
+            ComposerKind::General { number, .. } => Some(format!(
+                "Post this comment on {}{number} to {}? (y/n)",
+                words.sign, words.name
+            )),
             ComposerKind::Review { number, event } => Some(self.submit_question(*number, *event)),
         };
         if let Some(question) = question {
@@ -274,7 +276,7 @@ impl AppState {
     fn ask_post(&mut self, question: String) {
         self.popups.push(Popup::Question(ConfirmQuestion {
             scope: KeyScope::ReviewCommentConfirm,
-            title: "Post to GitHub".into(),
+            title: format!("Post to {}", self.review_words().name).into(),
             text: question,
             answer: Answer::YOnly,
             then: Then::Intent(Box::new(AppIntent::Review(ReviewIntent::PostComment))),

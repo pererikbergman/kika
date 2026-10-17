@@ -179,6 +179,8 @@ pub struct Words {
     pub short: &'static str,
     /// What goes before a request's number.
     pub sign: char,
+    /// The `[forge]` key that names one of its hosts, as the config takes it.
+    pub host_key: &'static str,
 }
 
 /// `kind`'s words, without building an adapter, so a view can ask. Each
@@ -196,6 +198,57 @@ pub fn review_events(kind: Option<ForgeKind>) -> &'static [ReviewEvent] {
     match kind {
         None | Some(ForgeKind::GitHub) => GitHubForge::EVENTS,
         Some(ForgeKind::GitLab) => GitLabForge::EVENTS,
+    }
+}
+
+/// Whether `id` is fit to send back to a `kind` forge as a thread's or a
+/// request's id: a GitHub node id, or a GitLab global id. GitHub's check
+/// while no kind is known yet, as [`words_or_default`].
+pub fn write_id_ok(kind: Option<ForgeKind>, id: &str) -> bool {
+    match kind {
+        None | Some(ForgeKind::GitHub) => super::review::node_id_ok(id),
+        Some(ForgeKind::GitLab) => super::gitlab_discussion::gitlab_id_ok(id),
+    }
+}
+
+/// The most lines GitLab lets one suggestion take above the line its
+/// note is on.
+const GITLAB_MAX_ABOVE: u32 = 100;
+
+/// The info string of a suggestion fence for a `kind` forge, for a pick
+/// that reaches `above` lines above the line the comment is on. GitHub
+/// takes the whole pick from the comment's range; GitLab counts the lines
+/// above the last one, where its note is anchored, and takes at most
+/// 101 lines, so a longer pick has `None`.
+pub fn suggestion_info(kind: Option<ForgeKind>, above: u32) -> Option<String> {
+    match kind {
+        None | Some(ForgeKind::GitHub) => Some("suggestion".into()),
+        Some(ForgeKind::GitLab) => {
+            (above <= GITLAB_MAX_ABOVE).then(|| format!("suggestion:-{above}+0"))
+        }
+    }
+}
+
+/// How `method` is named on a `kind` forge. GitLab's project fixes how a
+/// merge lands, so its plain merge is "merge", not a merge commit.
+/// GitHub's words while no kind is known yet, as [`words_or_default`].
+pub fn merge_label(kind: Option<ForgeKind>, method: MergeMethod) -> &'static str {
+    match (kind, method) {
+        (None | Some(ForgeKind::GitHub), _) => method.label(),
+        (Some(ForgeKind::GitLab), MergeMethod::Merge) => "merge",
+        (Some(ForgeKind::GitLab), MergeMethod::Squash) => "squash",
+        (Some(ForgeKind::GitLab), MergeMethod::Rebase) => "rebase",
+    }
+}
+
+/// The ref a `kind` forge keeps request `number`'s head under, to fetch
+/// when the forge will not serve the head commit by id: GitLab's
+/// `refs/merge-requests/<n>/head`. GitHub's heads are fetched by id alone,
+/// so it has none, and nor has a kind not known yet.
+pub fn head_ref(kind: Option<ForgeKind>, number: u64) -> Option<String> {
+    match kind {
+        None | Some(ForgeKind::GitHub) => None,
+        Some(ForgeKind::GitLab) => Some(format!("refs/merge-requests/{number}/head")),
     }
 }
 
@@ -248,12 +301,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn github_supports_every_capability_and_gitlab_only_badges_and_review() {
+    fn github_supports_every_capability_and_gitlab_all_but_creating_and_viewed_marks() {
         for capability in Capability::ALL {
             assert_eq!(supports(ForgeKind::GitHub, capability), Ok(()));
             let gitlab = supports(ForgeKind::GitLab, capability);
             match capability {
-                Capability::Badges | Capability::Review => assert_eq!(gitlab, Ok(())),
+                Capability::Badges
+                | Capability::Review
+                | Capability::DiscussionWrite
+                | Capability::Merge => assert_eq!(gitlab, Ok(())),
                 _ => assert_eq!(
                     gitlab,
                     Err(Unsupported {
@@ -275,7 +331,8 @@ mod tests {
                 request: "pull request",
                 requests: "pull requests",
                 short: "PR",
-                sign: '#'
+                sign: '#',
+                host_key: "github",
             }
         );
         assert_eq!(
@@ -286,7 +343,8 @@ mod tests {
                 request: "merge request",
                 requests: "merge requests",
                 short: "MR",
-                sign: '!'
+                sign: '!',
+                host_key: "gitlab_ask",
             }
         );
         assert_eq!(words_or_default(None), words(ForgeKind::GitHub));
@@ -305,6 +363,70 @@ mod tests {
         );
         assert_eq!(review_events(None), review_events(Some(ForgeKind::GitHub)));
         assert_eq!(review_events(Some(ForgeKind::GitLab)), [Approve, Comment]);
+    }
+
+    #[test]
+    fn each_kind_checks_its_own_ids() {
+        let discussion = "gid://gitlab/Discussion/1111111111111111111111111111111111111111";
+        assert!(write_id_ok(Some(ForgeKind::GitLab), discussion));
+        assert!(write_id_ok(
+            Some(ForgeKind::GitLab),
+            "gid://gitlab/MergeRequest/42"
+        ));
+        assert!(!write_id_ok(Some(ForgeKind::GitLab), "PRRT_kwDOA1"));
+        assert!(!write_id_ok(Some(ForgeKind::GitHub), discussion));
+        assert!(write_id_ok(Some(ForgeKind::GitHub), "PRRT_kwDOA1"));
+        assert!(write_id_ok(None, "PRRT_kwDOA1"));
+        assert!(!write_id_ok(None, discussion));
+    }
+
+    #[test]
+    fn each_kind_writes_its_own_suggestion_fence() {
+        let github = Some(ForgeKind::GitHub);
+        let gitlab = Some(ForgeKind::GitLab);
+        // GitHub: single line or range.
+        assert_eq!(suggestion_info(github, 0).as_deref(), Some("suggestion"));
+        assert_eq!(suggestion_info(github, 4).as_deref(), Some("suggestion"));
+        assert_eq!(suggestion_info(None, 200).as_deref(), Some("suggestion"));
+        // GitLab: a single line, a 5-line range, the longest it takes.
+        assert_eq!(
+            suggestion_info(gitlab, 0).as_deref(),
+            Some("suggestion:-0+0")
+        );
+        assert_eq!(
+            suggestion_info(gitlab, 4).as_deref(),
+            Some("suggestion:-4+0")
+        );
+        assert_eq!(
+            suggestion_info(gitlab, 100).as_deref(),
+            Some("suggestion:-100+0")
+        );
+        // More than 101 lines.
+        assert_eq!(suggestion_info(gitlab, 101), None);
+    }
+
+    #[test]
+    fn each_kind_names_its_merge_methods() {
+        use MergeMethod::{Merge, Rebase, Squash};
+        let gitlab = Some(ForgeKind::GitLab);
+        for kind in [None, Some(ForgeKind::GitHub)] {
+            for method in [Merge, Squash, Rebase] {
+                assert_eq!(merge_label(kind, method), method.label());
+            }
+        }
+        assert_eq!(merge_label(None, Merge), "merge commit");
+        assert_eq!(merge_label(gitlab, Merge), "merge");
+        assert_eq!(merge_label(gitlab, Squash), "squash");
+    }
+
+    #[test]
+    fn only_gitlab_has_a_head_ref_to_fall_back_on() {
+        assert_eq!(
+            head_ref(Some(ForgeKind::GitLab), 12).as_deref(),
+            Some("refs/merge-requests/12/head")
+        );
+        assert_eq!(head_ref(Some(ForgeKind::GitHub), 12), None);
+        assert_eq!(head_ref(None, 12), None);
     }
 
     #[test]
@@ -550,6 +672,7 @@ fn fixture() {}
                     "gitlab_review.rs",
                     "gitlab_discussion.rs",
                     "gitlab_submit.rs",
+                    "gitlab_merge.rs",
                     "github.rs",
                     "review.rs",
                 ],

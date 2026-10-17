@@ -474,6 +474,49 @@ mod tests {
     }
 
     #[test]
+    fn under_no_color_the_commit_editor_draws_no_colour_and_keeps_its_focus_mark() {
+        let mut editor = commit_editor("Fix the thing", &["line 1"]);
+        editor.no_verify = true;
+        let mut state = with_commit(CommitFlow::Editing(editor));
+        state.palette = Palette::NO_COLOR;
+        let (buffer, cursor) = draw_with_cursor(&state, 80, 24);
+        let rows = buffer_rows(&buffer);
+
+        crate::test_support::assert_no_colour(&buffer);
+        assert!(contains(&rows, " hooks skipped "), "{rows:#?}");
+        let subject = find(&buffer, "▸ Subject");
+        assert!(
+            buffer[subject].modifier.contains(Modifier::BOLD),
+            "{rows:#?}"
+        );
+        assert!(!contains(&rows, "▸ Body"), "{rows:#?}");
+        let body = find(&buffer, " Body ");
+        let body_title = (body.0 + 1, body.1);
+        assert!(
+            !buffer[body_title].modifier.contains(Modifier::BOLD),
+            "{rows:#?}"
+        );
+        let (x, y) = find(&buffer, "Fix the thing");
+        assert_eq!(cursor, (x + 13, y));
+    }
+
+    #[test]
+    fn under_no_color_a_failed_commit_draws_no_colour() {
+        let output: Vec<String> = (0..100).map(|i| format!("error {i}")).collect();
+        let mut state = with_commit(CommitFlow::Failed {
+            editor: commit_editor("subj", &[""]),
+            output: output.join("\n"),
+        });
+        state.palette = Palette::NO_COLOR;
+        let (buffer, _) = draw_with_cursor(&state, 80, 24);
+        let rows = buffer_rows(&buffer);
+
+        crate::test_support::assert_no_colour(&buffer);
+        assert!(contains(&rows, "│… 81 earlier lines "), "{rows:#?}");
+        assert!(contains(&rows, "Esc: back to the message"), "{rows:#?}");
+    }
+
+    #[test]
     fn a_short_terminal_still_shows_the_focused_body_and_its_cursor() {
         let mut editor = commit_editor("subj", &["body text"]);
         editor.field = Field::Body;

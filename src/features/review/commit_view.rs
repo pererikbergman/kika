@@ -8,18 +8,32 @@
 
 use super::files::{FilesStage, ReviewView, files_screen};
 use super::git::{MAX_PR_COMMITS, PrCommit};
+use super::pending::not_files;
 use crate::effect::{Effect, Tag};
 use crate::keymap::{OP_RUNNING, Reason};
 use crate::model::AppState;
 use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::Popup;
 use crate::view::short_hash;
+use kika_forge::forge::Words;
 
-const NOT_FILES: &str = "Open the pull request's files first (f)";
 const FILES_LOADING: &str = "The files are still loading";
-const NO_RANGE: &str = "The pull request's files did not load; press esc, then f";
-const COMMITS_LOADING: &str = "Reading the pull request's commits…";
-const WHOLE: &str = "Whole pull request";
+
+fn no_range(words: &Words) -> String {
+    format!(
+        "The {}'s files did not load; press esc, then f",
+        words.request
+    )
+}
+
+fn commits_loading(words: &Words) -> String {
+    format!("Reading the {}'s commits…", words.request)
+}
+
+/// The pick list's first row: the view of every commit together.
+fn whole(words: &Words) -> String {
+    format!("Whole {}", words.request)
+}
 
 /// The pick list's last row when git listed more commits than are offered.
 fn cut_note() -> String {
@@ -32,16 +46,16 @@ fn cut_note() -> String {
 /// git op running.
 pub(crate) fn review_commit_disabled(state: &AppState) -> Option<Reason> {
     let Some(files) = files_screen(state).filter(|_| state.review_files_shown()) else {
-        return Some(NOT_FILES.into());
+        return Some(not_files(state.review_words()).into());
     };
     match files.stage {
         FilesStage::Ready => {}
         FilesStage::Failed(_) if files.whole.is_some() => {}
-        FilesStage::Failed(_) => return Some(NO_RANGE.into()),
+        FilesStage::Failed(_) => return Some(no_range(state.review_words()).into()),
         _ => return Some(FILES_LOADING.into()),
     }
     if files.seq.is_some() {
-        return Some(COMMITS_LOADING.into());
+        return Some(commits_loading(state.review_words()).into());
     }
     state.op_is_running().then_some(OP_RUNNING.into())
 }
@@ -108,13 +122,14 @@ impl AppState {
 
     /// The "Review commit" list, its cursor on the view shown.
     fn show_commit_pick(&mut self) {
+        let words = self.review_words();
         let Some(files) = &self.review.files else {
             return;
         };
         let Some((commits, cut)) = &files.commits else {
             return;
         };
-        let mut rows = vec![WHOLE.to_string()];
+        let mut rows = vec![whole(words)];
         rows.extend(commits.iter().map(commit_row));
         if *cut {
             rows.push(cut_note());
@@ -193,6 +208,10 @@ pub(crate) mod tests {
     use kika_forge::review::ViewedState;
     use kika_git::commit_files::{CommitFile, CommitId, CommitRange};
     use kika_git::diff::DiffRequest;
+
+    /// The texts as GitHub words them.
+    const NO_RANGE: &str = "The pull request's files did not load; press esc, then f";
+    const COMMITS_LOADING: &str = "Reading the pull request's commits…";
 
     fn id(c: char) -> CommitId {
         CommitId::parse(&c.to_string().repeat(40)).unwrap()

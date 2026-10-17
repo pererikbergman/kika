@@ -31,8 +31,13 @@ pub(super) const NO_BROWSER: &str = "Set forge.browser in the global config";
 /// A files-screen key pressed before the files are shown and listed.
 pub(super) const NOT_READY: &str = "Open the files first";
 const NO_FAILING_CHECK: &str = "No failing check has a details page";
-const NO_PR_OPEN: &str = "No pull request is open";
-const NO_PR_SELECTED: &str = "No pull request selected";
+fn no_pr_open(words: &Words) -> String {
+    format!("No {} is open", words.request)
+}
+
+fn no_pr_selected(words: &Words) -> String {
+    format!("No {} selected", words.request)
+}
 const BACK_TO_QUEUE: &str = "Go back to the queue first (esc)";
 const LOADING: &str = "Already loading";
 
@@ -271,14 +276,15 @@ fn detail_shown(state: &AppState) -> bool {
 
 /// Why Enter cannot open a pull request.
 pub(crate) fn open_pr_disabled(state: &AppState) -> Option<Reason> {
+    let words = state.review_words();
     if detail_shown(state) {
-        return Some(NO_PR_SELECTED.into());
+        return Some(no_pr_selected(words).into());
     }
     state
         .review
         .selected()
         .is_none()
-        .then_some(NO_PR_SELECTED.into())
+        .then(|| no_pr_selected(words).into())
 }
 
 /// The queue's keys wait for the way back from a pull request.
@@ -293,7 +299,9 @@ pub(crate) fn refresh_review_disabled(state: &AppState) -> Option<Reason> {
     }
     let fetch = match state.review.screen {
         ReviewScreen::Queue => &state.review.queues_fetch,
-        ReviewScreen::Conversation(_) => return Some(super::conversation::BACK_TO_REFRESH.into()),
+        ReviewScreen::Conversation(_) => {
+            return Some(super::conversation::back_to_refresh(state.review_words()).into());
+        }
         ReviewScreen::Detail(_) | ReviewScreen::Files(_) => {
             // The threads come right after the detail: one refresh at a time.
             if state.review.discussion_fetch.loading {
@@ -312,7 +320,7 @@ pub(crate) fn open_check_disabled(state: &AppState) -> Option<Reason> {
         return Some(reason);
     }
     if !detail_shown(state) || state.review.detail.is_none() {
-        return Some(NO_PR_OPEN.into());
+        return Some(no_pr_open(state.review_words()).into());
     }
     if state.browser.is_none() {
         return Some(NO_BROWSER.into());
@@ -796,6 +804,9 @@ pub(crate) mod tests {
     use super::*;
     use crate::features::review::ReviewIntent;
     use crate::keymap::KeyPress;
+
+    /// The text as GitHub words it.
+    const NO_PR_OPEN: &str = "No pull request is open";
     use crate::list_filter::InputTarget;
     use kika_forge::ForgeView;
     use kika_forge::review::Check;

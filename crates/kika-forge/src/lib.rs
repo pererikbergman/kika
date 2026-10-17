@@ -22,7 +22,9 @@ pub mod github;
 mod github_forge;
 pub mod gitlab;
 pub mod gitlab_discussion;
+pub mod gitlab_discussion_write;
 mod gitlab_forge;
+pub mod gitlab_merge;
 pub mod gitlab_review;
 pub mod gitlab_submit;
 pub mod head;
@@ -259,16 +261,20 @@ impl CreateError {
         }
     }
 
-    /// What the error popup says when a merge failed. A timeout may hide
-    /// a merge that went through, so it says how to find out.
-    pub fn merge_message(&self) -> String {
+    /// What the error popup says when a merge failed, naming the forge in
+    /// `words`. A timeout, or an answer that does not say it merged, may
+    /// hide a merge that went through, so it says how to find out.
+    pub fn merge_message_in(&self, words: &forge::Words) -> String {
+        let name = words.name;
         match self {
-            CreateError::Status(ForgeStatus::Offline) => {
-                "GitHub could not be reached, or did not answer in time. If it timed out, \
+            CreateError::Status(ForgeStatus::Offline) => format!(
+                "{name} could not be reached, or did not answer in time. If it timed out, \
                  the merge may still have happened: refresh with r."
-                    .into()
-            }
-            other => other.message(),
+            ),
+            CreateError::Status(ForgeStatus::Failed) => format!(
+                "{name} gave no usable answer. The merge may still have happened: refresh with r."
+            ),
+            other => other.message_in(words),
         }
     }
 }
@@ -699,15 +705,29 @@ pub(crate) mod tests {
 
     #[test]
     fn a_merge_timeout_says_the_merge_may_have_happened() {
+        let github = forge::words_or_default(None);
+        let gitlab = forge::words(ForgeKind::GitLab);
         let offline = CreateError::Status(ForgeStatus::Offline);
         assert!(
             offline
-                .merge_message()
-                .contains("merge may still have happened")
+                .merge_message_in(github)
+                .starts_with("GitHub could not be reached")
         );
-        assert!(offline.merge_message().contains("refresh with r"));
+        let text = offline.merge_message_in(gitlab);
+        assert!(text.starts_with("GitLab could not be reached"), "{text}");
+        assert!(text.contains("merge may still have happened"), "{text}");
+        assert!(text.contains("refresh with r"), "{text}");
+        // An answer that does not say it merged.
+        let failed = CreateError::Status(ForgeStatus::Failed).merge_message_in(gitlab);
+        assert!(
+            failed.starts_with("GitLab gave no usable answer"),
+            "{failed}"
+        );
+        assert!(failed.contains("refresh with r"), "{failed}");
         let refused = CreateError::Refused("Head branch was modified".into());
-        assert_eq!(refused.merge_message(), "Head branch was modified");
+        assert_eq!(refused.merge_message_in(gitlab), "Head branch was modified");
+        let logged_out = CreateError::Status(ForgeStatus::NotLoggedIn);
+        assert!(logged_out.merge_message_in(gitlab).starts_with("glab "));
     }
 
     #[test]

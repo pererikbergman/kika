@@ -458,6 +458,7 @@ mod tests {
                 },
                 host: ForgeHost::parse("github.com").unwrap(),
                 unstable: false,
+                words: kika_forge::forge::words_or_default(None),
             }
             .into_question(),
             reset_hard_question("c1".into(), reset_op(ResetMode::Hard), None),

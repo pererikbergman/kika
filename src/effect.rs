@@ -331,8 +331,8 @@ pub enum Effect {
     },
 
     // --- review ---
-    /// Merge pull request `number` of `repo` by `method` through `gh`, on
-    /// the configured `host`, only while its head is still `head_oid`;
+    /// Merge request `number` of `repo` by `method` through the host's
+    /// forge CLI, on the configured `host`, only while its head is still `head_oid`;
     /// always answered by one `ReviewIntent::Merged`.
     MergePullRequest {
         tag: Tag,
@@ -416,12 +416,14 @@ pub enum Effect {
         repo: ForgeRepo,
     },
     /// Fetch `oids` from `remote` by id, with git's and ssh's questions
-    /// sent as `CredentialAsked`. Always answered by one
+    /// sent as `CredentialAsked`; when that fails, fetch the forge's
+    /// `fallback` head ref instead, if it has one. Always answered by one
     /// `ReviewIntent::HeadFetched`.
     FetchReviewCommits {
         tag: Tag,
         remote: RemoteName,
         oids: Vec<CommitId>,
+        fallback: Option<String>,
     },
     /// The merge base of `base` and `head`, and the files the pull request
     /// changes from it. Always answered by one `ReviewIntent::FilesLoaded`.
@@ -1348,12 +1350,18 @@ impl Runtime {
                 hosts,
                 repo,
             } => review::effects::plan_checkout(runner, tx, tag, head, branch, hosts, repo),
-            Effect::FetchReviewCommits { tag, remote, oids } => review::effects::fetch_commits(
+            Effect::FetchReviewCommits {
+                tag,
+                remote,
+                oids,
+                fallback,
+            } => review::effects::fetch_commits(
                 runner,
                 tx,
                 tag,
                 remote,
                 oids,
+                fallback,
                 Arc::clone(&self.credential),
             ),
             Effect::LoadReviewFiles { tag, head, base } => {

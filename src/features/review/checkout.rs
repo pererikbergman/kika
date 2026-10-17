@@ -3,10 +3,12 @@
 //! run or edit it. `b` plans from local git only; a question that `y`
 //! alone answers says what will happen; only after `y`, and only when the
 //! head is missing, is it fetched by id from the repository's own fetch
-//! remote. A branch that has diverged from the head, or that another
-//! worktree has checked out, is never moved.
+//! remote, or by the forge's head ref (GitLab's
+//! `refs/merge-requests/<n>/head`) when the id alone will not do. A branch
+//! that has diverged from the head, or that another worktree has checked
+//! out, is never moved. Every text names the request in the forge's words.
 
-use super::files::{NO_FETCH_REMOTE, STILL_MISSING};
+use super::files::{no_fetch_remote, still_missing};
 use super::git::{BranchAt, CheckoutPlan, pr_branch};
 use super::merge::merge_disabled;
 use super::state::NO_FORGE;
@@ -16,11 +18,18 @@ use crate::keymap::{KeyScope, OP_RUNNING, Reason, in_progress_disabled};
 use crate::model::AppState;
 use crate::op::GitOp;
 use crate::popup::Popup;
+use kika_forge::forge::{Words, head_ref};
 use kika_git::branches::BranchName;
 use kika_git::commit_files::CommitId;
 use kika_git::repo_state::{Operation, resumable};
 
-const NO_HEAD: &str = "GitHub gave no head commit for this pull request";
+fn no_head(words: &Words) -> String {
+    format!(
+        "{} gave no head commit for this {}",
+        words.name, words.request
+    )
+}
+
 const PLANNING: &str = "The checkout is already being prepared";
 const IN_PROGRESS: &str = "Finish or abort the operation in progress";
 
@@ -61,7 +70,7 @@ pub(crate) fn pr_checkout_disabled(state: &AppState) -> Option<Reason> {
         return Some(reason);
     }
     if state.review.detail.as_ref()?.head_oid.is_none() {
-        return Some(NO_HEAD.into());
+        return Some(no_head(state.review_words()).into());
     }
     if state.review_repo().is_none() {
         return Some(NO_FORGE.into());
@@ -88,7 +97,12 @@ fn short(id: &CommitId) -> &str {
 }
 
 /// The op a plan allows, or why there is none.
-fn op_for(number: u64, head: &CommitId, plan: &CheckoutPlan) -> Result<GitOp, Reason> {
+fn op_for(
+    number: u64,
+    head: &CommitId,
+    plan: &CheckoutPlan,
+    words: &Words,
+) -> Result<GitOp, Reason> {
     let branch = pr_branch(number);
     let name = branch.display();
     if !plan.in_progress.is_empty() {
@@ -109,7 +123,8 @@ fn op_for(number: u64, head: &CommitId, plan: &CheckoutPlan) -> Result<GitOp, Re
         BranchAt::FastForward(old) => Some(old.clone()),
         BranchAt::Diverged => {
             return Err(format!(
-                "{name} has commits not in the pull request; rename or delete it first"
+                "{name} has commits not in the {}; rename or delete it first",
+                words.request
             )
             .into());
         }
@@ -118,7 +133,7 @@ fn op_for(number: u64, head: &CommitId, plan: &CheckoutPlan) -> Result<GitOp, Re
         }
     };
     if !plan.head_here && plan.remote.is_none() {
-        return Err(NO_FETCH_REMOTE.into());
+        return Err(no_fetch_remote(words).into());
     }
     Ok(GitOp::CheckoutPrBranch {
         number,
@@ -129,9 +144,16 @@ fn op_for(number: u64, head: &CommitId, plan: &CheckoutPlan) -> Result<GitOp, Re
     })
 }
 
-/// "Check out pull request #N?", with how to answer first, so a short
-/// screen cuts the details rather than the answer.
-fn question(number: u64, head: &CommitId, plan: &CheckoutPlan, op: GitOp) -> ConfirmQuestion {
+/// "Check out pull request #N?", in the forge's `words`, with how to
+/// answer first, so a short screen cuts the details rather than the answer.
+fn question(
+    number: u64,
+    head: &CommitId,
+    plan: &CheckoutPlan,
+    op: GitOp,
+    words: &Words,
+) -> ConfirmQuestion {
+    let Words { request, sign, .. } = words;
     let name = pr_branch(number).display();
     let what = match &plan.at {
         BranchAt::FastForward(old) if plan.current => {
@@ -148,7 +170,7 @@ fn question(number: u64, head: &CommitId, plan: &CheckoutPlan, op: GitOp) -> Con
         ),
         BranchAt::Same => format!("Switch to {name} (already at {})?", short(head)),
         _ => format!(
-            "Check out pull request #{number} as new branch {name} at {}?",
+            "Check out {request} {sign}{number} as new branch {name} at {}?",
             short(head)
         ),
     };
@@ -158,7 +180,7 @@ fn question(number: u64, head: &CommitId, plan: &CheckoutPlan, op: GitOp) -> Con
     };
     ConfirmQuestion {
         scope: KeyScope::CheckoutPullRequest,
-        title: "Check out pull request".into(),
+        title: format!("Check out {request}").into(),
         text: format!("Press y to check it out, n or Esc to cancel\n{what}{fetch}"),
         answer: Answer::YOnly,
         then: Then::Op(op),
@@ -241,10 +263,10 @@ impl AppState {
         };
         // After the fetch the head must be here, whatever else the plan says.
         if checkout.plan.is_some() && !plan.head_here {
-            self.notice = Some(STILL_MISSING.into());
+            self.notice = Some(still_missing(self.review_words()).into());
             return vec![];
         }
-        let op = match op_for(checkout.number, &checkout.head, &plan) {
+        let op = match op_for(checkout.number, &checkout.head, &plan, self.review_words()) {
             Ok(op) => op,
             Err(reason) => {
                 self.notice = Some(reason);
@@ -257,6 +279,7 @@ impl AppState {
                 &checkout.head,
                 &plan,
                 op,
+                self.review_words(),
             )));
             self.review.checkout = Some(PrCheckout {
                 plan: Some(plan),
@@ -305,13 +328,15 @@ impl AppState {
         };
         self.notice = Some(
             format!(
-                "Fetching #{}'s head from {}…",
+                "Fetching {}{}'s head from {}…",
+                self.review_words().sign,
                 checkout.number,
                 remote.display()
             )
             .into(),
         );
         let head = checkout.head.clone();
+        let fallback = head_ref(self.review_forge_kind(), checkout.number);
         self.review.checkout = Some(PrCheckout {
             stage: CheckoutStage::Fetching,
             seq: tag.seq,
@@ -321,6 +346,7 @@ impl AppState {
             tag,
             remote,
             oids: vec![head],
+            fallback,
         }]
     }
 
@@ -381,6 +407,7 @@ mod tests {
 
     use super::*;
     use crate::features::review::ReviewIntent;
+    use crate::features::review::files::tests::{NO_FETCH_REMOTE, STILL_MISSING};
     use crate::features::review::state::tests::{fixture_detail, opened_on, press, repo};
     use crate::intent::AppIntent;
     use crate::model::Context;
@@ -516,7 +543,7 @@ mod tests {
                         detail.head_oid = None;
                     }
                 },
-                NO_HEAD,
+                "GitHub gave no head commit for this pull request",
             ),
             (
                 |s| {
@@ -712,9 +739,18 @@ mod tests {
     fn fetch_after_y(state: &mut AppState) -> Tag {
         let effects = press(state, KeyCode::Char('y'));
         match effects.as_slice() {
-            [Effect::FetchReviewCommits { tag, remote, oids }] => {
+            [
+                Effect::FetchReviewCommits {
+                    tag,
+                    remote,
+                    oids,
+                    fallback,
+                },
+            ] => {
                 assert_eq!(*remote, RemoteName::from("origin"));
                 assert_eq!(oids, &[id(HEAD)]);
+                // GitHub serves the head by id alone.
+                assert_eq!(*fallback, None);
                 assert!(tag.user);
                 *tag
             }
@@ -731,6 +767,57 @@ mod tests {
             [Effect::PlanPrCheckout { tag, .. }] => *tag,
             other => panic!("expected the plan again, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn on_gitlab_the_question_names_the_merge_request_and_the_fetch_can_use_its_head_ref() {
+        use crate::features::review::state::tests::on_gitlab;
+        let mut state = on_gitlab(on_detail(|_| {}));
+        let effects = press(&mut state, KeyCode::Char('b'));
+        let [Effect::PlanPrCheckout { tag, .. }] = effects.as_slice() else {
+            panic!("expected one plan, got {effects:?}");
+        };
+        let plan = missing(BranchAt::Absent, Some("origin"));
+        assert_eq!(planned(&mut state, *tag, Ok(plan)), []);
+        let text = question_text(&state);
+        assert!(
+            text.contains("Check out merge request !12 as new branch pr/12 at 1111111?"),
+            "{text}"
+        );
+        let Some(Popup::Question(q)) = state.popups.last() else {
+            panic!("{:?}", state.popups);
+        };
+        assert_eq!(q.title, "Check out merge request");
+        let effects = press(&mut state, KeyCode::Char('y'));
+        match effects.as_slice() {
+            [Effect::FetchReviewCommits { oids, fallback, .. }] => {
+                assert_eq!(oids, &[id(HEAD)]);
+                assert_eq!(fallback.as_deref(), Some("refs/merge-requests/12/head"));
+            }
+            other => panic!("expected one fetch, got {other:?}"),
+        }
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("Fetching !12's head from origin…")
+        );
+
+        // The branch's own refusals and a missing head say merge request.
+        let mut state = on_gitlab(on_detail(|_| {}));
+        let effects = press(&mut state, KeyCode::Char('b'));
+        let [Effect::PlanPrCheckout { tag, .. }] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        planned(&mut state, *tag, Ok(here(BranchAt::Diverged, false)));
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("pr/12 has commits not in the merge request; rename or delete it first")
+        );
+        let mut state = on_gitlab(on_detail(|d| d.head_oid = None));
+        assert_eq!(press(&mut state, KeyCode::Char('b')), []);
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("GitLab gave no head commit for this merge request")
+        );
     }
 
     #[test]

@@ -1,8 +1,10 @@
 //! Code suggestions: `s` in pick mode opens the line-comment composer
-//! with a ```` ```suggestion ```` block holding the picked lines exactly
-//! as they are at the head, so the author can apply the change on GitHub
-//! in one click. The lines are read raw from the head's blob, because the
-//! diff's text is made terminal-safe and would not match the file.
+//! with a suggestion block holding the picked lines exactly as they are
+//! at the head, so the author can apply the change on the forge in one
+//! click. Each forge has its own fence (`suggestion`, or GitLab's
+//! `suggestion:-N+0`, counting the lines above the note's line). The
+//! lines are read raw from the head's blob, because the diff's text is
+//! made terminal-safe and would not match the file.
 
 use super::comment_editor::{CommentEditor, Composer, ComposerKind};
 use super::comment_pick::live_pick;
@@ -11,22 +13,28 @@ use super::state::ReviewFetch;
 use crate::effect::{Effect, Tag};
 use crate::model::AppState;
 use kika_forge::anchor::GhSide;
+use kika_forge::forge::{Words, suggestion_info};
 use kika_git::safe_text::is_invisible_or_bidi;
 
 const NOT_NEW_SIDE: &str = "A suggestion goes on added or unchanged lines";
 const UNSAFE: &str = "These lines hold characters a suggestion cannot show";
 
+fn too_long(words: &Words) -> String {
+    format!("{} takes a suggestion of at most 101 lines", words.name)
+}
+
 /// The comment text for a suggestion replacing the picked lines with
-/// `lines`. The fence is longer than any run of backticks in the lines, so
-/// none of them ends it, and the text ends on an empty line for a note.
-pub(crate) fn suggestion_body(lines: &[String]) -> String {
+/// `lines`, its fence opened with the forge's `info`. The fence is longer
+/// than any run of backticks in the lines, so none of them ends it, and
+/// the text ends on an empty line for a note.
+pub(crate) fn suggestion_body(lines: &[String], info: &str) -> String {
     let longest = lines
         .iter()
         .map(|l| longest_backticks(l))
         .max()
         .unwrap_or(0);
     let fence = "`".repeat((longest + 1).max(3));
-    format!("{fence}suggestion\n{}\n{fence}\n", lines.join("\n"))
+    format!("{fence}{info}\n{}\n{fence}\n", lines.join("\n"))
 }
 
 fn longest_backticks(line: &str) -> usize {
@@ -42,6 +50,14 @@ fn unsafe_line(line: &str) -> bool {
 }
 
 impl AppState {
+    /// The fence info for a suggestion on `target` on the reviewed forge;
+    /// `None` when the forge cannot take one that long.
+    fn suggestion_info(&self, target: &CommentTarget) -> Option<String> {
+        let first = target.start.unwrap_or(target.end).line;
+        let above = target.end.line.saturating_sub(first);
+        suggestion_info(self.review_forge_kind(), above)
+    }
+
     /// `s` in pick mode: read the picked lines at the head, then open the
     /// composer on them. Only lines on the new side can be suggested on;
     /// a pick that ends on a removed line says so and stays.
@@ -59,6 +75,10 @@ impl AppState {
             && target.end.side == GhSide::Right;
         if !new_side {
             self.notice = Some(NOT_NEW_SIDE.into());
+            return vec![];
+        }
+        if self.suggestion_info(&target).is_none() {
+            self.notice = Some(too_long(self.review_words()).into());
             return vec![];
         }
         let Some((head, path)) = self
@@ -112,12 +132,16 @@ impl AppState {
             self.notice = Some(UNSAFE.into());
             return;
         }
+        let Some(info) = self.suggestion_info(&target) else {
+            self.notice = Some(too_long(self.review_words()).into());
+            return;
+        };
         self.review.composer = Some(Composer {
             kind: ComposerKind::Line {
                 target,
                 editing: None,
             },
-            text: CommentEditor::from_text(&suggestion_body(&lines)),
+            text: CommentEditor::from_text(&suggestion_body(&lines, &info)),
         });
     }
 }
@@ -191,19 +215,19 @@ mod tests {
     #[test]
     fn the_fence_is_longer_than_any_backticks_in_the_lines() {
         assert_eq!(
-            suggestion_body(&strings(&["let x = 1;"])),
+            suggestion_body(&strings(&["let x = 1;"]), "suggestion"),
             "```suggestion\nlet x = 1;\n```\n"
         );
         assert_eq!(
-            suggestion_body(&strings(&["\tif x {", "  ``a``"])),
+            suggestion_body(&strings(&["\tif x {", "  ``a``"]), "suggestion"),
             "```suggestion\n\tif x {\n  ``a``\n```\n"
         );
         assert_eq!(
-            suggestion_body(&strings(&["```rust", "x"])),
+            suggestion_body(&strings(&["```rust", "x"]), "suggestion"),
             "````suggestion\n```rust\nx\n````\n"
         );
         assert_eq!(
-            suggestion_body(&strings(&["a `````` b"])),
+            suggestion_body(&strings(&["a `````` b"]), "suggestion"),
             "```````suggestion\na `````` b\n```````\n"
         );
         assert!(!unsafe_line("\tif x { // ok ✓"));
@@ -262,6 +286,116 @@ mod tests {
             composer_text(&state).as_deref(),
             Some("```suggestion\nfn new() {}\nuse std::fmt;\nfn newer() {}\n```\n")
         );
+    }
+
+    #[test]
+    fn on_gitlab_the_fence_counts_the_lines_above_and_stops_at_101() {
+        use crate::features::review::state::tests::on_gitlab;
+        // A 3-line pick: two lines above the last, where the note sits.
+        let mut state = on_gitlab(commenting());
+        type_char(&mut state, 'a');
+        type_char(&mut state, 'v');
+        for _ in 0..3 {
+            type_char(&mut state, 'j');
+        }
+        let (tag, target) = read(&type_char(&mut state, 's'));
+        assert_eq!(span(&target), (Some(right(1)), right(3)));
+        let lines = strings(&["fn new() {}", "use std::fmt;", "fn newer() {}"]);
+        answer(&mut state, tag, &target, Ok(lines));
+        assert_eq!(
+            composer_text(&state).as_deref(),
+            Some("```suggestion:-2+0\nfn new() {}\nuse std::fmt;\nfn newer() {}\n```\n")
+        );
+
+        // One line: nothing above it.
+        let mut state = on_gitlab(commenting());
+        type_char(&mut state, 'a');
+        let (tag, target) = read(&type_char(&mut state, 's'));
+        answer(&mut state, tag, &target, Ok(strings(&["let x = 1;"])));
+        assert_eq!(
+            composer_text(&state).as_deref(),
+            Some("```suggestion:-0+0\nlet x = 1;\n```\n")
+        );
+
+        // 102 lines: the notice, and no composer.
+        let mut state = on_gitlab(commenting());
+        type_char(&mut state, 'a');
+        let (tag, target) = read(&type_char(&mut state, 's'));
+        let long = CommentTarget {
+            start: Some(right(1)),
+            end: right(102),
+            ..target
+        };
+        let lines: Vec<String> = (1..=102).map(|n| format!("line {n}")).collect();
+        answer(&mut state, tag, &long, Ok(lines));
+        assert_eq!(state.review.composer, None);
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("GitLab takes a suggestion of at most 101 lines")
+        );
+        // 101 lines still fit.
+        let mut state = on_gitlab(commenting());
+        type_char(&mut state, 'a');
+        let (tag, target) = read(&type_char(&mut state, 's'));
+        let longest = CommentTarget {
+            start: Some(right(1)),
+            end: right(101),
+            ..target
+        };
+        let lines: Vec<String> = (1..=101).map(|n| format!("line {n}")).collect();
+        answer(&mut state, tag, &longest, Ok(lines));
+        assert!(
+            composer_text(&state)
+                .unwrap()
+                .starts_with("```suggestion:-100+0\n")
+        );
+    }
+
+    #[test]
+    fn on_gitlab_a_pick_of_102_lines_is_refused_before_any_read_and_stays() {
+        use crate::features::review::state::tests::on_gitlab;
+        use kika_git::diff::{Classifier, DiffLine, EmojiZwj};
+        // One hunk of 102 added lines.
+        let long = || -> Vec<DiffLine> {
+            let mut classifier = Classifier::new(EmojiZwj::Escape);
+            [
+                "diff --git a/src/cache.rs b/src/cache.rs".to_string(),
+                "--- a/src/cache.rs".into(),
+                "+++ b/src/cache.rs".into(),
+                "@@ -0,0 +1,102 @@".into(),
+            ]
+            .into_iter()
+            .chain((1..=102).map(|n| format!("+line {n}")))
+            .map(|t| classifier.classify(t.as_bytes()))
+            .collect()
+        };
+        let pick_all = |state: &mut AppState, rows: usize| {
+            type_char(state, 'a');
+            type_char(state, 'v');
+            for _ in 1..rows {
+                type_char(state, 'j');
+            }
+        };
+
+        let mut state = on_gitlab(commenting());
+        state.diff.lines = long();
+        pick_all(&mut state, 102);
+        assert_eq!(type_char(&mut state, 's'), []);
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("GitLab takes a suggestion of at most 101 lines")
+        );
+        assert_eq!(state.review.composer, None);
+        assert!(live_pick(&state).is_some());
+        assert_eq!(state.key_focus(), KeyScope::ReviewPick);
+        assert!(!state.review.suggestion_fetch.loading);
+
+        // 101 lines are read.
+        let mut state = on_gitlab(commenting());
+        state.diff.lines = long();
+        pick_all(&mut state, 101);
+        let (_, target) = read(&type_char(&mut state, 's'));
+        assert_eq!(span(&target), (Some(right(1)), right(101)));
     }
 
     #[test]

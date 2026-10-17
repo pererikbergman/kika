@@ -29,6 +29,7 @@ impl GitHubForge<'_> {
         requests: "pull requests",
         short: "PR",
         sign: '#',
+        host_key: "github",
     };
 
     /// The kinds of review GitHub takes, in the order they are offered.

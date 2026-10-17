@@ -1,0 +1,4 @@
+HTTP/2.0 200 OK
+Content-Type: application/json
+
+{"id":4242,"iid":12,"project_id":17,"title":"\u001b[2JAdd widget caching \u202e--hostname=evil","state":"merged","merged_by":{"id":3,"username":"octocat"},"sha":"1111111111111111111111111111111111111111","merge_commit_sha":"5555555555555555555555555555555555555555","squash":true}

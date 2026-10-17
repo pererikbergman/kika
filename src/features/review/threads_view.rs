@@ -143,10 +143,10 @@ pub(super) fn header_style(
 }
 
 /// What the header of a thread above the diff says before its author.
-pub(super) fn top_label(thread: &ReviewThread, placement: Placement) -> String {
+pub(super) fn top_label(thread: &ReviewThread, placement: Placement, words: &Words) -> String {
     match placement {
         Placement::File => "file comment".into(),
-        Placement::OtherView => "on the whole pull request (c)".into(),
+        Placement::OtherView => format!("on the whole {} (c)", words.request),
         Placement::Line { end, .. } => format!("line {} · not in this diff", end.line),
         Placement::Outdated => {
             let side = match thread.side {
@@ -186,9 +186,13 @@ fn header(
     thread: &ReviewThread,
     top: Option<Placement>,
     selected: bool,
+    words: &Words,
 ) -> Line<'static> {
     let first = thread.comments.first();
-    let mut parts: Vec<String> = top.map(|p| top_label(thread, p)).into_iter().collect();
+    let mut parts: Vec<String> = top
+        .map(|p| top_label(thread, p, words))
+        .into_iter()
+        .collect();
     parts.push(first.map_or_else(|| "ghost".to_string(), |c| c.author.clone()));
     if let Some(c) = first {
         parts.push(short_time(&c.created));
@@ -250,6 +254,7 @@ fn thread_rows(
     selected: bool,
     width: usize,
     room: usize,
+    words: &Words,
 ) -> Vec<Line<'static>> {
     let mut out = whole_thread(
         palette,
@@ -258,6 +263,7 @@ fn thread_rows(
         selected,
         width.saturating_sub(INDENT),
         room,
+        words,
     );
     if out.len() > room {
         out.truncate(room);
@@ -285,10 +291,11 @@ fn whole_thread(
     selected: bool,
     width: usize,
     room: usize,
+    words: &Words,
 ) -> Vec<Line<'static>> {
     let outdated = top == Some(Placement::Outdated);
-    let mut out = vec![header(palette, thread, top, selected)];
-    // Folded to its header; for now its text is read on GitHub.
+    let mut out = vec![header(palette, thread, top, selected, words)];
+    // Folded to its header; its text is read in the reader.
     if thread.resolved {
         return out;
     }
@@ -391,6 +398,7 @@ fn top_block(
             selected == Some(t),
             width,
             room,
+            scope.words,
         ));
     }
     out
@@ -492,6 +500,7 @@ pub fn thread_diff_body(
                 selected == Some(t),
                 width,
                 room,
+                scope.words,
             ));
         }
     }
@@ -750,6 +759,15 @@ mod tests {
         assert!(first < second && second < header, "{rows:#?}");
         let line3 = row_with(&rows, " let cache = 1;");
         assert!(!rows[line3 + 1].contains('┌'), "{rows:#?}");
+
+        // On GitLab the same threads are on the whole merge request.
+        let state = crate::features::review::state::tests::on_gitlab(state);
+        let rows = draw(&state, 100, 40);
+        row_with(&rows, "on the whole merge request (c) · alice");
+        assert!(
+            !rows.iter().any(|r| r.contains("pull request")),
+            "{rows:#?}"
+        );
     }
 
     /// The fixture plus `n` unresolved outdated threads on cache.rs, each

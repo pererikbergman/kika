@@ -56,7 +56,7 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
             None => Vec::new(),
         },
         ReviewScreen::Conversation(_) => {
-            let lines = super::conversation_view::conversation_view(review, inner);
+            let lines = super::conversation_view::conversation_view(review, words, inner);
             frame.render_widget(Paragraph::new(lines), inner);
             // A general comment is typed over it.
             super::pending_view::render_pending(&state.palette, review, words, frame, inner);
@@ -72,7 +72,10 @@ pub fn problem_text(problem: ReviewProblem, words: &Words) -> (String, Option<St
     match problem {
         ReviewProblem::NoForgeHost => (
             NO_FORGE.to_string(),
-            Some("Add its host to [forge] github, or its owner to [forge.allow].".into()),
+            Some(format!(
+                "Add its host to [forge] {}, or its owner to [forge.allow].",
+                words.host_key
+            )),
         ),
         ReviewProblem::Limited(until) => (
             format!("{name} is rate limited until {} UTC", clock(until)),
@@ -416,7 +419,7 @@ fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rec
                         &no_threads
                     }
                 };
-                let scope = ThreadScope::of(files, discussion);
+                let scope = ThreadScope::of(files, discussion).in_words(state.review_words());
                 let mut threads = scope.file_threads(&row.file.path, None);
                 // Numbered once a frame, for the shown file only, and only
                 // when it has a thread on a line or a comment to mark.
@@ -451,7 +454,16 @@ fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rec
     frame.render_widget(body.block(block), diff);
     if let Some(reader) = &files.reader {
         let discussion = state.review.discussion.as_ref();
-        super::reader_view::render_reader(&state.palette, files, discussion, reader, frame, inner);
+        let words = state.review_words();
+        super::reader_view::render_reader(
+            &state.palette,
+            files,
+            discussion,
+            reader,
+            words,
+            frame,
+            inner,
+        );
     }
     super::pending_view::render_pending(&state.palette, &state.review, words, frame, inner);
 }
@@ -696,7 +708,7 @@ pub fn detail_lines(
         Span::styled(" · ", dim()),
         Span::styled(word, Style::new().fg(color)),
     ]));
-    lines.extend(merge_line(palette, detail, width));
+    lines.extend(merge_line(palette, detail, words, width));
     let branches = format!("{} ← {}", detail.base, detail.head);
     lines.extend(markdown::wrap_text(&branches, Style::new(), width));
     if !detail.checks.is_empty() {
@@ -737,8 +749,14 @@ pub fn detail_lines(
     lines
 }
 
-/// How the pull request may be merged, or why it may not, in fixed words.
-fn merge_line(palette: &Palette, detail: &PrDetail, width: usize) -> Vec<Line<'static>> {
+/// How the request may be merged, or why it may not, in fixed words that
+/// name the forge in `words`.
+fn merge_line(
+    palette: &Palette,
+    detail: &PrDetail,
+    words: &Words,
+    width: usize,
+) -> Vec<Line<'static>> {
     let (text, style) = match merge_options(detail) {
         Ok(methods) => {
             let labels: Vec<&str> = methods.iter().map(|m| m.label()).collect();
@@ -746,11 +764,11 @@ fn merge_line(palette: &Palette, detail: &PrDetail, width: usize) -> Vec<Line<'s
         }
         // Already merged is done, not a problem: it is not drawn as one.
         Err(MergeBlock::Merged) => (
-            format!("Cannot merge: {}", MergeBlock::Merged.message()),
+            format!("Cannot merge: {}", MergeBlock::Merged.message(words)),
             dim(),
         ),
         Err(block) => (
-            format!("Cannot merge: {}", block.message()),
+            format!("Cannot merge: {}", block.message(words)),
             Style::new().fg(palette.error),
         ),
     };
@@ -939,6 +957,35 @@ mod tests {
         assert!(contains(&rows, "Cannot merge: already merged"), "{rows:#?}");
     }
 
+    #[test]
+    fn on_gitlab_the_detail_says_gitlab_is_still_checking() {
+        let mut state = on_gitlab(reviewing(ReviewScreen::Detail(42)));
+        let mut detail = fixture_detail();
+        detail.merge_state = kika_forge::review::MergeState::Unknown;
+        state.review.detail = Some(detail);
+        let rows = draw(&state, 80, 30);
+        assert!(
+            contains(
+                &rows,
+                "Cannot merge: GitLab is still checking; refresh with r"
+            ),
+            "{rows:#?}"
+        );
+        // GitHub keeps its own words.
+        let mut state = reviewing(ReviewScreen::Detail(42));
+        let mut detail = fixture_detail();
+        detail.merge_state = kika_forge::review::MergeState::Unknown;
+        state.review.detail = Some(detail);
+        let rows = draw(&state, 80, 30);
+        assert!(
+            contains(
+                &rows,
+                "Cannot merge: GitHub is still checking; refresh with r"
+            ),
+            "{rows:#?}"
+        );
+    }
+
     /// The style of the first cell of the row holding `text`.
     fn style_at(state: &AppState, text: &str) -> Style {
         let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
@@ -1072,6 +1119,12 @@ mod tests {
         assert!(contains(&rows, "GitLab could not be reached"), "{rows:#?}");
         assert!(!rows.iter().any(|r| r.contains("GitHub")), "{rows:#?}");
         let gitlab = kika_forge::forge::words(kika_forge::url::ForgeKind::GitLab);
+        assert_eq!(
+            problem_text(ReviewProblem::NoForgeHost, gitlab)
+                .1
+                .as_deref(),
+            Some("Add its host to [forge] gitlab_ask, or its owner to [forge.allow].")
+        );
         let text = |status| problem_text(ReviewProblem::Status(status), gitlab);
         assert_eq!(
             text(ForgeStatus::NotLoggedIn),
@@ -1346,7 +1399,7 @@ mod tests {
             (FilesStage::Listing, "Loading files…"),
             (FilesStage::Fetching, "Fetching PR head…"),
             (
-                FilesStage::Failed(crate::features::review::files::NO_FETCH_REMOTE.into()),
+                FilesStage::Failed(crate::features::review::files::tests::NO_FETCH_REMOTE.into()),
                 "PR head is not here",
             ),
         ] {
@@ -1429,6 +1482,43 @@ mod tests {
             &buffer,
             "src/cache.rs"
         ));
+    }
+
+    /// The detail screen at 80x30: tall enough for its checks and threads.
+    fn draw_detail_buffer(state: &AppState) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::view::render(state, frame))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn under_no_color_the_detail_draws_no_colour_but_keeps_its_words() {
+        use crate::features::review::threads::tests::fixture_discussion;
+        let mut state = reviewing(ReviewScreen::Detail(42));
+        state.review.detail = Some(fixture_detail());
+        state.review.discussion = Some(fixture_discussion());
+        state.palette = Palette::NO_COLOR;
+        let buffer = draw_detail_buffer(&state);
+        let rows = buffer_rows(&buffer);
+        crate::test_support::assert_no_colour(&buffer);
+        for text in [
+            "✗ build  failed",
+            "✓ ci/lint  passed",
+            "● test  pending",
+            "mergeable",
+            "Threads: ",
+        ] {
+            assert!(contains(&rows, text), "{text:?} missing in {rows:#?}");
+        }
+
+        let mut detail = fixture_detail();
+        detail.state = PrState::Merged;
+        state.review.detail = Some(detail);
+        crate::test_support::assert_no_colour(&draw_detail_buffer(&state));
+        let merged = style_at(&state, "Cannot merge: already merged");
+        assert!(merged.add_modifier.contains(Modifier::DIM), "{merged:?}");
     }
 
     #[test]
