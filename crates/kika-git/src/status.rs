@@ -33,6 +33,13 @@ impl FileEntry {
             .map(|&c| if c == '.' { ' ' } else { c })
             .collect()
     }
+
+    /// An untracked folder: with `--untracked-files=all` git only lists a
+    /// folder (path ending in `/`) it will not descend into, which is a
+    /// nested repository. It has no file diff, so nothing should ask for one.
+    pub fn is_untracked_dir(&self) -> bool {
+        self.kind == EntryKind::Untracked && self.path.as_bytes().ends_with(b"/")
+    }
 }
 
 /// Where `HEAD` points.
@@ -337,6 +344,20 @@ mod tests {
     }
 
     const GIT_DIR_ARGV: &[&str] = &["rev-parse", "--absolute-git-dir"];
+
+    #[test]
+    fn an_untracked_folder_entry_is_an_untracked_dir_and_files_are_not() {
+        let status =
+            parse_status(b"1 .M N... 100644 100644 100644 a a dir/\0? vendor/lib/\0? new.rs\0")
+                .unwrap();
+        let dirs: Vec<_> = status
+            .files
+            .iter()
+            .map(FileEntry::is_untracked_dir)
+            .collect();
+        assert_eq!(status.files[1].path.display(), "vendor/lib/");
+        assert_eq!(dirs, [false, true, false]);
+    }
 
     #[test]
     fn read_status_runs_status_then_rev_parse_and_parses_output() {

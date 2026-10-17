@@ -50,6 +50,24 @@ async fn start_waits_for_the_first_status_and_diff() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_untracked_nested_repository_shows_a_notice_not_a_git_error() {
+    let repo = TestRepo::new()
+        .write("a.txt", "one\n")
+        .commit("init")
+        .nested_repo("vendor/lib");
+    let entry = repo.entry("vendor/lib/").expect("the folder is listed");
+    assert!(entry.is_untracked_dir());
+
+    let mut app = Harness::start(&repo).await;
+
+    let selected = app.selected_line().expect("a row is selected");
+    assert!(selected.contains("vendor/lib/"), "selected: {selected:?}");
+    app.assert_screen_contains("Untracked folder with its own git repository");
+    let screen = app.screen().join("\n");
+    assert!(!screen.contains("Could not access"), "{screen}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn space_stages_the_selected_file_in_git() {
     let repo = modified_repo();
     let mut app = Harness::start(&repo).await;

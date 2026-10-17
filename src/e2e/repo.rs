@@ -133,6 +133,26 @@ impl TestRepo {
         self
     }
 
+    /// Make `dir` a repository of its own inside the work tree, with one
+    /// commit, as a submodule's checkout is left after moving `HEAD` to a
+    /// commit from before the submodule was added.
+    pub fn nested_repo(self, dir: &str) -> Self {
+        let nested = self.dir.path().join(dir);
+        std::fs::create_dir_all(&nested).unwrap();
+        git(&nested, &["init", "-q", "--template="]);
+        for (key, value) in [
+            ("user.name", "Kika Test"),
+            ("user.email", "test@example.com"),
+            ("commit.gpgsign", "false"),
+        ] {
+            git(&nested, &["config", key, value]);
+        }
+        std::fs::write(nested.join("lib.rs"), "fn lib() {}\n").unwrap();
+        git(&nested, &["add", "-A"]);
+        git(&nested, &["commit", "-q", "-m", "nested"]);
+        self
+    }
+
     pub fn stage(self, path: &str) -> Self {
         self.git(["add", "--", path]);
         self

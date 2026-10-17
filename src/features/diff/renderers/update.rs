@@ -62,6 +62,8 @@ impl AppState {
             Focus::Status | Focus::Files | Focus::Branches | Focus::Commits | Focus::Stash => self
                 .files
                 .selected_row()
+                // An untracked folder has no diff to render.
+                .filter(|entry| !entry.is_untracked_dir())
                 .map(|entry| DiffRequest::for_entry(entry, self.diff_options)),
             Focus::Diff => match self.hunk_view()? {
                 // Like the commit's file in the Commits panel, never rendered.
