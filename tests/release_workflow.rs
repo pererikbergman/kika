@@ -5,7 +5,6 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 const TARGETS: [&str; 5] = [
     "aarch64-apple-darwin",
@@ -154,6 +153,7 @@ fn template_covers_both_platforms_and_archs() {
 #[cfg(unix)]
 mod render {
     use super::*;
+    use std::process::Command;
     use std::process::Output;
 
     const SHAS: [&str; 4] = [
