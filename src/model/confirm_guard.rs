@@ -108,6 +108,7 @@ mod tests {
             head: cid("c1"),
             old: None,
             current: false,
+            from: None,
         };
         let mut state = merging();
         assert!(state.confirm_refused(&checkout));

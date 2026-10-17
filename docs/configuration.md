@@ -2219,7 +2219,11 @@ moved. Right before it runs, the branch is read again: if it, or the
 branch checked out here, changed while the question was open, nothing
 runs. A branch that is behind is switched to first and only then
 fast-forwarded, so a switch git refuses for local changes leaves it
-where it was. Uncommitted changes come along, or git refuses.
+where it was. Uncommitted changes come along, or git refuses. From a
+detached `HEAD` on commits that nothing else reaches, `y` (after the
+fetch, when there is one) asks "Leave commits behind?" before anything
+moves; only its `y` checks out, and the checkout runs only while `HEAD`
+is still where it was asked from.
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|

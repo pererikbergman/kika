@@ -133,11 +133,16 @@ impl AppState {
     }
 
     /// Whether `HEAD` is still the detached `head` a question was asked
-    /// from; `None` asks nothing. Says so when it has moved.
+    /// from; `None` asks nothing. Says so when it has moved. With no
+    /// status ever read (a review started on its own) the state cannot
+    /// tell, so it says yes: the op checks `HEAD` itself before it runs.
     pub(crate) fn head_still(&mut self, head: Option<&CommitId>) -> bool {
         let Some(head) = head else {
             return true;
         };
+        if self.branch.is_none() {
+            return true;
+        }
         if self.detached_head().as_ref() == Some(head) {
             return true;
         }
@@ -172,6 +177,24 @@ mod tests {
         checked, cid, on_branch, on_commit, op_of, press, press_char, reset_op,
     };
     use kika_git::repo_state::Operation;
+
+    #[test]
+    fn head_still_says_yes_without_a_status_and_checks_one_that_was_read() {
+        // Never read, as in a review started on its own: the op decides.
+        let mut state = on_commit();
+        state.branch = None;
+        assert!(state.head_still(Some(&cid("c0"))));
+        assert_eq!(state.notice, None);
+        // Read: only the same detached `HEAD` passes.
+        let mut state = crate::test_support::detached_on_commit();
+        assert!(state.head_still(Some(&cid("c0"))));
+        assert!(!state.head_still(Some(&cid("c2"))));
+        assert_eq!(state.notice, Some("HEAD moved; try again".into()));
+        let mut state = on_commit();
+        state.branch = Some(on_branch("main"));
+        assert!(!state.head_still(Some(&cid("c0"))));
+        assert!(state.head_still(None));
+    }
 
     #[test]
     fn a_destructive_answer_is_y_or_d_alone_and_only_the_checkout_takes_enter() {

@@ -880,6 +880,7 @@ own, by hand.
 - [ ] REVIEW-77 `b` when `pr/<n>` has commits the pull request lacks, or is checked out in another worktree `[github-read]`: never moved; says why
 - [ ] REVIEW-78 `b` with local changes that block the switch `[github-read]`: git refuses; the branch stays where it was
 - [ ] REVIEW-79 `b` when `pr/<n>` is behind `[github-read]`: switched to, then fast-forwarded
+- [ ] REVIEW-80 Detach HEAD and make a commit, then `b` and `y` on the detail `[github-read]`: "Leave commits behind?" names `pr/<n>`; `enter` does nothing; `n`/`esc` stay in review with HEAD where it was; `y` checks out `pr/<n>` and goes to the workspace
 
 ## GitLab
 

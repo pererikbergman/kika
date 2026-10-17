@@ -277,13 +277,16 @@ pub enum GitOp {
     /// `current` when it is checked out already. Built only from a plan
     /// that allows it (see `crate::features::review`), and run only while
     /// the branch is still as planned; a branch that has diverged is never
-    /// moved, nor one that is not checked out.
+    /// moved, nor one that is not checked out. `from` is the detached
+    /// `HEAD` the user agreed to leave, `None` when it was on a branch: it
+    /// runs only while `HEAD` is still there.
     CheckoutPrBranch {
         number: u64,
         branch: BranchName,
         head: CommitId,
         old: Option<CommitId>,
         current: bool,
+        from: Option<CommitId>,
     },
 }
 
@@ -710,11 +713,14 @@ fn run_op_with(
         branch,
         old,
         current,
+        from,
         ..
     } = op
     {
-        // The question may have been open a long time: refuse unless the
-        // branch, and `HEAD` when it is the branch, are still as planned.
+        // The question may have been open a long time: refuse unless
+        // `HEAD`, the branch, and `HEAD` when it is the branch, are still
+        // as planned.
+        review::verify_pr_head(runner, from.as_ref())?;
         review::verify_pr_branch(runner, branch, old.as_ref(), *current)?;
         // Stop at the first failure: a refused switch moves nothing.
         for cmd in pr_checkout_steps(op) {
@@ -1242,6 +1248,7 @@ mod tests {
                     head: id("a"),
                     old: None,
                     current: false,
+                    from: None,
                 },
                 Write,
                 w,
@@ -1432,6 +1439,7 @@ mod tests {
             head: CommitId::parse(OID).unwrap(),
             old: old.map(|o| CommitId::parse(o).unwrap()),
             current,
+            from: None,
         }
     }
 
@@ -1440,6 +1448,15 @@ mod tests {
         "--format=%(refname)%00%(objectname)%00%(HEAD)%00%(worktreepath)",
         "refs/heads/pr/7",
     ];
+
+    const SYMBOLIC_HEAD: [&str; 3] = ["symbolic-ref", "-q", "HEAD"];
+    const HEAD_COMMIT: [&str; 4] = ["rev-parse", "-q", "--verify", "HEAD^{commit}"];
+
+    /// A runner whose first read finds `HEAD` on a branch, as a pull
+    /// request checkout asked from a branch expects.
+    fn on_a_branch() -> FakeRunner {
+        FakeRunner::new().expect(&SYMBOLIC_HEAD, ok(b"refs/heads/main\n"))
+    }
 
     /// What `for-each-ref` says of `pr/7`: its id, `*` when it is `HEAD`
     /// here, and the worktree that has it.
@@ -1479,7 +1496,7 @@ mod tests {
             assert_eq!(argv(&op_command(&op)), steps[0], "{op:?}");
             let runner = steps
                 .iter()
-                .fold(FakeRunner::new().expect(&PR_REF, listed), |runner, step| {
+                .fold(on_a_branch().expect(&PR_REF, listed), |runner, step| {
                     runner.expect(step, ok(b""))
                 });
             assert_eq!(run_op(&runner, &op), Ok(()), "{op:?}");
@@ -1492,12 +1509,10 @@ mod tests {
             assert_eq!(op_command(&op).env_profile(), Some(EnvProfile::Write));
         }
         // A refused switch stops there: the branch is never merged into.
-        let runner = FakeRunner::new()
-            .expect(&PR_REF, pr_ref(old, " ", ""))
-            .expect(
-                &["checkout", "-q", "pr/7", "--"],
-                fail("error: Your local changes would be overwritten by checkout"),
-            );
+        let runner = on_a_branch().expect(&PR_REF, pr_ref(old, " ", "")).expect(
+            &["checkout", "-q", "pr/7", "--"],
+            fail("error: Your local changes would be overwritten by checkout"),
+        );
         let result = run_op(&runner, &pr_checkout(Some(old), false));
         assert!(result.unwrap_err().contains("local changes"));
         runner.assert_done();
@@ -1524,14 +1539,52 @@ mod tests {
             (pr_checkout(Some(old), false), ok(b"")),
         ];
         for (op, listed) in cases {
-            let runner = FakeRunner::new().expect(&PR_REF, listed);
+            let runner = on_a_branch().expect(&PR_REF, listed);
             assert_eq!(run_op(&runner, &op), Err(moved.into()), "{op:?}");
             runner.assert_done();
         }
         // A failed read refuses too.
-        let runner = FakeRunner::new().expect(&PR_REF, fail("fatal: broken"));
+        let runner = on_a_branch().expect(&PR_REF, fail("fatal: broken"));
         assert!(run_op(&runner, &pr_checkout(Some(old), true)).is_err());
         runner.assert_done();
+    }
+
+    #[test]
+    fn a_pull_request_checkout_whose_head_moved_while_asked_runs_nothing() {
+        let asked = "abcdef0123456789abcdef0123456789abcdef01";
+        let from = |from: Option<&str>| GitOp::CheckoutPrBranch {
+            number: 7,
+            branch: "pr/7".into(),
+            head: CommitId::parse(OID).unwrap(),
+            old: None,
+            current: false,
+            from: from.map(|f| CommitId::parse(f).unwrap()),
+        };
+        let moved = Err("HEAD moved since the question; press b again".to_string());
+        // Asked from a detached `HEAD`: it moved to another commit, or
+        // onto a branch.
+        let elsewhere = FakeRunner::new()
+            .expect(&SYMBOLIC_HEAD, fail(""))
+            .expect(&HEAD_COMMIT, ok(format!("{OID}\n").as_bytes()));
+        assert_eq!(run_op(&elsewhere, &from(Some(asked))), moved);
+        elsewhere.assert_done();
+        let branch = on_a_branch();
+        assert_eq!(run_op(&branch, &from(Some(asked))), moved);
+        branch.assert_done();
+        // Asked from a branch: `HEAD` is detached now.
+        let detached = FakeRunner::new()
+            .expect(&SYMBOLIC_HEAD, fail(""))
+            .expect(&HEAD_COMMIT, ok(format!("{asked}\n").as_bytes()));
+        assert_eq!(run_op(&detached, &from(None)), moved);
+        detached.assert_done();
+        // Still there: the branch is read and the checkout runs.
+        let still = FakeRunner::new()
+            .expect(&SYMBOLIC_HEAD, fail(""))
+            .expect(&HEAD_COMMIT, ok(format!("{asked}\n").as_bytes()))
+            .expect(&PR_REF, ok(b""))
+            .expect(&["checkout", "-q", "-b", "pr/7", OID, "--"], ok(b""));
+        assert_eq!(run_op(&still, &from(Some(asked))), Ok(()));
+        still.assert_done();
     }
 
     #[test]
@@ -1542,6 +1595,7 @@ mod tests {
             head: CommitId::parse(OID).unwrap(),
             old: None,
             current: false,
+            from: None,
         };
         for op in [pr_checkout(Some(OID), true), renamed] {
             assert!(refusal(&op).is_some(), "{op:?}");

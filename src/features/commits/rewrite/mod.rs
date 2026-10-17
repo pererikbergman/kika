@@ -60,8 +60,10 @@
 //!   `GitOp::InteractiveRebase`, which the custom patch's rewrite also
 //!   builds through `op_command`;
 //! - `LeftBehindCheck`, the check in flight that `AppState` holds, and
-//!   `check_left_behind`, which starts it (`model/left_behind.rs`, core):
-//!   Branches starts the check for its checkouts too;
+//!   `check_left_behind`, which starts it, and `run_head_move`, which runs
+//!   the op once nothing or `y` stops it (`model/left_behind.rs`, core):
+//!   Branches starts the check for its checkouts too, and review for a
+//!   pull request checkout, whose op only review may run;
 //! - `confirm_refused` (`model/confirm_guard.rs`), the guard every move
 //!   question re-checks, and `head_still` and `detached_head`
 //!   (`confirm_question.rs`, core), which the reset-hard question also

@@ -1,8 +1,9 @@
 //! Starting the check before a detached `HEAD` moves: Commits (checkout
-//! and reset) and Branches (checkout, remote checkout, create) both ask
-//! for the commits nothing else reaches before `HEAD` leaves them, so the
-//! check's start and its in-flight state live in core. The answer is
-//! handled by `commits/rewrite` (`left_behind_checked`).
+//! and reset), Branches (checkout, remote checkout, create) and review
+//! (pull request checkout) all ask for the commits nothing else reaches
+//! before `HEAD` leaves them, so the check's start, its in-flight state
+//! and where its op goes on live in core. The answer is handled by
+//! `commits/rewrite` (`left_behind_checked`).
 
 use super::AppState;
 use crate::effect::Effect;
@@ -49,5 +50,15 @@ impl AppState {
             head,
             target,
         }]
+    }
+
+    /// Run `op` once the check, or the user's `y`, lets it leave `HEAD`.
+    /// A pull request checkout goes through review, which leaves it for
+    /// the workspace first; any other op starts here.
+    pub(crate) fn run_head_move(&mut self, op: GitOp) -> Vec<Effect> {
+        match op {
+            GitOp::CheckoutPrBranch { .. } => self.run_pr_checkout(op),
+            op => self.start_op(Ok(Some(op))),
+        }
     }
 }
