@@ -39,6 +39,7 @@ use crate::filtered_list::FilteredList;
 use crate::handoff::HandOff;
 use crate::hunk_view::{HunkView, NO_CHANGES};
 use crate::intent::{AppIntent, Scroll};
+use crate::key_hold::KeyHold;
 use crate::keymap::{self, KeyScope, Keymap, Reason, Resolution};
 use crate::layout::{self, Panel, ScreenMode, SidePanel};
 use crate::list_filter::{self, InputTarget, ListInput};
@@ -327,6 +328,9 @@ pub struct AppState {
     /// The workspace has had its first load; a session started in review
     /// mode starts it on the way out.
     pub workspace_started: bool,
+    /// Keys pressed in Files or the Diff pane while a user status reload
+    /// is in flight, replayed once it lands so they act on what it shows.
+    pub(crate) key_hold: KeyHold,
 }
 
 impl AppState {
@@ -397,6 +401,7 @@ impl AppState {
             ignore_draft: None,
             now: 0,
             workspace_started: false,
+            key_hold: KeyHold::default(),
         }
     }
 
@@ -427,6 +432,11 @@ impl AppState {
     pub fn update(&mut self, intent: AppIntent) -> Vec<Effect> {
         match intent {
             AppIntent::Key(key) => {
+                // The selection may be about to change under the key.
+                if self.holds_keys() {
+                    self.hold_key(key);
+                    return vec![];
+                }
                 self.notice = None;
                 let focus = self.key_focus();
                 match keymap::resolve(keymap::registry(), &self.keymap, focus, self, key) {
@@ -1443,6 +1453,8 @@ impl AppState {
         // A pull request in the making names the old repository's branches.
         self.pr_draft = None;
         self.pr_create = None;
+        // Held keys were meant for the old repository's list.
+        self.key_hold = KeyHold::default();
     }
 
     pub(crate) fn refresh_status(&mut self) -> Vec<Effect> {
@@ -1452,6 +1464,7 @@ impl AppState {
         let seq = self.next_seq;
         self.next_seq += 1;
         self.files.begin(seq);
+        self.key_hold.wait_for(seq);
         vec![Effect::LoadStatus {
             tag: self.user_tag(seq),
         }]
@@ -1504,6 +1517,7 @@ impl AppState {
                     self.commits.todo_seq = None;
                     self.commits.set_todo(None);
                 }
+                effects.extend(self.release_keys());
                 effects
             }
             Err(message) => {
@@ -1520,6 +1534,8 @@ impl AppState {
                     &message,
                     "Close this, fix the cause, then press r to retry.",
                 ));
+                // Keys meant for the list would land on the error instead.
+                self.drop_held_keys();
                 // A cursor the filter hid (go to file can land there) moved
                 // to the first file shown; the diff follows it.
                 if self.files.selected != before {
@@ -1633,7 +1649,12 @@ impl AppState {
         self.files.begin(tag.seq);
         self.status_selection = Selection::KeepPath;
         self.watch.status_pending = true;
-        vec![Effect::LoadStatus { tag }]
+        let mut effects = vec![Effect::LoadStatus { tag }];
+        // The load keys waited on will not land now; none may be stranded.
+        if self.key_hold.has_keys() {
+            effects.extend(self.release_keys());
+        }
+        effects
     }
 
     pub(crate) fn background_tag(&mut self) -> Tag {
@@ -2244,13 +2265,17 @@ mod tests {
         let mut state = AppState::new(Context::Workspace);
         // The status, the branch list, the remotes, the tags, the commits,
         // their markers and the branch tips, then the stashes.
-        assert_eq!(press(&mut state, KeyCode::Char('r')).len(), 8);
+        let effects = press(&mut state, KeyCode::Char('r'));
+        assert_eq!(effects.len(), 8);
         assert_eq!(
             state.busy_count(),
             4,
             "the status, the branch list, the remotes and the tags"
         );
+        // Keys wait for the status, then act.
         press(&mut state, KeyCode::Char('q'));
+        assert!(!state.should_quit);
+        land_status(&mut state, &effects, vec![]);
         assert!(state.should_quit);
     }
 

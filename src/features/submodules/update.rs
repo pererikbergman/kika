@@ -513,6 +513,7 @@ mod tests {
             set_repo(&effects[0]),
             [RepoPath::from("outer"), RepoPath::from("inner")]
         );
+        land_status(&mut state, &effects, vec![]);
         let effects = press(&mut state, KeyCode::Backspace);
         assert_eq!(set_repo(&effects[0]), [RepoPath::from("outer")]);
     }

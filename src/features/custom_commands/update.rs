@@ -523,7 +523,12 @@ mod tests {
             }
             other => panic!("expected the output popup, got {other:?}"),
         }
-        // And another command may start.
+        // And another command may start once the status lands.
+        land_status(
+            &mut state,
+            &effects,
+            vec![changed("a b;$(rm -rf x).rs", '.', 'M')],
+        );
         state.popups.clear();
         assert_eq!(ctrl_t(&mut state).len(), 1);
     }

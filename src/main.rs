@@ -21,6 +21,7 @@ mod filtered_list;
 mod handoff;
 mod hunk_view;
 mod intent;
+mod key_hold;
 mod keymap;
 mod layout;
 mod list_filter;

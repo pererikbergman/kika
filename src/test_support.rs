@@ -153,6 +153,26 @@ pub(crate) fn refresh_tag(state: &mut AppState) -> Tag {
     }
 }
 
+/// Land the status load in `effects` with `files`, as git answering it
+/// would. Keys pressed while it was in flight replay now.
+pub(crate) fn land_status(
+    state: &mut AppState,
+    effects: &[Effect],
+    files: Vec<FileEntry>,
+) -> Vec<Effect> {
+    let tag = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::LoadStatus { tag } => Some(*tag),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected a status load in {effects:?}"));
+    state.update(AppIntent::StatusLoaded {
+        tag,
+        result: Ok(repo(files)),
+    })
+}
+
 pub(crate) fn changed(path: &str, index: char, worktree: char) -> FileEntry {
     FileEntry {
         path: path.into(),
@@ -591,6 +611,7 @@ pub(crate) fn with_log(n: usize) -> AppState {
         panic!("expected one page load in {effects:?}");
     };
     answer(&mut state, tag, 0, hex_page(n, true));
+    land_status(&mut state, &effects, vec![]);
     state.focus = Focus::Commits;
     state.expanded = SidePanel::Commits;
     state
