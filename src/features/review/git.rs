@@ -3,8 +3,11 @@
 //! changed files between the merge base and the head, and the commits in
 //! between, each of which can be reviewed on its own, and a file's lines at
 //! the head for a code suggestion. Ids reach argv only as [`CommitId`]s,
-//! hex digits, so nothing in it reads as an option; no
-//! ref name from the server ever does. The one ref written is the local
+//! hex digits, so nothing in it reads as an option; no ref name from the
+//! server ever does. The one ref name fetched, a merge request's
+//! `refs/merge-requests/<n>/head` when the forge will not serve the head
+//! by id, is built from the number and checked again here, and no local
+//! ref takes it. The one ref written is the local
 //! branch `pr/<number>` a checkout makes or moves (see [`plan_checkout`]
 //! and [`pr_checkout_commands`]), named from the number alone.
 
@@ -88,6 +91,17 @@ pub fn merge_base_command(base: &CommitId, head: &CommitId) -> GitCommand {
 /// English and no optional locks, but not literal pathspecs: a fetch may gc
 /// and run the `pre-auto-gc` hook, which keeps the user's.
 pub fn fetch_commits_command(remote: &RemoteName, oids: &[CommitId]) -> GitCommand {
+    let ids: Vec<&str> = oids.iter().map(CommitId::as_str).collect();
+    fetch_command(remote, &ids)
+}
+
+/// [`fetch_commits_command`] of the forge's head ref `head` instead of
+/// ids: the same line, and with no destination no local ref moves.
+pub fn fetch_head_ref_command(remote: &RemoteName, head: &str) -> GitCommand {
+    fetch_command(remote, &[head])
+}
+
+fn fetch_command(remote: &RemoteName, what: &[&str]) -> GitCommand {
     let cmd = GitCommand::new("-c")
         .arg("fetch.writeFetchHEAD=false")
         .arg("fetch")
@@ -97,10 +111,18 @@ pub fn fetch_commits_command(remote: &RemoteName, oids: &[CommitId]) -> GitComma
         // Options end here, so even a remote named like one is only a name.
         .arg("--")
         .arg(remote.as_os_string());
-    oids.iter()
-        .fold(cmd, |cmd, oid| cmd.arg(oid.as_str()))
+    what.iter()
+        .fold(cmd, |cmd, item| cmd.arg(item))
         .locale_env()
         .env("GIT_OPTIONAL_LOCKS", "0")
+}
+
+/// Whether `head` is a merge request's head ref as the forge names it,
+/// `refs/merge-requests/<digits>/head`, and nothing else.
+fn head_ref_ok(head: &str) -> bool {
+    head.strip_prefix("refs/merge-requests/")
+        .and_then(|rest| rest.strip_suffix("/head"))
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Which of `oids` are not commits here, in order. A failure to run git at
@@ -122,23 +144,34 @@ pub fn missing_commits(
 }
 
 /// Fetch `oids` from `remote`, asking through `askpass` like a fetch the
-/// user started. A remote named like an option is refused, as for a tag
-/// push. Errors are safe to draw and hold no credentials.
+/// user started. When that fails and the forge has a `fallback` head ref,
+/// that ref is fetched instead; whether the commits came is for the
+/// caller to check again. A fallback that is not a merge request's head
+/// ref is ignored. A remote named like an option is refused, as for a tag
+/// push. Errors are safe to draw and hold no credentials; when both
+/// fetches fail, the first one's is kept.
 pub fn fetch_commits(
     runner: &dyn GitRunner,
     remote: &RemoteName,
     oids: &[CommitId],
+    fallback: Option<&str>,
     askpass: Option<&AskpassEnv>,
 ) -> Result<(), String> {
     if remote.0.is_empty() || remote.0.starts_with(b"-") || oids.is_empty() {
         return Err("Fetch from a remote named like an option with git directly".into());
     }
     let askpass = askpass_for(runner, askpass, &|key| std::env::var_os(key).is_some());
-    let cmd = with_prompts(fetch_commits_command(remote, oids), askpass.as_ref());
-    runner
-        .run_checked(&cmd)
-        .map(drop)
-        .map_err(|e| e.to_string())
+    let fetch = |cmd: GitCommand| {
+        runner
+            .run_checked(&with_prompts(cmd, askpass.as_ref()))
+            .map(drop)
+            .map_err(|e| e.to_string())
+    };
+    let first = fetch(fetch_commits_command(remote, oids));
+    match (first, fallback.filter(|head| head_ref_ok(head))) {
+        (Err(error), Some(head)) => fetch(fetch_head_ref_command(remote, head)).map_err(|_| error),
+        (result, _) => result,
+    }
 }
 
 /// The merge base of `base` and `head`.
@@ -660,6 +693,7 @@ mod tests {
                 &fake,
                 &RemoteName::from("origin"),
                 &[id("a1")],
+                None,
                 Some(&bridge)
             ),
             Ok(())
@@ -688,7 +722,7 @@ mod tests {
             fail("fatal: https://user:tok@github.com/a/b \x1b[2J refused\n"),
         );
         let message =
-            fetch_commits(&fake, &RemoteName::from("origin"), &[id("a1")], None).unwrap_err();
+            fetch_commits(&fake, &RemoteName::from("origin"), &[id("a1")], None, None).unwrap_err();
         assert!(!message.contains("tok"), "{message}");
         assert!(!message.contains('\x1b'), "{message}");
 
@@ -698,11 +732,109 @@ mod tests {
                 &fake,
                 &RemoteName::from("--upload-pack=x"),
                 &[id("a1")],
+                Some("refs/merge-requests/1/head"),
                 None
             )
             .is_err()
         );
-        assert!(fetch_commits(&fake, &RemoteName::from("origin"), &[], None).is_err());
+        assert!(fetch_commits(&fake, &RemoteName::from("origin"), &[], None, None).is_err());
+        fake.assert_done();
+    }
+
+    /// The fixed fetch line of `what` from `origin`.
+    fn fetch_argv(what: &str) -> Vec<&str> {
+        vec![
+            "-c",
+            "fetch.writeFetchHEAD=false",
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--",
+            "origin",
+            what,
+        ]
+    }
+
+    const MR_HEAD: &str = "refs/merge-requests/12/head";
+
+    #[test]
+    fn a_failed_fetch_by_id_falls_back_on_the_merge_requests_head_ref() {
+        let fake = FakeRunner::new()
+            .expect(&fetch_argv("a1"), fail("fatal: not our ref a1\n"))
+            .expect(&fetch_argv(MR_HEAD), ok(b""));
+        let origin = RemoteName::from("origin");
+        assert_eq!(
+            fetch_commits(&fake, &origin, &[id("a1")], Some(MR_HEAD), None),
+            Ok(())
+        );
+        fake.assert_done();
+        // The same environment as the fetch by id, prompts and all.
+        let envs = fake.process_envs();
+        assert_eq!(envs.len(), 2);
+        assert_eq!(envs[0], envs[1]);
+        assert_eq!(
+            args(&fetch_head_ref_command(&origin, MR_HEAD)),
+            fetch_argv(MR_HEAD)
+        );
+    }
+
+    #[test]
+    fn when_both_fetches_fail_the_first_error_is_kept() {
+        let fake = FakeRunner::new()
+            .expect(&fetch_argv("a1"), fail("fatal: first\n"))
+            .expect(&fetch_argv(MR_HEAD), fail("fatal: second\n"));
+        let message = fetch_commits(
+            &fake,
+            &RemoteName::from("origin"),
+            &[id("a1")],
+            Some(MR_HEAD),
+            None,
+        )
+        .unwrap_err();
+        assert!(message.contains("first"), "{message}");
+        assert!(!message.contains("second"), "{message}");
+        fake.assert_done();
+    }
+
+    #[test]
+    fn with_no_fallback_or_a_malformed_one_there_is_no_second_fetch() {
+        for fallback in [
+            None,
+            Some("refs/heads/main"),
+            Some("refs/merge-requests//head"),
+            Some("refs/merge-requests/1x/head"),
+            Some("refs/merge-requests/12/head:refs/heads/main"),
+            Some("refs/merge-requests/12/merge"),
+            Some("--upload-pack=x"),
+            Some("+refs/merge-requests/12/head"),
+        ] {
+            let fake = FakeRunner::new().expect(&fetch_argv("a1"), fail("fatal: no\n"));
+            assert!(
+                fetch_commits(
+                    &fake,
+                    &RemoteName::from("origin"),
+                    &[id("a1")],
+                    fallback,
+                    None
+                )
+                .is_err(),
+                "{fallback:?}"
+            );
+            fake.assert_done();
+        }
+        // A fetch by id that works needs no fallback.
+        let fake = FakeRunner::new().expect(&fetch_argv("a1"), ok(b""));
+        assert_eq!(
+            fetch_commits(
+                &fake,
+                &RemoteName::from("origin"),
+                &[id("a1")],
+                Some(MR_HEAD),
+                None
+            ),
+            Ok(())
+        );
         fake.assert_done();
     }
 
@@ -1091,6 +1223,7 @@ mod tests {
             &runner,
             &RemoteName::from("origin"),
             std::slice::from_ref(&head),
+            None,
             None,
         )
         .unwrap();

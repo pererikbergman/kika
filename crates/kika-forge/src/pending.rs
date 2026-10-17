@@ -100,6 +100,16 @@ pub struct RowPos {
     pub both: bool,
 }
 
+/// GitLab's `line_code` for the row at `pos` in `path`: the hex SHA-1 of
+/// the path, then both counters. A diff note's range and a merge request
+/// diff page's anchor both name a line by it.
+pub(crate) fn line_code(path: &str, pos: RowPos) -> String {
+    use sha1::{Digest, Sha1};
+    let hash = Sha1::digest(path.as_bytes());
+    let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+    format!("{hex}_{}_{}", pos.old, pos.new)
+}
+
 impl RowPos {
     /// Whether this is where `line` is: the counter of `line`'s side is
     /// its number, and only a new-side line may be a context row.

@@ -1,7 +1,8 @@
-//! Merging a pull request on GitHub. Which ways are offered, and why a
-//! pull request cannot be merged, are read from its detail here, in fixed
-//! words; the merge itself is one REST `PUT` whose body names the head
-//! commit the user saw, so GitHub refuses rather than merge another one.
+//! Merging a pull or merge request. Which ways are offered, and why one
+//! cannot be merged, are read from its detail here, for either forge, in
+//! fixed words that name only the forge. GitHub's merge is here too: one
+//! REST `PUT` whose body names the head commit the user saw, so GitHub
+//! refuses rather than merge another one (GitLab's is in `gitlab_merge`).
 
 use std::io;
 
@@ -9,6 +10,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::cli::CliStatus;
+use super::forge::Words;
 use super::github::{Answer, Gh, GhCall, GhOutput, classify, refusal, split_include};
 use super::remote::segment_ok;
 pub use super::review::MergeMethod;
@@ -17,8 +19,8 @@ use super::{CreateError, ForgeRepo, ForgeStatus, PrState};
 use kika_git::commit_files::CommitId;
 use kika_git::recording::CommandOutcome;
 
-/// Why a pull request cannot be merged from here. A fixed set: nothing
-/// GitHub says is ever kept in one.
+/// Why a request cannot be merged from here. A fixed set: nothing the
+/// forge says is ever kept in one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MergeBlock {
     Merged,
@@ -30,26 +32,29 @@ pub enum MergeBlock {
     Blocked,
     /// The base moved on and the branch must be updated first.
     Behind,
-    /// GitHub has not worked it out yet.
+    /// The forge has not worked it out yet.
     Unknown,
     /// The repository allows no merge method.
     NoMethod,
-    /// GitHub sent no head commit to guard the merge with.
+    /// The forge sent no head commit to guard the merge with.
     NoHeadId,
 }
 
 impl MergeBlock {
-    pub fn message(self) -> &'static str {
+    /// What the user is told, naming the forge in `words` where it is the
+    /// one that has to answer.
+    pub fn message(self, words: &Words) -> String {
+        let name = words.name;
         match self {
-            MergeBlock::Merged => "already merged",
-            MergeBlock::Closed => "closed",
-            MergeBlock::Draft => "it is a draft",
-            MergeBlock::Conflicts => "it conflicts with the base",
-            MergeBlock::Blocked => "a required review or check is missing",
-            MergeBlock::Behind => "the base moved on; the branch must be updated first",
-            MergeBlock::Unknown => "GitHub is still checking; refresh with r",
-            MergeBlock::NoMethod => "the repository allows no merge method",
-            MergeBlock::NoHeadId => "GitHub sent no head commit id",
+            MergeBlock::Merged => "already merged".into(),
+            MergeBlock::Closed => "closed".into(),
+            MergeBlock::Draft => "it is a draft".into(),
+            MergeBlock::Conflicts => "it conflicts with the base".into(),
+            MergeBlock::Blocked => "a required review or check is missing".into(),
+            MergeBlock::Behind => "the base moved on; the branch must be updated first".into(),
+            MergeBlock::Unknown => format!("{name} is still checking; refresh with r"),
+            MergeBlock::NoMethod => "the repository allows no merge method".into(),
+            MergeBlock::NoHeadId => format!("{name} sent no head commit id"),
         }
     }
 }
@@ -301,7 +306,21 @@ mod tests {
             with(|pr| pr.mergeable = Mergeability::Unknown),
             Err(MergeBlock::Unknown)
         );
-        assert!(MergeBlock::Unknown.message().contains("refresh with r"));
+        let github = crate::forge::words_or_default(None);
+        let gitlab = crate::forge::words(crate::url::ForgeKind::GitLab);
+        assert_eq!(
+            MergeBlock::Unknown.message(github),
+            "GitHub is still checking; refresh with r"
+        );
+        assert_eq!(
+            MergeBlock::Unknown.message(gitlab),
+            "GitLab is still checking; refresh with r"
+        );
+        assert_eq!(
+            MergeBlock::NoHeadId.message(gitlab),
+            "GitLab sent no head commit id"
+        );
+        assert_eq!(MergeBlock::Closed.message(gitlab), "closed");
     }
 
     #[test]

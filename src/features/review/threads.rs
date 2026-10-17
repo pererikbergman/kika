@@ -48,6 +48,9 @@ pub(crate) struct ThreadScope<'a> {
     pub discussion: &'a PrDiscussion,
     pub view: AnchorView,
     pub head: &'a CommitId,
+    /// GitHub's words by default, from [`ThreadScope::of`], since placing a
+    /// thread needs none. A caller that draws text must set them with
+    /// `.in_words(state.review_words())`.
     pub words: &'static Words,
 }
 

@@ -5,6 +5,7 @@
 //! anything a parser upstream let slip.
 
 use super::anchor::{GhLine, GhSide};
+use super::pending::{RowPos, line_code};
 use super::remote::{MAX_PARTS, matches, parse_remote};
 use super::{ForgeHost, ForgeRepo};
 use kika_git::branches::BranchName;
@@ -85,19 +86,32 @@ pub fn pull_url(repo: &ForgeRepo, number: u64) -> Option<String> {
     Some(format!("{}/pull/{number}", https_base(repo)?))
 }
 
-/// Line `line` of `path` on pull request `number`'s page: its files view,
-/// or with `commit`, that commit's view. GitHub names a file's block by
-/// the SHA-256 of its name, and a line by side (`L` old, `R` new) and
-/// number. `None` when a part is not plain or the line is 0.
+/// Line `line` of `path`, the row whose two counters are `pos`, on
+/// request `number`'s page on a `kind` forge: its files view, or with
+/// `commit`, that commit's view. GitHub names a file's block by the
+/// SHA-256 of its name, and a line by side (`L` old, `R` new) and number.
+/// GitLab names the line by its `line_code` alone, on the merge request's
+/// diff page, and allows a nested owner. GitHub's shape while no kind is
+/// known yet. `None` when a part is not plain or the line is 0.
 pub fn pr_line_url(
+    kind: Option<ForgeKind>,
     repo: &ForgeRepo,
     number: u64,
     commit: Option<&CommitId>,
     path: &str,
     line: GhLine,
+    pos: RowPos,
 ) -> Option<String> {
     if line.line == 0 {
         return None;
+    }
+    if kind == Some(ForgeKind::GitLab) {
+        let page = format!("{}/-/merge_requests/{number}/diffs", https_base(repo)?);
+        let query = match commit {
+            None => String::new(),
+            Some(id) => format!("?commit_id={}", commit_hex(id.as_str())?),
+        };
+        return Some(format!("{page}{query}#{}", line_code(path, pos)));
     }
     let pull = pull_url(repo, number)?;
     let page = match commit {
@@ -222,6 +236,12 @@ mod tests {
     use kika_git::remotes::RemoteName;
 
     const OID: &str = "0123456789abcdef0123456789abcdef01234567";
+    /// A row's counters, which GitHub's URLs do not use.
+    const POS: RowPos = RowPos {
+        old: 3,
+        new: 12,
+        both: false,
+    };
 
     fn hosts(names: &[&str]) -> Vec<ForgeHost> {
         names.iter().map(|h| ForgeHost::parse(h).unwrap()).collect()
@@ -318,21 +338,89 @@ mod tests {
         };
         let hash = "42cb6807ad74b3e201c5a7ca98b911c5fa08380e942be6e4ac5807f8377f87fc";
         assert_eq!(
-            pr_line_url(&r, 7, None, "src/main.rs", new).as_deref(),
+            pr_line_url(None, &r, 7, None, "src/main.rs", new, POS).as_deref(),
             Some(format!("https://github.com/acme/widgets/pull/7/files#diff-{hash}R12").as_str())
         );
         assert_eq!(
-            pr_line_url(&r, 7, None, "src/main.rs", old).as_deref(),
+            pr_line_url(
+                Some(ForgeKind::GitHub),
+                &r,
+                7,
+                None,
+                "src/main.rs",
+                old,
+                POS
+            )
+            .as_deref(),
             Some(format!("https://github.com/acme/widgets/pull/7/files#diff-{hash}L3").as_str())
         );
         let id = CommitId::parse(OID).unwrap();
         assert_eq!(
-            pr_line_url(&r, 7, Some(&id), "src/main.rs", new).as_deref(),
+            pr_line_url(None, &r, 7, Some(&id), "src/main.rs", new, POS).as_deref(),
             Some(
                 format!("https://github.com/acme/widgets/pull/7/commits/{OID}#diff-{hash}R12")
                     .as_str()
             )
         );
+    }
+
+    #[test]
+    fn a_gitlab_line_url_points_at_the_merge_requests_diffs_by_line_code() {
+        let lab = Some(ForgeKind::GitLab);
+        let r = repo("gitlab.example.com", "acme", "widgets");
+        // `sha1("src/cache.rs")` in hex.
+        let sha = "43da4c419a4c25fe29f872dea1052a4686b978e4";
+        let page = "https://gitlab.example.com/acme/widgets/-/merge_requests/7/diffs";
+        let at = |side, line, old, new, both| {
+            pr_line_url(
+                lab,
+                &r,
+                7,
+                None,
+                "src/cache.rs",
+                GhLine { side, line },
+                RowPos { old, new, both },
+            )
+        };
+        // An added row, a removed row and a context row.
+        assert_eq!(
+            at(GhSide::Right, 11, 11, 11, false),
+            Some(format!("{page}#{sha}_11_11"))
+        );
+        assert_eq!(
+            at(GhSide::Left, 11, 11, 11, false),
+            Some(format!("{page}#{sha}_11_11"))
+        );
+        assert_eq!(
+            at(GhSide::Right, 12, 12, 12, true),
+            Some(format!("{page}#{sha}_12_12"))
+        );
+        assert_eq!(at(GhSide::Right, 0, 0, 0, false), None);
+        // A commit's view.
+        let id = CommitId::parse(OID).unwrap();
+        let line = GhLine {
+            side: GhSide::Right,
+            line: 5,
+        };
+        let pos = RowPos {
+            old: 4,
+            new: 5,
+            both: false,
+        };
+        assert_eq!(
+            pr_line_url(lab, &r, 7, Some(&id), "src/cache.rs", line, pos),
+            Some(format!("{page}?commit_id={OID}#{sha}_4_5"))
+        );
+        // A nested owner is a GitLab path.
+        let nested = repo("gitlab.example.com", "acme/sub", "widgets");
+        assert_eq!(
+            pr_line_url(lab, &nested, 7, None, "src/cache.rs", line, pos),
+            Some(format!(
+                "https://gitlab.example.com/acme/sub/widgets/-/merge_requests/7/diffs#{sha}_4_5"
+            ))
+        );
+        let bad = repo("gitlab.example.com", "..", "widgets");
+        assert_eq!(pr_line_url(lab, &bad, 7, None, "a", line, pos), None);
     }
 
     #[test]
@@ -346,11 +434,15 @@ mod tests {
             repo("github.com", "o/x", "r"),
             repo("github.com", "..", "r"),
         ] {
-            assert_eq!(pr_line_url(&bad, 1, None, "a", line), None, "{bad:?}");
+            assert_eq!(
+                pr_line_url(None, &bad, 1, None, "a", line, POS),
+                None,
+                "{bad:?}"
+            );
         }
         let r = repo("github.com", "o", "r");
         let zero = GhLine { line: 0, ..line };
-        assert_eq!(pr_line_url(&r, 1, None, "a", zero), None);
+        assert_eq!(pr_line_url(None, &r, 1, None, "a", zero, POS), None);
         // `CommitId` cannot hold one, but the id is checked again here.
         for bad in ["", "g123", "12 34", "ab/cd"] {
             assert_eq!(commit_hex(bad), None, "{bad:?}");
@@ -480,7 +572,7 @@ mod tests {
             side: GhSide::Right,
             line: 1,
         };
-        assert_eq!(pr_line_url(&nested, 7, None, "a", line), None);
+        assert_eq!(pr_line_url(None, &nested, 7, None, "a", line, POS), None);
         assert_eq!(
             branch_page_url(ForgeKind::GitHub, &nested, &branch, Some(7)),
             Err(NoBranchPage::Unbuildable)
