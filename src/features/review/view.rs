@@ -1388,6 +1388,43 @@ mod tests {
         ));
     }
 
+    /// The detail screen at 80x30: tall enough for its checks and threads.
+    fn draw_detail_buffer(state: &AppState) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::view::render(state, frame))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn under_no_color_the_detail_draws_no_colour_but_keeps_its_words() {
+        use crate::features::review::threads::tests::fixture_discussion;
+        let mut state = reviewing(ReviewScreen::Detail(42));
+        state.review.detail = Some(fixture_detail());
+        state.review.discussion = Some(fixture_discussion());
+        state.palette = Palette::NO_COLOR;
+        let buffer = draw_detail_buffer(&state);
+        let rows = buffer_rows(&buffer);
+        crate::test_support::assert_no_colour(&buffer);
+        for text in [
+            "✗ build  failed",
+            "✓ ci/lint  passed",
+            "● test  pending",
+            "mergeable",
+            "Threads: ",
+        ] {
+            assert!(contains(&rows, text), "{text:?} missing in {rows:#?}");
+        }
+
+        let mut detail = fixture_detail();
+        detail.state = PrState::Merged;
+        state.review.detail = Some(detail);
+        crate::test_support::assert_no_colour(&draw_detail_buffer(&state));
+        let merged = style_at(&state, "Cannot merge: already merged");
+        assert!(merged.add_modifier.contains(Modifier::DIM), "{merged:?}");
+    }
+
     #[test]
     fn the_files_screen_draws_at_80_by_24_and_on_tiny_terminals() {
         for stage in [
