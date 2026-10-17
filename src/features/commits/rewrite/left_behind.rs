@@ -6,15 +6,17 @@ use kika_git::commit_files::CommitId;
 use kika_git::runner::{GitCommand, GitRunner};
 
 /// List the commits reachable from `head` but not from `target` or any
-/// branch, tag or remote-tracking branch. A read: no optional locks, and
-/// the C locale. Both ids are hex, so neither can be read as an option,
-/// and no path follows `--`, so literal pathspecs change nothing.
-pub fn left_behind_command(head: &CommitId, target: &CommitId) -> GitCommand {
-    GitCommand::new("rev-list")
-        .arg(head.as_str())
-        .arg("--not")
-        .arg(target.as_str())
-        .arg("--branches")
+/// branch, tag or remote-tracking branch. Without a `target` only the refs
+/// count: a branch `HEAD` lands on is one of them. A read: no optional
+/// locks, and the C locale. Both ids are hex, so neither can be read as an
+/// option, and no path follows `--`, so literal pathspecs change nothing.
+pub fn left_behind_command(head: &CommitId, target: Option<&CommitId>) -> GitCommand {
+    let cmd = GitCommand::new("rev-list").arg(head.as_str()).arg("--not");
+    let cmd = match target {
+        Some(target) => cmd.arg(target.as_str()),
+        None => cmd,
+    };
+    cmd.arg("--branches")
         .arg("--tags")
         .arg("--remotes")
         .arg("--")
@@ -34,7 +36,7 @@ pub fn parse_left_behind(stdout: &[u8]) -> Vec<CommitId> {
 pub fn read_left_behind(
     runner: &dyn GitRunner,
     head: &CommitId,
-    target: &CommitId,
+    target: Option<&CommitId>,
 ) -> Result<Vec<CommitId>, String> {
     let output = runner
         .run_checked(&left_behind_command(head, target))
@@ -79,7 +81,7 @@ mod tests {
 
     #[test]
     fn the_command_is_a_read_in_the_c_locale_without_end_of_options() {
-        let cmd = left_behind_command(&id("abc123"), &id("def456"));
+        let cmd = left_behind_command(&id("abc123"), Some(&id("def456")));
         assert_eq!(
             cmd.args(),
             [
@@ -106,6 +108,41 @@ mod tests {
     }
 
     #[test]
+    fn without_a_target_only_the_refs_are_left_out() {
+        let cmd = left_behind_command(&id("abc123"), None);
+        assert_eq!(
+            cmd.args(),
+            [
+                "rev-list",
+                "abc123",
+                "--not",
+                "--branches",
+                "--tags",
+                "--remotes",
+                "--"
+            ]
+        );
+        assert_eq!(cmd.env_profile(), Some(EnvProfile::Standard));
+    }
+
+    #[test]
+    fn a_detached_orphan_is_left_behind_without_a_target() {
+        // As a checkout of a branch from a detached `HEAD` asks it: the
+        // branch is among the refs, so no target is passed.
+        let (tmp, _, head) = detached_above_main("left-orphan");
+        let dir = tmp.path();
+        let runner = CliRunner::isolated(dir);
+        let left = read_left_behind(&runner, &head, None).unwrap();
+        assert_eq!(left, [head, rev(dir, "HEAD~1")]);
+
+        git(dir, &["branch", "-q", "keep"]);
+        assert_eq!(
+            read_left_behind(&runner, &rev(dir, "HEAD"), None),
+            Ok(vec![])
+        );
+    }
+
+    #[test]
     fn parse_keeps_hex_lines_and_skips_the_rest() {
         assert_eq!(
             parse_left_behind(b"aaaa\nbbbb\r\n\n--x\nzz\ncccc"),
@@ -126,17 +163,17 @@ mod tests {
             "--",
         ];
         let fake = FakeRunner::new().expect(&argv, fail("fatal: bad\x1b]0;t\x07"));
-        let err = read_left_behind(&fake, &id("aa"), &id("bb")).unwrap_err();
+        let err = read_left_behind(&fake, &id("aa"), Some(&id("bb"))).unwrap_err();
         assert!(err.contains("fatal: bad"), "{err}");
         assert!(!err.contains('\x1b'), "{err}");
         fake.assert_done();
 
         let fake = FakeRunner::new().expect(&argv, fail(""));
         assert_eq!(
-            read_left_behind(&fake, &id("aa"), &id("bb")).unwrap_err(),
+            read_left_behind(&fake, &id("aa"), Some(&id("bb"))).unwrap_err(),
             "git rev-list failed"
         );
-        let read = left_behind_command(&id("aa"), &id("bb")).process_env();
+        let read = left_behind_command(&id("aa"), Some(&id("bb"))).process_env();
         assert_eq!(fake.process_envs(), [read]);
     }
 
@@ -145,7 +182,7 @@ mod tests {
         let (tmp, main, head) = detached_above_main("left-behind");
         let dir = tmp.path();
         let runner = CliRunner::isolated(dir);
-        let left = read_left_behind(&runner, &head, &main).unwrap();
+        let left = read_left_behind(&runner, &head, Some(&main)).unwrap();
         assert_eq!(left, [head, rev(dir, "HEAD~1")]);
     }
 
@@ -164,7 +201,7 @@ mod tests {
             git(dir, &keep);
             let runner = CliRunner::isolated(dir);
             assert_eq!(
-                read_left_behind(&runner, &head, &main),
+                read_left_behind(&runner, &head, Some(&main)),
                 Ok(vec![]),
                 "{label}"
             );
@@ -175,6 +212,6 @@ mod tests {
     fn moving_to_a_descendant_leaves_nothing_behind() {
         let (tmp, main, head) = detached_above_main("left-forward");
         let runner = CliRunner::isolated(tmp.path());
-        assert_eq!(read_left_behind(&runner, &main, &head), Ok(vec![]));
+        assert_eq!(read_left_behind(&runner, &main, Some(&head)), Ok(vec![]));
     }
 }

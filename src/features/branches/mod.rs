@@ -23,7 +23,7 @@
 //!   children and core reloads call;
 //! - the handlers in `update.rs`: `background_branches`, `branches_loaded`,
 //!   `branch_log_loaded`, `switch_branches_tab`, `move_branch`,
-//!   `checkout_branch`, `ask_branch_name`, `create_branch_named`,
+//!   `checkout_branch`, `move_head_to_branch`, `ask_branch_name`, `create_branch_named`,
 //!   `ask_branch_at_head`, `create_branch_at_head_named`,
 //!   `rename_branch_to`, `ask_delete_branch`, `confirm_delete_branch`,
 //!   `ask_upstream`, `set_upstream_to`, `unset_upstream` and
@@ -51,6 +51,11 @@
 //!   `bisect_refuses` and `branch_for_action` (core), and
 //!   `crate::bisect::head_move_disabled` (core), so no checkout moves
 //!   `HEAD` mid-bisect;
+//! - `detached_head` and `check_left_behind` (core), through
+//!   `move_head_to_branch` (`update.rs`): from a detached `HEAD`, a
+//!   checkout, a remote checkout and a new branch first look for the
+//!   commits they would leave behind, and the commits feature's handler
+//!   asks before leaving them;
 //! - `branches.remotes.branch_named` and `branches.remotes.remotes()` (own
 //!   child), which the upstream prompt reads.
 //!

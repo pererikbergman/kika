@@ -71,12 +71,12 @@ pub(crate) fn check_left_behind(
     tag: Tag,
     op: GitOp,
     head: CommitId,
-    target: CommitId,
+    target: Option<CommitId>,
 ) {
     let from = head.clone();
     background::run(
         tx,
-        move || read_left_behind(runner.as_ref(), &from, &target),
+        move || read_left_behind(runner.as_ref(), &from, target.as_ref()),
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("git rev-list"),
         move |result| {
@@ -381,7 +381,7 @@ mod tests {
             tag,
             op: op.clone(),
             head: head.clone(),
-            target,
+            target: Some(target),
         });
 
         assert_eq!(
@@ -416,7 +416,7 @@ mod tests {
             tag,
             op: GitOp::CheckoutCommit(id.clone()),
             head: id.clone(),
-            target: id,
+            target: Some(id),
         });
         match rx.recv().await {
             Some(AppIntent::Commits(CommitsIntent::Rewrite(

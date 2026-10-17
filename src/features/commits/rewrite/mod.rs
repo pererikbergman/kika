@@ -6,7 +6,8 @@
 //! break and pick. It also owns the check before a detached `HEAD`
 //! moves: checkout and reset first list the commits nothing else reaches
 //! (`left_behind.rs`), then ask before leaving them to the reflog
-//! (`leave_commits.rs`). With them go all of chunk 12, the
+//! (`leave_commits.rs`); Branches' checkouts start the same check from
+//! core and get the same question. With them go all of chunk 12, the
 //! commits-left-behind, autosquash and drop-range questions (chunks 59,
 //! 62 and 64), the guards and plans those keys and handlers share,
 //! `Effect::LoadRebaseTodo`/`WriteRebaseTodo`/`FindFixupBase`/
@@ -17,7 +18,6 @@
 //!   and the free function `update` that `commits::update` passes it to;
 //! - the todo types `RebaseTodo`, `Rewrite` and `TodoFile` (`todo.rs`),
 //!   and `FixupBase`, which `intent.rs` carries;
-//! - `LeftBehindCheck`, the check in flight that `AppState` holds;
 //! - the shared guards and plans here: `rewrite_disabled`, `log_plan`,
 //!   `todo_edit`, `autosquash_plan`, `autosquash_disabled`,
 //!   `create_fixup_disabled`, `find_base_disabled`,
@@ -33,7 +33,8 @@
 //!   (`rewrite_range`, `confirm_drop_range`), `fixup.rs`
 //!   (`create_fixup`, `ask_autosquash`, `autosquash`, `find_fixup_base`,
 //!   `fixup_base_found`) and `leave_commits.rs` (`move_head`,
-//!   `left_behind_checked`, `confirm_leave_commits`), and the questions
+//!   `left_behind_checked`, which answers Branches' checks too, and
+//!   `confirm_leave_commits`), and the questions
 //!   `autosquash_question` (`fixup.rs`) and `drop_range_question`
 //!   (`range.rs`);
 //! - `effects::{load_todo, write_todo, find_base, check_left_behind}`,
@@ -58,6 +59,9 @@
 //!   scopes (`KeyScope::LeaveCommits` among them) and
 //!   `GitOp::InteractiveRebase`, which the custom patch's rewrite also
 //!   builds through `op_command`;
+//! - `LeftBehindCheck`, the check in flight that `AppState` holds, and
+//!   `check_left_behind`, which starts it (`model/left_behind.rs`, core):
+//!   Branches starts the check for its checkouts too;
 //! - `confirm_refused` (`model/confirm_guard.rs`), the guard every move
 //!   question re-checks, and `head_still` and `detached_head`
 //!   (`confirm_question.rs`, core), which the reset-hard question also
@@ -80,7 +84,6 @@ mod update;
 
 pub(crate) use fixup_base::FixupBase;
 pub(crate) use intent::RewriteIntent;
-pub(crate) use leave_commits::LeftBehindCheck;
 pub(crate) use todo::{RebaseTodo, Rewrite, TodoFile};
 pub(crate) use update::update;
 

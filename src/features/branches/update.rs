@@ -197,8 +197,19 @@ impl AppState {
 
     pub(crate) fn checkout_branch(&mut self) -> Vec<Effect> {
         match self.branch_for_action(keys::checkout_branch_disabled) {
-            Some(name) => self.start_op(Ok(Some(GitOp::Checkout(name)))),
+            Some(name) => self.move_head_to_branch(GitOp::Checkout(name)),
             None => vec![],
+        }
+    }
+
+    /// Run `op`, which puts `HEAD` on a branch. From a detached `HEAD`,
+    /// first look for the commits it would leave behind and ask before
+    /// leaving them; the branch tip is one of the refs the check keeps, so
+    /// it passes no target. On a branch, nothing can be left behind.
+    pub(crate) fn move_head_to_branch(&mut self, op: GitOp) -> Vec<Effect> {
+        match self.detached_head() {
+            Some(head) => self.check_left_behind(op, head, None),
+            None => self.start_op(Ok(Some(op))),
         }
     }
 
@@ -230,7 +241,11 @@ impl AppState {
         let Some(name) = self.branch_name_to_run(text) else {
             return vec![];
         };
-        self.start_op(Ok(Some(op(branch, name))))
+        match op(branch, name) {
+            // Creating a branch checks it out, which moves `HEAD`.
+            op @ GitOp::CreateBranch { .. } => self.move_head_to_branch(op),
+            op => self.start_op(Ok(Some(op))),
+        }
     }
 
     /// A branch prompt's answer, trimmed, when an op may run with it now;
@@ -1043,4 +1058,188 @@ mod tests {
         assert_eq!(state.popups, []);
         assert_eq!(state.branches.pending_head, None);
     }
+
+    /// The one popup in `state`: a leave-commits question, as its text.
+    fn leave_question(state: &AppState) -> String {
+        assert_eq!(state.key_focus(), KeyScope::LeaveCommits);
+        match state.popups.as_slice() {
+            [Popup::Question(ask)] => {
+                assert_eq!(ask.title, "Leave commits behind");
+                ask.text.clone()
+            }
+            other => panic!("expected the leave-commits question, got {other:?}"),
+        }
+    }
+
+    /// `detached_on_branch_list` after `space` on `main` and its check
+    /// came back with `result`.
+    fn checkout_checked(
+        result: Result<Vec<kika_git::commit_files::CommitId>, String>,
+    ) -> (AppState, Vec<Effect>) {
+        let mut state = detached_on_branch_list();
+        let (tag, op) = check_to(&press_char(&mut state, ' '), None);
+        let effects = state.update(left_behind_checked(tag, op, result));
+        (state, effects)
+    }
+
+    #[test]
+    fn from_a_detached_head_checking_out_a_branch_checks_for_commits_left_behind() {
+        let mut state = detached_on_branch_list();
+        let busy = state.busy_count();
+        let effects = state.update(AppIntent::Branches(BranchesIntent::Checkout));
+        let (tag, op) = check_to(&effects, None);
+        assert_eq!(op, GitOp::Checkout("main".into()));
+        assert!(tag.user);
+        assert_eq!(state.busy_count(), busy + 1);
+        assert_eq!(state.held_seq(), None);
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn commits_left_behind_ask_and_only_y_checks_out_the_branch() {
+        let (state, effects) = checkout_checked(Ok(ids(2)));
+        assert_eq!(effects, vec![]);
+        assert_eq!(state.held_seq(), None);
+        let text = leave_question(&state);
+        assert!(
+            text.starts_with(
+                "Check out main and leave 2 commits that no branch or tag reaches behind (a0, a1)?"
+            ),
+            "{text}"
+        );
+
+        let mut yes = state.clone();
+        let (tag, op) = op_of(&press_char(&mut yes, 'y'));
+        assert_eq!(op, GitOp::Checkout("main".into()));
+        assert_eq!(yes.held_seq(), Some(tag.seq));
+        assert_eq!(yes.popups, []);
+
+        for code in [KeyCode::Enter, KeyCode::Char('n'), KeyCode::Esc] {
+            let mut no = state.clone();
+            assert_eq!(press(&mut no, code), vec![], "{code:?}");
+            assert_eq!(no.held_seq(), None, "{code:?}");
+            assert_eq!(no.branch, state.branch, "{code:?}: HEAD stays");
+            if code == KeyCode::Enter {
+                // Enter is no answer: the question stays open.
+                assert_eq!(no.popups, state.popups);
+            } else {
+                assert_eq!(no.popups, [], "{code:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn with_nothing_left_behind_the_branch_checkout_runs_at_once() {
+        let (state, effects) = checkout_checked(Ok(vec![]));
+        let (tag, op) = op_of(&effects);
+        assert_eq!(op, GitOp::Checkout("main".into()));
+        assert_eq!(state.held_seq(), Some(tag.seq));
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn a_failed_check_shows_why_and_checks_out_nothing() {
+        let (state, effects) = checkout_checked(Err("fatal: bad".into()));
+        assert_eq!(effects, vec![]);
+        assert_eq!(state.held_seq(), None);
+        let [Popup::Error(error)] = state.popups.as_slice() else {
+            panic!("{:?}", state.popups)
+        };
+        assert_eq!(error.title, "Could not check for commits left behind");
+        assert!(error.message.contains("fatal: bad"));
+    }
+
+    #[test]
+    fn y_checks_out_nothing_once_head_has_moved() {
+        let (state, _) = checkout_checked(Ok(ids(1)));
+        for head in [
+            kika_git::status::Head::Detached("c2".into()),
+            kika_git::status::Head::Branch("topic".into()),
+        ] {
+            let mut moved = state.clone();
+            moved.branch.as_mut().unwrap().head = head.clone();
+            assert_eq!(press_char(&mut moved, 'y'), vec![], "{head:?}");
+            assert_eq!(moved.held_seq(), None, "{head:?}");
+            assert_eq!(moved.popups, [], "{head:?}");
+            assert_eq!(moved.notice, Some("HEAD moved; try again".into()));
+        }
+    }
+
+    #[test]
+    fn a_bisect_started_during_the_check_refuses_the_branch_checkout() {
+        for result in [Ok(ids(2)), Ok(vec![])] {
+            let mut state = detached_on_branch_list();
+            let (tag, op) = check_to(&press_char(&mut state, ' '), None);
+            start_bisecting(&mut state);
+            let effects = state.update(left_behind_checked(tag, op, result.clone()));
+            assert_eq!(effects, vec![], "{result:?}");
+            assert_eq!(state.popups, [], "{result:?}");
+            assert_eq!(state.held_seq(), None, "{result:?}");
+            assert_eq!(
+                state.notice,
+                Some(crate::bisect::RESET_FIRST.into()),
+                "{result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_a_detached_head_creating_a_branch_asks_before_leaving_commits() {
+        let mut state = detached_on_branch_list();
+        press_char(&mut state, 'n');
+        type_text(&mut state, "fresh");
+        let (tag, op) = check_to(&press(&mut state, KeyCode::Enter), None);
+        let create = GitOp::CreateBranch {
+            name: "fresh".into(),
+            from: "main".into(),
+        };
+        assert_eq!(op, create);
+        assert_eq!(state.branches.pending, None);
+
+        state.update(left_behind_checked(tag, op, Ok(ids(1))));
+        let text = leave_question(&state);
+        assert!(
+            text.starts_with(
+                "Check out fresh and leave 1 commit that no branch or tag reaches behind (a0)?"
+            ),
+            "{text}"
+        );
+        for code in [KeyCode::Enter, KeyCode::Char('n'), KeyCode::Esc] {
+            let mut no = state.clone();
+            assert_eq!(press(&mut no, code), vec![], "{code:?}");
+            assert_eq!(no.held_seq(), None, "{code:?}");
+        }
+        let (_, op) = op_of(&press_char(&mut state, 'y'));
+        assert_eq!(op, create);
+
+        // Nothing left behind: the branch is made at once.
+        let mut state = detached_on_branch_list();
+        press_char(&mut state, 'n');
+        type_text(&mut state, "fresh");
+        let (tag, op) = check_to(&press(&mut state, KeyCode::Enter), None);
+        let (_, op) = op_of(&state.update(left_behind_checked(tag, op, Ok(vec![]))));
+        assert_eq!(op, create);
+    }
+
+    #[test]
+    fn on_a_branch_creating_one_runs_with_no_check() {
+        let mut state = with_branches();
+        state.branch = Some(on_branch("main"));
+        press_char(&mut state, 'n');
+        type_text(&mut state, "fresh");
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert!(matches!(op, GitOp::CreateBranch { .. }), "{op:?}");
+    }
+
+    #[test]
+    fn on_a_branch_checking_out_another_runs_with_no_check() {
+        let mut state = with_branches();
+        state.branch = Some(on_branch("main"));
+        state.update(AppIntent::Branches(BranchesIntent::Next));
+        let (_, op) = op_of(&press_char(&mut state, ' '));
+        assert_eq!(op, GitOp::Checkout("topic".into()));
+    }
+
+    // Switching worktrees needs no check: it points Kika at another
+    // worktree and moves no `HEAD`, so nothing is left behind.
 }

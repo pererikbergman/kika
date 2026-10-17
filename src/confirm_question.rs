@@ -430,7 +430,7 @@ mod tests {
                 op: GitOp::CheckoutCommit(cid("c1")),
                 head: cid("c0"),
                 head_short_oid: "c0".into(),
-                short_oid: "c1".into(),
+                target: "c1".into(),
                 left: vec!["a0".into()],
             }
             .into_question(),

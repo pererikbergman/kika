@@ -19,7 +19,6 @@ use crate::features::commits::bisect::BisectIntent;
 use crate::features::commits::compare::PendingDiff;
 use crate::features::commits::copy::CopiedCommits;
 use crate::features::commits::custom_patch::CustomPatch;
-use crate::features::commits::rewrite::LeftBehindCheck;
 use crate::features::commits::{self, CommitsIntent, CommitsPanel, CommitsTab};
 use crate::features::conflicts::{self, ConflictView};
 use crate::features::custom_commands::{self, PendingCommand};
@@ -1761,6 +1760,9 @@ impl AppState {
 }
 
 mod confirm_guard;
+mod left_behind;
+
+pub(crate) use left_behind::LeftBehindCheck;
 
 // The slot's failure texts, kept reachable where they used to live.
 #[cfg(test)]
