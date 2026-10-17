@@ -696,6 +696,18 @@ mod tests {
     }
 
     #[test]
+    fn the_refresh_key_points_a_gitlab_only_setup_at_gitlab_ask() {
+        let mut lab = loaded();
+        lab.forge = ForgeState::new(vec![]);
+        lab.forge_gitlab_hosts = vec![ForgeHost::parse_gitlab("gitlab.com").unwrap()];
+        let text = "List GitLab hosts under [forge] gitlab_ask in the global config";
+        assert_eq!(refresh_disabled(&lab).as_deref(), Some(text));
+        assert_eq!(press_refresh(&mut lab), []);
+        assert_eq!(lab.notice.as_deref(), Some(text));
+        assert!(!text.contains("GitHub"));
+    }
+
+    #[test]
     fn the_refresh_key_is_refused_with_no_hosts_or_no_matched_remote() {
         let mut off = loaded();
         off.forge = ForgeState::new(vec![]);

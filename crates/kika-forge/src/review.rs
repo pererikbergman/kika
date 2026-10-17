@@ -5,6 +5,8 @@
 //! no type here ever holds raw server text. The repository and the number travel as GraphQL
 //! variables on stdin; argv is the fixed `gh api graphql` line.
 
+use std::collections::HashMap;
+
 use serde::Deserialize;
 use serde_json::json;
 
@@ -440,7 +442,7 @@ reviewRequests(first:20){nodes{requestedReviewer{...on User{login} ...on Bot{log
 ...on Mannequin{login} ...on Team{slug}}}} \
 latestReviews(first:20){nodes{state author{login}}} \
 commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){nodes{__typename \
-...on CheckRun{name status conclusion detailsUrl} \
+...on CheckRun{databaseId name status conclusion detailsUrl} \
 ...on StatusContext{context state targetUrl}}}}}}}}}}";
 
 fn detail_body(repo: &ForgeRepo, number: u64) -> Vec<u8> {
@@ -636,6 +638,8 @@ struct CheckNode {
     #[serde(rename = "__typename")]
     typename: Option<String>,
     // CheckRun
+    /// Higher for a newer run of the same check.
+    database_id: Option<u64>,
     name: Option<String>,
     status: Option<String>,
     conclusion: Option<String>,
@@ -729,15 +733,16 @@ fn read_detail(body: &[u8]) -> Result<Option<(PrDetail, PageEnd)>, ForgeStatus> 
         })
         .take(MAX_REVIEWERS)
         .collect();
-    let checks = pr
-        .commits
-        .into_iter()
-        .flat_map(Nodes::items)
-        .filter_map(|c| c.commit?.status_check_rollup?.contexts)
-        .flat_map(Nodes::items)
-        .filter_map(check_of)
-        .take(MAX_CHECKS)
-        .collect();
+    let checks = latest_runs(
+        pr.commits
+            .into_iter()
+            .flat_map(Nodes::items)
+            .filter_map(|c| c.commit?.status_check_rollup?.contexts)
+            .flat_map(Nodes::items),
+    )
+    .into_iter()
+    .take(MAX_CHECKS)
+    .collect();
     let files_total = pr.files.as_ref().and_then(|f| f.total_count).unwrap_or(0);
     let mut viewed = Vec::new();
     let end = add_viewed(&mut viewed, pr.files);
@@ -956,6 +961,40 @@ pub fn node_id_ok(id: &str) -> bool {
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'=' | b'-'))
+}
+
+/// The checks of `nodes`, one row per check run name holding its latest
+/// run: the highest database id, the later one on a tie or with no id.
+/// The rollup lists every re-run of a job; GitHub already sends only the
+/// latest of each commit status, so those pass through as they are.
+fn latest_runs(nodes: impl Iterator<Item = CheckNode>) -> Vec<Check> {
+    let mut rows: Vec<(Check, Option<u64>)> = Vec::new();
+    let mut runs: HashMap<String, usize> = HashMap::new();
+    for node in nodes {
+        let is_run = node.typename.as_deref() == Some("CheckRun");
+        let id = node.database_id;
+        let Some(check) = check_of(node) else {
+            continue;
+        };
+        if !is_run {
+            rows.push((check, id));
+            continue;
+        }
+        match runs.get(&check.name) {
+            // `None` sorts below any id, so a run with no id never wins
+            // over one with an id.
+            Some(&at) => {
+                if id >= rows[at].1 {
+                    rows[at] = (check, id);
+                }
+            }
+            None => {
+                runs.insert(check.name.clone(), rows.len());
+                rows.push((check, id));
+            }
+        }
+    }
+    rows.into_iter().map(|(check, _)| check).collect()
 }
 
 /// A check run or a commit status as one check; anything else is none.
@@ -1399,6 +1438,10 @@ pub(crate) mod tests {
         assert_eq!(body["variables"]["number"], 42);
         let query = body["query"].as_str().unwrap();
         assert!(!query.contains("acme") && !query.contains("42"), "{query}");
+        assert!(
+            query.contains("...on CheckRun{databaseId name status conclusion detailsUrl}"),
+            "{query}"
+        );
 
         assert_eq!(pr.number, 42);
         assert_eq!(pr.title, "Add widget caching");
@@ -1440,6 +1483,122 @@ pub(crate) mod tests {
         );
         assert!(pr.body.starts_with("## Summary\n\n"), "{:?}", pr.body);
         assert!(!pr.body.contains('\r'));
+    }
+
+    /// [`DETAIL`] with the check nodes `nodes` (a JSON list's items) in
+    /// place of its own.
+    fn detail_with_checks(nodes: &str) -> String {
+        let open = "\"contexts\":{\"nodes\":[";
+        let start = DETAIL.find(open).unwrap() + open.len();
+        let end = start + DETAIL[start..].find("]}").unwrap();
+        format!("{}{nodes}{}", &DETAIL[..start], &DETAIL[end..])
+    }
+
+    /// A check run node named `name`, with `id` as its database id when
+    /// there is one, finished with `conclusion`. Its page names the id.
+    fn check_run(name: &str, id: Option<u64>, conclusion: &str) -> String {
+        let page = id.map_or("none".to_string(), |i| i.to_string());
+        let id = id
+            .map(|i| format!("\"databaseId\":{i},"))
+            .unwrap_or_default();
+        format!(
+            "{{\"__typename\":\"CheckRun\",{id}\"name\":\"{name}\",\"status\":\"COMPLETED\",\
+             \"conclusion\":\"{conclusion}\",\"detailsUrl\":\"https://ci.example.com/{name}/{page}\"}}"
+        )
+    }
+
+    fn checks_of(nodes: &[String]) -> Vec<(String, CheckStatus, Option<String>)> {
+        let runner = FakeGh::new().reply(answer(&detail_with_checks(&nodes.join(","))));
+        let pr = detail(&runner, 42).unwrap().unwrap();
+        pr.checks
+            .into_iter()
+            .map(|c| (c.name, c.status, c.details_url))
+            .collect()
+    }
+
+    #[test]
+    fn a_re_run_check_shows_once_with_its_latest_run() {
+        let checks = checks_of(&[
+            check_run("check", Some(10), "FAILURE"),
+            check_run("check", Some(12), "SUCCESS"),
+            check_run("check", Some(11), "SUCCESS"),
+        ]);
+        assert_eq!(
+            checks,
+            [(
+                "check".into(),
+                CheckStatus::Success,
+                Some("https://ci.example.com/check/12".into())
+            )]
+        );
+    }
+
+    #[test]
+    fn a_re_run_check_keeps_the_place_it_first_appears_in() {
+        let checks = checks_of(&[
+            check_run("a", Some(1), "FAILURE"),
+            check_run("b", Some(2), "SUCCESS"),
+            check_run("a", Some(3), "SUCCESS"),
+        ]);
+        assert_eq!(
+            checks,
+            [
+                (
+                    "a".into(),
+                    CheckStatus::Success,
+                    Some("https://ci.example.com/a/3".into())
+                ),
+                (
+                    "b".into(),
+                    CheckStatus::Success,
+                    Some("https://ci.example.com/b/2".into())
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_with_an_id_beats_one_without_and_without_ids_the_later_wins() {
+        let later = checks_of(&[
+            check_run("a", None, "FAILURE"),
+            check_run("a", None, "SUCCESS"),
+        ]);
+        assert_eq!(
+            later.iter().map(|c| c.1).collect::<Vec<_>>(),
+            [CheckStatus::Success]
+        );
+        let with_id = checks_of(&[
+            check_run("a", Some(1), "FAILURE"),
+            check_run("a", None, "SUCCESS"),
+        ]);
+        assert_eq!(
+            with_id.iter().map(|c| c.1).collect::<Vec<_>>(),
+            [CheckStatus::Failure]
+        );
+        let tie = checks_of(&[
+            check_run("a", Some(5), "FAILURE"),
+            check_run("a", Some(5), "SUCCESS"),
+        ]);
+        assert_eq!(
+            tie.iter().map(|c| c.1).collect::<Vec<_>>(),
+            [CheckStatus::Success]
+        );
+    }
+
+    #[test]
+    fn a_status_and_a_check_run_of_the_same_name_both_stay() {
+        let status = "{\"__typename\":\"StatusContext\",\"context\":\"a\",\"state\":\"FAILURE\",\
+                      \"targetUrl\":\"https://ci.example.com/status/a\"}"
+            .to_string();
+        let checks = checks_of(&[status.clone(), check_run("a", Some(1), "SUCCESS"), status]);
+        assert_eq!(
+            checks.iter().map(|c| c.1).collect::<Vec<_>>(),
+            [
+                CheckStatus::Failure,
+                CheckStatus::Success,
+                CheckStatus::Failure
+            ]
+        );
     }
 
     #[test]
