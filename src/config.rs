@@ -255,7 +255,17 @@ struct ForgeTable {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ClipboardTable {
-    command: Option<Vec<String>>,
+    command: Option<ArgvValue>,
+}
+
+/// An argv setting as written. Anything but a list of strings lands in
+/// `Other`, so the error can name the setting instead of being the
+/// parser's type message.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ArgvValue {
+    List(Vec<String>),
+    Other(serde::de::IgnoredAny),
 }
 
 /// The palette views draw with: a built-in theme, then single roles
@@ -493,7 +503,14 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
     let clipboard_command = file
         .clipboard
         .command
-        .map(|argv| check_argv(argv).map_err(|e| format!("clipboard.command: {e}")))
+        .map(|value| match value {
+            ArgvValue::List(argv) => {
+                check_argv(argv).map_err(|e| format!("clipboard.command: {e}"))
+            }
+            ArgvValue::Other(_) => Err("clipboard.command: must be a list of the program and \
+                 its arguments, for example command = [\"pbcopy\"]"
+                .to_string()),
+        })
         .transpose()?;
     let emoji_zwj_terminals = file.display.emoji_zwj_terminals.unwrap_or_default();
     // An empty name would match a terminal that sets no name at all.
@@ -2045,13 +2062,34 @@ output = "none"
             err("[clipboard]\ncommand = [\"x\", \"a\\u001bb\"]\n"),
             "clipboard.command: The command contains a control character"
         );
-        assert!(err("[clipboard]\ncommand = \"pbcopy\"\n").contains("invalid type"));
+        // Any value that is not a list of strings names the setting and
+        // shows the list form, not the parser's type error.
+        for text in [
+            "[clipboard]\ncommand = \"pbcopy\"\n",
+            "[clipboard]\ncommand = 5\n",
+            "[clipboard]\ncommand = [1]\n",
+        ] {
+            assert_eq!(
+                err(text),
+                "clipboard.command: must be a list of the program and its arguments, \
+                 for example command = [\"pbcopy\"]",
+                "{text:?}"
+            );
+        }
         let typo = err("[clipboard]\ncomand = [\"pbcopy\"]\n");
         assert!(typo.contains("unknown field `comand`"), "{typo}");
 
         // A bad command drops the whole file, as any error does.
         let files = Files::new("clipboard-bad");
         files.global("[keys]\n\"files.stage\" = [\"x\"]\n[clipboard]\ncommand = [\"x/copy\"]\n");
+        let loaded = files.load();
+        assert_eq!(loaded.clipboard_command, None);
+        assert_eq!(loaded.keymap, Keymap::default());
+        assert_eq!(loaded.errors.len(), 1);
+        assert!(loaded.errors[0].message.starts_with("clipboard.command: "));
+
+        // A string command drops the whole file too.
+        files.global("[keys]\n\"files.stage\" = [\"x\"]\n[clipboard]\ncommand = \"pbcopy\"\n");
         let loaded = files.load();
         assert_eq!(loaded.clipboard_command, None);
         assert_eq!(loaded.keymap, Keymap::default());
