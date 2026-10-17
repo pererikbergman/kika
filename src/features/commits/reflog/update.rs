@@ -24,6 +24,9 @@ pub(crate) fn update(state: &mut AppState, intent: ReflogIntent) -> Vec<Effect> 
         ReflogIntent::Prev => {
             state.commits.reflog.list.move_by(-1);
         }
+        ReflogIntent::MoveBy(delta) => {
+            state.commits.reflog.list.move_by(delta);
+        }
         ReflogIntent::Loaded { tag, result } => return state.reflog_loaded(tag, result),
         ReflogIntent::Undo => return state.travel(undo::Direction::Undo),
         ReflogIntent::Redo => return state.travel(undo::Direction::Redo),
@@ -195,6 +198,32 @@ mod tests {
                 oid: cid(&"c".repeat(40)),
             },
         }
+    }
+
+    #[test]
+    fn move_by_moves_the_reflog_cursor_clamped_and_loads_nothing() {
+        let mut state = crate::model::AppState::new(crate::model::Context::Workspace);
+        load_reflog_list(&mut state.commits.reflog, Ok(commit_reflog('c')));
+        let by = |delta| AppIntent::Commits(CommitsIntent::Reflog(ReflogIntent::MoveBy(delta)));
+        assert_eq!(
+            state.update(by(9)),
+            vec![],
+            "as `Next`, moving loads nothing"
+        );
+        let list = &state.commits.reflog.list;
+        assert!(list.rows.len() > 1);
+        assert_eq!(list.selected, list.rows.len() - 1, "clamped at the end");
+        state.update(by(-1));
+        assert_eq!(state.commits.reflog.list.selected, list_len(&state) - 2);
+        state.update(by(-9));
+        assert_eq!(
+            state.commits.reflog.list.selected, 0,
+            "clamped at the start"
+        );
+    }
+
+    fn list_len(state: &crate::model::AppState) -> usize {
+        state.commits.reflog.list.rows.len()
     }
 
     #[test]

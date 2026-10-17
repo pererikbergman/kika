@@ -16,7 +16,8 @@
 //!   REFLOG_LOG_FILTER}`;
 //! - the handlers in `update.rs`: `load_reflog`, `reflog_loaded`,
 //!   `travel` and `confirm_travel`;
-//! - `effects::load`, `view::reflog_lines`, and `git::travel_command`
+//! - `effects::load`, `view::reflog_lines` and the mouse's queries
+//!   `reflog_list_shown` and `reflog_step_to`, and `git::travel_command`
 //!   and `git::read_head` for `op.rs`.
 //!
 //! Kept cross-feature reads:

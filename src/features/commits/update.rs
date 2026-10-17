@@ -35,6 +35,7 @@ pub(crate) fn update(state: &mut AppState, intent: CommitsIntent) -> Vec<Effect>
         CommitsIntent::CloseFiles => return state.close_commit_files(),
         CommitsIntent::FileNext => return state.move_commit_file(1),
         CommitsIntent::FilePrev => return state.move_commit_file(-1),
+        CommitsIntent::FileMoveBy(delta) => return state.move_commit_file(delta),
         CommitsIntent::FilesLoaded { tag, result } => {
             return state.commit_files_loaded(tag, result);
         }
@@ -495,6 +496,18 @@ mod tests {
         assert_eq!(press(&mut state, KeyCode::Down), vec![]);
         let request = diff_request(&state.update(AppIntent::Commits(CommitsIntent::FilePrev)));
         assert_eq!(request.path, "src/lib.rs".into());
+    }
+
+    #[test]
+    fn file_move_by_moves_the_file_cursor_clamped_with_one_diff_load() {
+        let mut state = on_commit_five();
+        opened(&mut state, two_commit_files());
+        let by = |delta| AppIntent::Commits(CommitsIntent::FileMoveBy(delta));
+        let request = diff_request(&state.update(by(9)));
+        assert_eq!(request.path, "new.rs".into(), "clamped at the end");
+        assert_eq!(state.update(by(1)), vec![], "no move, no load");
+        let request = diff_request(&state.update(by(-9)));
+        assert_eq!(request.path, "src/lib.rs".into(), "clamped at the start");
     }
 
     #[test]

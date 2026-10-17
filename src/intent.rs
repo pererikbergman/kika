@@ -86,6 +86,9 @@ pub enum AppIntent {
     /// Move the top menu's cursor down or up.
     MenuNext,
     MenuPrev,
+    /// Move the top menu's cursor by this many rows, clamped at both
+    /// ends: a click or a wheel notch. It never runs the item.
+    MenuMoveBy(isize),
     /// Run the item under the top menu's cursor.
     MenuSelect,
     /// Ask "Quit Kika?" (the menu's Quit item).

@@ -64,6 +64,8 @@
 //!   and `keys::HIDDEN_WHEN_OFF`, the bar hints left out while refused;
 //! - `view::render`, and the query `review_words` (`state.rs`) it names
 //!   requests by;
+//! - the mouse's `view::{detail_area, files_screen_areas}` and queries
+//!   `review_queue_step_to` and `review_files_step_to` (`view.rs`);
 //! - `effects::{load_queues, load_detail, load_discussion, check_commits,
 //!   fetch_commits, load_files, load_commits, load_range_files,
 //!   set_file_viewed, write_discussion, plan_checkout, merge, load_pending,
@@ -123,3 +125,13 @@ pub(crate) use pending::{CommentTarget, pending_list_open};
 pub(crate) use reader::thread_reader_open;
 pub(crate) use state::{ReviewScreen, ReviewState, queue_keys_disabled};
 pub(crate) use update::update;
+
+/// The review screens the mouse's tests in core are built on.
+#[cfg(test)]
+pub(crate) mod fixtures {
+    pub(crate) use crate::features::review::files::tests::large_ready;
+    pub(crate) use crate::features::review::pending::tests::{
+        comment, commenting, right, with_review,
+    };
+    pub(crate) use crate::features::review::state::tests::{in_detail, in_queues};
+}

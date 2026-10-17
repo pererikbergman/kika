@@ -214,6 +214,9 @@ pub struct AppState {
     /// How the selection is kept when the pending status load lands.
     pub status_selection: Selection,
     pub help_open: bool,
+    /// From `[display] mouse`: the mouse is captured, so help says what
+    /// it does. Set once at start-up, as capture is.
+    pub mouse: bool,
     /// The first help row shown, for a list taller than the screen.
     pub help_scroll: usize,
     pub commit: CommitFlow,
@@ -349,6 +352,7 @@ impl AppState {
             commit_hooks_detached: false,
             status_selection: Selection::KeepPath,
             help_open: false,
+            mouse: false,
             help_scroll: 0,
             commit: CommitFlow::Closed,
             notice: None,
@@ -536,6 +540,7 @@ impl AppState {
             }
             AppIntent::MenuNext => self.move_menu_cursor(1),
             AppIntent::MenuPrev => self.move_menu_cursor(-1),
+            AppIntent::MenuMoveBy(delta) => self.move_menu_cursor(delta),
             AppIntent::MenuSelect => return self.menu_select(),
             AppIntent::AskQuit => self.popups.push(Popup::Question(quit_question())),
             AppIntent::ConfirmYes => return self.answer(true),
@@ -694,16 +699,21 @@ impl AppState {
     /// Move the help list by a line or a page, never past its last screenful.
     /// A page is the popup's inside at its tallest, counted by the same
     /// function the view clamps with, so the last rows stay reachable.
+    /// How many lines help lists, as `render_help` draws them: the
+    /// built-in keys, then a rule and the user's commands if there are
+    /// any, then a rule and the mouse's line while it is captured. Shared,
+    /// so the scroll's clamp reaches the last line drawn.
+    pub(crate) fn help_lines(&self) -> usize {
+        let focus = self.panel_focus();
+        let commands = keymap::available_commands(&self.keymap, focus).len();
+        let builtin = keymap::available(keymap::registry(), &self.keymap, focus, self).len();
+        let rule = |any: bool| usize::from(any);
+        builtin + rule(commands > 0) + commands + 2 * rule(self.mouse)
+    }
+
     fn scroll_help(&mut self, by: Scroll) {
         let rows = layout::help_rows(ratatui::layout::Rect::new(0, 0, self.size.0, self.size.1));
-        let focus = self.panel_focus();
-        // As help lists them: the built-in keys, then a rule and the
-        // user's commands, if there are any.
-        let commands = keymap::available_commands(&self.keymap, focus).len();
-        let rule = usize::from(commands > 0);
-        let total = keymap::available(keymap::registry(), &self.keymap, focus, self).len()
-            + rule
-            + commands;
+        let total = self.help_lines();
         let scroll = match by {
             Scroll::LineDown => self.help_scroll.saturating_add(1),
             Scroll::LineUp => self.help_scroll.saturating_sub(1),
@@ -2492,6 +2502,27 @@ mod tests {
         state.update(AppIntent::MenuNext);
         assert_eq!(state.update(AppIntent::MenuSelect), vec![]);
         assert_eq!(state.notice, Some("No commit to amend".into()));
+    }
+
+    #[test]
+    fn menu_move_by_moves_the_cursor_clamped_and_never_runs_the_item() {
+        let (mut state, _) = with_files(three_files(), 24);
+        state.update(AppIntent::OpenMenu(MenuId::Actions));
+        let cursor = |state: &AppState| match state.popups[..] {
+            [Popup::Menu { cursor, .. }] => cursor,
+            ref other => panic!("expected one menu, got {other:?}"),
+        };
+        assert_eq!(state.update(AppIntent::MenuMoveBy(2)), vec![]);
+        assert_eq!(cursor(&state), 2);
+        state.update(AppIntent::MenuMoveBy(99));
+        assert_eq!(
+            cursor(&state),
+            menu::items(MenuId::Actions).len() - 1,
+            "clamped at the end"
+        );
+        state.update(AppIntent::MenuMoveBy(-99));
+        assert_eq!(cursor(&state), 0, "clamped at the start");
+        assert!(!state.should_quit);
     }
 
     #[test]

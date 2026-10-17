@@ -1089,6 +1089,26 @@ mod tests {
     }
 
     #[test]
+    fn pick_move_by_moves_the_cursor_clamped_and_never_picks() {
+        let mut state = on_github(vec![
+            origin(&["dev", "main", "topic"]),
+            remote(
+                "upstream",
+                "https://github.com/acme-org/widgets",
+                &["main", "topic"],
+            ),
+        ]);
+        state.update(AppIntent::PullRequests(PullRequestsIntent::CreateStart));
+        let by = |delta| AppIntent::PullRequests(PullRequestsIntent::PickMoveBy(delta));
+        assert_eq!(state.update(by(9)), vec![], "moving never picks");
+        assert_eq!(top_pick(&state).cursor, 1, "clamped at the end");
+        assert_eq!(top_pick(&state).purpose, PickPurpose::TargetRemote);
+        state.update(by(-9));
+        assert_eq!(top_pick(&state).cursor, 0, "clamped at the start");
+        assert_eq!(state.popups.len(), 1);
+    }
+
+    #[test]
     fn enter_never_answers_the_question_and_y_creates_with_the_owner_prefix_from_a_fork() {
         use crossterm::event::KeyCode;
         let mut state = on_github(vec![

@@ -20,6 +20,7 @@ pub(crate) fn update(state: &mut AppState, intent: SubmodulesIntent) -> Vec<Effe
         SubmodulesIntent::Loaded { tag, result } => state.submodules_loaded(tag, result),
         SubmodulesIntent::Next => state.move_submodule_cursor(1),
         SubmodulesIntent::Prev => state.move_submodule_cursor(-1),
+        SubmodulesIntent::MoveBy(delta) => state.move_submodule_cursor(delta),
         SubmodulesIntent::Init => return state.init_submodule(),
         SubmodulesIntent::Update => return state.update_submodule(),
         SubmodulesIntent::Enter => return state.enter_submodule(),
@@ -267,6 +268,35 @@ mod tests {
         assert_eq!(submodule_list(&state).list.selected, 1);
         // The file selection did not move.
         assert_eq!(state.files.selected, 1);
+    }
+
+    #[test]
+    fn move_by_moves_the_submodule_cursor_clamped_and_runs_nothing() {
+        let mut state = with_submodules(
+            ["a", "b", "c", "d"]
+                .map(|path| submodule(path, SubmoduleState::UpToDate))
+                .to_vec(),
+        );
+        let by = |delta| AppIntent::Submodules(SubmodulesIntent::MoveBy(delta));
+        assert_eq!(
+            state.update(by(2)),
+            vec![],
+            "as `Next`, moving runs nothing"
+        );
+        assert_eq!(submodule_list(&state).list.selected, 2);
+        state.update(by(9));
+        assert_eq!(
+            submodule_list(&state).list.selected,
+            3,
+            "clamped at the end"
+        );
+        state.update(by(-9));
+        assert_eq!(
+            submodule_list(&state).list.selected,
+            0,
+            "clamped at the start"
+        );
+        assert!(matches!(state.popups[..], [Popup::Submodules(_)]));
     }
 
     #[test]

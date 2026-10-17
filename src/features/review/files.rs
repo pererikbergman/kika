@@ -1168,6 +1168,25 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn move_by_moves_the_file_cursor_clamped_with_one_diff_load() {
+        let (mut state, _) = ready();
+        let by = |delta| AppIntent::Review(ReviewIntent::MoveBy(delta));
+        let effects = state.update(by(9));
+        assert_eq!(
+            streamed(&effects).0.path,
+            "logo.png".into(),
+            "clamped at the end"
+        );
+        assert_eq!(state.update(by(1)), vec![], "no move, no load");
+        state.update(by(-9));
+        assert_eq!(
+            state.review.files.as_ref().unwrap().cursor,
+            0,
+            "clamped at the start"
+        );
+    }
+
+    #[test]
     fn on_gitlab_the_files_screen_says_merge_request_mr_head_and_gitlab_ask() {
         use crate::features::review::state::tests::on_gitlab;
         let (state, tag) = opened();

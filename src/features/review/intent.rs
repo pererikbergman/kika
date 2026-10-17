@@ -53,6 +53,9 @@ pub(crate) enum ReviewIntent {
     /// Move the queue's cursor, or scroll the pull request, by a line.
     Next,
     Prev,
+    /// As `Next`/`Prev` by this many rows, clamped at both ends: a click
+    /// or a wheel notch on the queue or the file list.
+    MoveBy(isize),
     /// The review queues, or why not; `repo` is the repository found,
     /// when one was.
     QueuesLoaded {

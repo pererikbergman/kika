@@ -14,6 +14,9 @@ pub(crate) enum CommandLogIntent {
     Next,
     /// Move the Command log cursor a row up.
     Prev,
+    /// Move the cursor by this many rows, clamped at both ends: a click
+    /// or a wheel notch.
+    MoveBy(isize),
     /// Move the Command log cursor a page down.
     PageDown,
     /// Move the Command log cursor a page up.

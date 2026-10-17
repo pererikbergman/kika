@@ -17,6 +17,9 @@ pub(crate) enum SubmodulesIntent {
     /// Move the submodule cursor down or up.
     Next,
     Prev,
+    /// Move the cursor by this many rows, clamped at both ends: a click
+    /// or a wheel notch.
+    MoveBy(isize),
     /// Initialize or update the submodule under the cursor.
     Init,
     Update,

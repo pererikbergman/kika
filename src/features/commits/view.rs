@@ -21,7 +21,7 @@ use crate::rows::{DIFF_MARK, commit_file_line, diff_mark_style};
 use crate::theme::Palette;
 use crate::view::{
     PanelLook, elide_left, elide_right, filter_title, no_matches, range_row, reversed, scrolled,
-    width_of,
+    scrolled_step_to, width_of,
 };
 use kika_git::commit_files::CommitFile;
 use kika_git::commit_files::CommitId;
@@ -387,6 +387,27 @@ impl AppState {
             && panel.tab == CommitsTab::Log
             && panel.open.is_none()
             && !panel.list.visible().is_empty()
+    }
+
+    /// Whether the Commits panel lists an opened commit's or compare's
+    /// files, expanded: what a click or the wheel can move through.
+    pub(crate) fn commit_files_shown(&self) -> bool {
+        let panel = &self.commits;
+        self.expanded == SidePanel::Commits
+            && panel.tab == CommitsTab::Log
+            && panel.open.as_ref().is_some_and(|open| {
+                open.list.loaded && open.list.error.is_none() && !open.list.visible().is_empty()
+            })
+    }
+
+    /// The move from the cursor to the file drawn on `line` of the listed
+    /// panel's `rows` inner lines, as `render_commit_files` scrolls them;
+    /// `None` below the last file or when no files are listed.
+    pub(crate) fn commit_files_step_to(&self, line: usize, rows: usize) -> Option<isize> {
+        let open = self.commits.open.as_ref()?;
+        self.commit_files_shown()
+            .then(|| scrolled_step_to(&open.list.visible(), open.list.selected, rows, line))
+            .flatten()
     }
 
     /// The `MoveBy` from the cursor, through any todo rows, to the log row

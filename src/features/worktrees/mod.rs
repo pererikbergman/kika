@@ -18,7 +18,8 @@
 //!   which calls `forget_worktree_branch` when the path prompt closes;
 //! - the chunks `keys::{WORKTREES_WORKSPACE, WORKTREES_KEYS,
 //!   WORKTREES_REMOVE_CONFIRM}`;
-//! - `view::render_worktrees`;
+//! - `view::{render_worktrees, worktrees_popup}`, the second the layout
+//!   the mouse finds rows in;
 //! - `effects::{load, add, remove}`.
 //!
 //! Kept cross-feature reads, of branches and repos through core for now:

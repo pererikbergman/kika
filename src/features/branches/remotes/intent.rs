@@ -17,6 +17,9 @@ pub(crate) enum RemotesIntent {
     /// branch rows alike.
     Next,
     Prev,
+    /// Move the cursor by this many rows, clamped at both ends: a click
+    /// or a wheel notch.
+    MoveBy(isize),
     /// Ask for a local name, to check out the selected remote branch as a
     /// new branch tracking it.
     Track,
