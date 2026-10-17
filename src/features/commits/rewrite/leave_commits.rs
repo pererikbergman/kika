@@ -4,7 +4,7 @@
 //! (`model/left_behind.rs`), so Branches' checkouts get the same question;
 //! every answer comes back here.
 
-use crate::confirm_question::Answer;
+use crate::confirm_question::{Answer, Then};
 use crate::effect::{Effect, Tag};
 use crate::features::commits::{checkout_question, reset_hard_question};
 use crate::keymap::KeyScope;
@@ -44,7 +44,7 @@ impl AppState {
                     .push(Popup::Question(reset_hard_question(short_oid, op, head)));
                 vec![]
             }
-            op => self.start_op(Ok(Some(op))),
+            op => self.run_head_move(op),
         }
     }
 
@@ -101,6 +101,7 @@ impl AppState {
             GitOp::CheckoutCommit(id) | GitOp::Reset { to: id, .. } => self.commits.short_oid(id),
             GitOp::Checkout(name) => name.display(),
             GitOp::CheckoutTracking { name, .. } | GitOp::CreateBranch { name, .. } => name.clone(),
+            GitOp::CheckoutPrBranch { branch, .. } => branch.display(),
             _ => return vec![],
         };
         let left = left.iter().map(|id| self.commits.short_oid(id)).collect();
@@ -120,7 +121,13 @@ impl AppState {
     /// Run the op the open question carries, and only if one is open, its
     /// guard still allows it and `HEAD` is still where it was asked from.
     pub(crate) fn confirm_leave_commits(&mut self) -> Vec<Effect> {
-        self.answer_question(KeyScope::LeaveCommits, Answer::YOnly)
+        match self
+            .take_question(KeyScope::LeaveCommits, Answer::YOnly)
+            .map(|q| q.then)
+        {
+            Some(Then::Op(op)) => self.run_head_move(op),
+            _ => vec![],
+        }
     }
 }
 

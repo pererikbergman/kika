@@ -283,6 +283,10 @@ pub struct CheckoutPlan {
     /// Operations in progress in this repository, which a checkout
     /// would mix with.
     pub in_progress: Vec<Operation>,
+    /// `HEAD`'s commit when it is detached, read here because a review
+    /// started on its own has no status loaded: the checkout may leave
+    /// commits behind that nothing else reaches.
+    pub detached: Option<CommitId>,
 }
 
 /// The local branch a pull request is checked out as: `pr/<number>`,
@@ -414,6 +418,56 @@ fn read_branch(
     Ok(None)
 }
 
+/// `git symbolic-ref -q HEAD`: succeeds, naming the branch, when `HEAD`
+/// is on one; fails with nothing on stderr when it is detached.
+pub fn head_branch_command() -> GitCommand {
+    query(GitCommand::new("symbolic-ref").arg("-q").arg("HEAD"))
+}
+
+/// `git rev-parse -q --verify HEAD^{commit}`: the commit `HEAD` is on.
+pub fn head_commit_command() -> GitCommand {
+    query(
+        GitCommand::new("rev-parse")
+            .arg("-q")
+            .arg("--verify")
+            .arg("HEAD^{commit}"),
+    )
+}
+
+/// `HEAD`'s commit when it is detached, `None` when it is on a branch
+/// (born or not). A read that fails for any other reason is an error, so
+/// a broken repository is never taken for one on a branch.
+pub fn read_detached(runner: &dyn GitRunner) -> Result<Option<CommitId>, String> {
+    let cmd = head_branch_command();
+    let output = runner.run(&cmd).map_err(|e| GitError::io(&e).to_string())?;
+    if output.success {
+        return Ok(None);
+    }
+    if !output.stderr.iter().all(u8::is_ascii_whitespace) {
+        return Err(GitError::failed(&cmd, &output).to_string());
+    }
+    let output = runner
+        .run_checked(&head_commit_command())
+        .map_err(|e| e.message_or("git could not read HEAD"))?;
+    let id = std::str::from_utf8(&output.stdout)
+        .ok()
+        .and_then(|s| CommitId::parse(s.trim()))
+        .ok_or("git named HEAD with an id Kika could not read")?;
+    Ok(Some(id))
+}
+
+/// Whether `HEAD` is still where the question saw it, read again right
+/// before the checkout runs: detached at `from`, or on a branch when
+/// `from` is `None`. The user agreed to leave only the commits behind
+/// `from`; a `HEAD` that moved may have others nothing else reaches.
+pub fn verify_pr_head(runner: &dyn GitRunner, from: Option<&CommitId>) -> Result<(), String> {
+    if read_detached(runner)?.as_ref() == from {
+        Ok(())
+    } else {
+        Err("HEAD moved since the question; press b again".into())
+    }
+}
+
 /// Whether `head` contains `old`. A failure with nothing on stderr is
 /// git's "no"; anything else is an error.
 fn contains(runner: &dyn GitRunner, old: &CommitId, head: &CommitId) -> Result<bool, String> {
@@ -469,6 +523,7 @@ pub fn plan_checkout(
         at,
         current,
         in_progress: operations(runner)?,
+        detached: read_detached(runner)?,
     })
 }
 
@@ -1134,6 +1189,7 @@ mod tests {
             &["rev-parse", "--absolute-git-dir"],
             ok(b"/nonexistent/kika-test/.git\n"),
         )
+        .expect(&["symbolic-ref", "-q", "HEAD"], ok(b"refs/heads/main\n"))
     }
 
     fn plan(fake: &FakeRunner) -> Result<CheckoutPlan, String> {
@@ -1194,6 +1250,7 @@ mod tests {
                 at: BranchAt::Absent,
                 current: false,
                 in_progress: vec![],
+                detached: None,
             }
         );
         // Only the branch itself counts, not one below it.
@@ -1382,6 +1439,7 @@ mod tests {
                 other => panic!("{other:?}"),
             },
             current: plan.current,
+            from: plan.detached.clone(),
         };
 
         // Absent: made at the head and checked out.
@@ -1435,6 +1493,7 @@ mod tests {
             head: h2.clone(),
             old: Some(base.clone()),
             current: false,
+            from: None,
         };
         assert!(run_op(&runner, &stale).is_err());
         assert_eq!(
@@ -1496,6 +1555,126 @@ mod tests {
         std::fs::write(work.join(".git/BISECT_LOG"), "").unwrap();
         let plan = plan_checkout(&runner, &h2, &branch).unwrap();
         assert_eq!(plan.in_progress, [Operation::Bisect]);
+    }
+
+    #[test]
+    fn head_is_read_with_fixed_queries_and_a_broken_read_refuses_the_plan() {
+        assert_eq!(args(&head_branch_command()), ["symbolic-ref", "-q", "HEAD"]);
+        assert_eq!(
+            args(&head_commit_command()),
+            ["rev-parse", "-q", "--verify", "HEAD^{commit}"]
+        );
+        let query = env_list(&[STANDARD_ENV.as_slice(), &[("GIT_NO_LAZY_FETCH", "1")]].concat());
+        for cmd in [head_branch_command(), head_commit_command()] {
+            assert_eq!(cmd.process_env(), query, "{cmd:?}");
+        }
+        let symbolic = ["symbolic-ref", "-q", "HEAD"];
+        let commit = ["rev-parse", "-q", "--verify", "HEAD^{commit}"];
+        // Detached: symbolic-ref fails quietly, then the id is read.
+        let fake = FakeRunner::new()
+            .expect(&symbolic, fail(""))
+            .expect(&commit, ok(format!("{HEAD}\n").as_bytes()));
+        assert_eq!(read_detached(&fake), Ok(Some(id(HEAD))));
+        fake.assert_done();
+        // Anything git says on the way is an error, never "on a branch".
+        let fake = FakeRunner::new().expect(&symbolic, fail("fatal: not a git repository"));
+        assert!(
+            read_detached(&fake)
+                .unwrap_err()
+                .contains("not a git repository")
+        );
+        fake.assert_done();
+        let fake = FakeRunner::new()
+            .expect(&symbolic, fail(""))
+            .expect(&commit, ok(b"--evil\n"));
+        assert!(read_detached(&fake).is_err());
+        fake.assert_done();
+        let fake = FakeRunner::new()
+            .expect(&symbolic, fail(""))
+            .expect(&commit, fail("fatal: bad"));
+        assert!(read_detached(&fake).is_err());
+        fake.assert_done();
+    }
+
+    #[test]
+    fn against_real_git_the_plan_says_where_a_detached_head_is_and_the_op_runs_only_from_there() {
+        use crate::op::{GitOp, run_op};
+        use kika_git::CliRunner;
+        use kika_git::fake::{TempDir, git};
+
+        let tmp = TempDir::new("pr-detached");
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let run = |args: &[&str]| git(&work, args);
+        let rev = |name: &str| {
+            String::from_utf8(git(&work, &["rev-parse", name]))
+                .unwrap()
+                .trim()
+                .to_string()
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.name", "T"]);
+        run(&["config", "user.email", "t@example.com"]);
+        let commit = |text: &str| {
+            std::fs::write(work.join("a.txt"), text).unwrap();
+            run(&["add", "-A"]);
+            run(&["commit", "-q", "-m", text]);
+            id(&rev("HEAD"))
+        };
+        let base = commit("base");
+        let head = commit("head");
+        let runner = CliRunner::isolated(&work);
+        let branch = pr_branch(7);
+
+        // On a branch: nothing detached.
+        let plan = plan_checkout(&runner, &head, &branch).unwrap();
+        assert_eq!(plan.detached, None);
+
+        // Detached on a commit of its own.
+        run(&["checkout", "-q", "--detach", base.as_str()]);
+        let orphan = commit("orphan");
+        let plan = plan_checkout(&runner, &head, &branch).unwrap();
+        assert_eq!(plan.detached, Some(orphan.clone()));
+
+        let from = |from: Option<&CommitId>| GitOp::CheckoutPrBranch {
+            number: 7,
+            branch: branch.clone(),
+            head: head.clone(),
+            old: None,
+            current: false,
+            from: from.cloned(),
+        };
+        let moved = "HEAD moved since the question; press b again";
+        let refs = || git(&work, &["for-each-ref"]);
+        let before = refs();
+
+        // HEAD moved to another detached commit: nothing runs.
+        run(&["checkout", "-q", "--detach", base.as_str()]);
+        assert_eq!(run_op(&runner, &from(Some(&orphan))), Err(moved.into()));
+        assert_eq!(rev("HEAD"), base.as_str());
+        assert_eq!(refs(), before);
+
+        // HEAD back on a branch: nothing runs.
+        run(&["checkout", "-q", "main"]);
+        assert_eq!(run_op(&runner, &from(Some(&orphan))), Err(moved.into()));
+        assert_eq!(rev("HEAD"), head.as_str());
+        assert_eq!(refs(), before);
+
+        // Asked from a branch, now detached: nothing runs.
+        run(&["checkout", "-q", "--detach", orphan.as_str()]);
+        assert_eq!(run_op(&runner, &from(None)), Err(moved.into()));
+        assert_eq!(rev("HEAD"), orphan.as_str());
+        assert_eq!(refs(), before);
+
+        // Still where it was asked from: checked out.
+        run_op(&runner, &from(Some(&orphan))).unwrap();
+        assert_eq!(rev("pr/7"), head.as_str());
+        assert_eq!(
+            String::from_utf8(git(&work, &["symbolic-ref", "--short", "HEAD"]))
+                .unwrap()
+                .trim(),
+            "pr/7"
+        );
     }
 
     #[test]

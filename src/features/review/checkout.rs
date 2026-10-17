@@ -144,6 +144,7 @@ fn op_for(
         head: head.clone(),
         old,
         current: plan.current,
+        from: plan.detached.clone(),
     })
 }
 
@@ -396,9 +397,28 @@ impl AppState {
         self.plan_pr_checkout(seq, repo)
     }
 
+    /// Go on with `op` once its head is local. From a detached `HEAD`,
+    /// first look for the commits it would leave behind, and stay in
+    /// review until that check, or its question, lets it go on
+    /// (`run_head_move`). The target is the head itself: `pr/<number>`
+    /// may not exist yet.
+    fn start_pr_checkout(&mut self, op: GitOp) -> Vec<Effect> {
+        match &op {
+            GitOp::CheckoutPrBranch {
+                head,
+                from: Some(from),
+                ..
+            } => {
+                let (head, from) = (head.clone(), from.clone());
+                self.check_left_behind(op, from, Some(head))
+            }
+            _ => self.run_pr_checkout(op),
+        }
+    }
+
     /// Go to the workspace and start `op` there, so its result shows in
     /// the workspace's bar like any checkout's.
-    fn start_pr_checkout(&mut self, op: GitOp) -> Vec<Effect> {
+    pub(crate) fn run_pr_checkout(&mut self, op: GitOp) -> Vec<Effect> {
         let mut effects = self.leave_review();
         effects.extend(self.run_op_where_it_belongs(op));
         effects
@@ -445,6 +465,7 @@ mod tests {
             at,
             current,
             in_progress: vec![],
+            detached: None,
         }
     }
 
@@ -706,6 +727,7 @@ mod tests {
                     head: id(HEAD),
                     old: old.map(id),
                     current: plan.current,
+                    from: None,
                 }],
                 "{plan:?}"
             );
@@ -878,6 +900,7 @@ mod tests {
                 head: id(HEAD),
                 old: Some(id(OLD)),
                 current: false,
+                from: None,
             }
         );
         assert_eq!(state.context, Context::Workspace);
@@ -924,6 +947,189 @@ mod tests {
             "{notice:?}"
         );
         assert!(state.review.checkout.is_none());
+    }
+
+    /// The detached `HEAD` a checkout leaves, as the status and plan say.
+    const DETACHED: &str = "c0";
+
+    fn detached(plan: CheckoutPlan) -> CheckoutPlan {
+        CheckoutPlan {
+            detached: Some(id(DETACHED)),
+            ..plan
+        }
+    }
+
+    /// The detail open with `HEAD` detached, as the status read it, or
+    /// with no status ever read, as when started with `kika review`.
+    fn on_detached(status: bool) -> AppState {
+        let mut state = on_detail(|_| {});
+        if status {
+            state.branch = Some(kika_git::status::BranchStatus {
+                head: kika_git::status::Head::Detached(DETACHED.into()),
+                ..crate::test_support::on_branch("main")
+            });
+        } else {
+            state.workspace_started = false;
+        }
+        state
+    }
+
+    /// `b` answered with `plan` on `state`.
+    fn asked_on(mut state: AppState, plan: CheckoutPlan) -> AppState {
+        let tag = press_b(&mut state);
+        assert_eq!(planned(&mut state, tag, Ok(plan)), []);
+        state
+    }
+
+    fn pr_op(from: Option<&str>) -> GitOp {
+        GitOp::CheckoutPrBranch {
+            number: 12,
+            branch: "pr/12".into(),
+            head: id(HEAD),
+            old: None,
+            current: false,
+            from: from.map(id),
+        }
+    }
+
+    /// The one left-behind check in `effects`, from the detached `HEAD`
+    /// to the pull request's head, for the planned op.
+    fn left_behind_check(effects: &[Effect]) -> Tag {
+        match effects {
+            [
+                Effect::CheckLeftBehind {
+                    tag,
+                    op,
+                    head,
+                    target,
+                },
+            ] => {
+                assert_eq!(*op, pr_op(Some(DETACHED)));
+                assert_eq!(*head, id(DETACHED));
+                assert_eq!(*target, Some(id(HEAD)));
+                *tag
+            }
+            other => panic!("expected one left-behind check, got {other:?}"),
+        }
+    }
+
+    fn in_review(state: &AppState) -> bool {
+        matches!(state.context, Context::Review { .. })
+    }
+
+    /// The checkout started in the workspace, whatever else leaving
+    /// review loads.
+    fn started_in_workspace(state: &AppState, effects: &[Effect]) {
+        let runs: Vec<&GitOp> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::RunOp { op, .. } => Some(op),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(runs, [&pr_op(Some(DETACHED))]);
+        assert_eq!(state.context, Context::Workspace);
+        assert!(state.op_is_running());
+    }
+
+    #[test]
+    fn y_from_a_detached_head_checks_for_commits_left_behind_and_stays_in_review() {
+        for status in [true, false] {
+            let mut state = asked_on(on_detached(status), detached(here(BranchAt::Absent, false)));
+            let busy = state.busy_count();
+            let tag = left_behind_check(&press(&mut state, KeyCode::Char('y')));
+            assert!(tag.user, "{status}");
+            assert_eq!(state.busy_count(), busy + 1, "{status}");
+            assert!(in_review(&state), "{status}");
+            assert!(!state.op_is_running(), "{status}");
+            assert!(state.popups.is_empty(), "{status}");
+        }
+    }
+
+    #[test]
+    fn a_fetched_head_from_a_detached_head_checks_for_commits_left_behind() {
+        for status in [true, false] {
+            let mut state = asked_on(
+                on_detached(status),
+                detached(missing(BranchAt::Absent, Some("origin"))),
+            );
+            let tag = fetch_after_y(&mut state);
+            let tag = replan(&fetched(&mut state, tag, Ok(())));
+            let effects = planned(&mut state, tag, Ok(detached(here(BranchAt::Absent, false))));
+            left_behind_check(&effects);
+            assert!(in_review(&state), "{status}");
+            assert!(!state.op_is_running(), "{status}");
+        }
+    }
+
+    /// `y` on the checkout question from a detached `HEAD`, answered by
+    /// the check with `left`.
+    fn checked(status: bool, left: Vec<CommitId>) -> (AppState, Vec<Effect>) {
+        let mut state = asked_on(on_detached(status), detached(here(BranchAt::Absent, false)));
+        let tag = left_behind_check(&press(&mut state, KeyCode::Char('y')));
+        let effects = state.update(crate::test_support::left_behind_checked(
+            tag,
+            pr_op(Some(DETACHED)),
+            Ok(left),
+        ));
+        (state, effects)
+    }
+
+    #[test]
+    fn commits_left_behind_ask_before_the_checkout_and_none_check_it_out() {
+        for status in [true, false] {
+            let (state, effects) = checked(status, crate::test_support::ids(2));
+            assert_eq!(effects, [], "{status}");
+            assert!(in_review(&state), "{status}");
+            assert_eq!(state.key_focus(), KeyScope::LeaveCommits, "{status}");
+            let Some(Popup::Question(q)) = state.popups.last() else {
+                panic!("{:?}", state.popups);
+            };
+            assert_eq!(q.answer, Answer::YOnly);
+            assert_eq!(q.title, "Leave commits behind");
+            assert!(
+                q.text
+                    .starts_with("Check out pr/12 and leave 2 commits that no branch or tag"),
+                "{}",
+                q.text
+            );
+            assert!(q.text.contains("(a0, a1)"), "{}", q.text);
+
+            let (state, effects) = checked(status, vec![]);
+            started_in_workspace(&state, &effects);
+            assert!(state.popups.is_empty(), "{status}");
+        }
+    }
+
+    #[test]
+    fn only_y_leaves_the_commits_behind_and_checks_out() {
+        for status in [true, false] {
+            let (mut state, _) = checked(status, crate::test_support::ids(2));
+            let effects = press(&mut state, KeyCode::Char('y'));
+            started_in_workspace(&state, &effects);
+            assert!(state.popups.is_empty(), "{status}");
+
+            for code in [KeyCode::Enter, KeyCode::Char('n'), KeyCode::Esc] {
+                let (mut state, _) = checked(status, crate::test_support::ids(2));
+                no_git(&press(&mut state, code));
+                assert!(in_review(&state), "{code:?}");
+                assert!(!state.op_is_running(), "{code:?}");
+                if code != KeyCode::Enter {
+                    assert!(state.popups.is_empty(), "{code:?}");
+                    // `b` asks again.
+                    press_b(&mut state);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn y_on_the_leave_question_runs_nothing_once_head_has_moved() {
+        let (mut state, _) = checked(true, crate::test_support::ids(2));
+        state.branch.as_mut().unwrap().head = kika_git::status::Head::Detached("c2".into());
+        no_git(&press(&mut state, KeyCode::Char('y')));
+        assert!(in_review(&state));
+        assert_eq!(state.notice.as_deref(), Some("HEAD moved; try again"));
     }
 
     #[test]
