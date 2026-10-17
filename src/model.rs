@@ -4609,6 +4609,15 @@ mod tests {
         on_remote_row(3)
     }
 
+    /// `on_remote_topic` with no local `topic`, so `space` asks for a name.
+    fn on_remote_topic_untracked() -> AppState {
+        let mut state = on_remote_topic();
+        let tag = branches_tag(&state.update(AppIntent::RefreshStatus));
+        let main = crate::test_support::git_branch("main", true, true);
+        state.update(crate::test_support::branches_loaded(tag, vec![main]));
+        state
+    }
+
     /// An action that moves `HEAD` or makes a commit: a name, the state it
     /// runs from, the intents that lead up to it, and the action.
     type HeadMove = (&'static str, fn() -> AppState, Vec<AppIntent>, AppIntent);
@@ -4719,7 +4728,7 @@ mod tests {
             ),
             (
                 "track named",
-                on_remote_topic,
+                on_remote_topic_untracked,
                 vec![AppIntent::Branches(BranchesIntent::Remotes(
                     RemotesIntent::Track,
                 ))],

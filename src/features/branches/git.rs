@@ -390,4 +390,27 @@ mod tests {
         run_op(&runner, &GitOp::UnsetUpstream("main".into())).unwrap();
         assert_eq!(config(dir, "branch.main.merge"), None);
     }
+
+    /// `space` on `origin/feature` when a local `feature` exists checks
+    /// that branch out; the tracking checkout would fail on it.
+    #[test]
+    fn checking_out_an_existing_local_branch_for_its_remote_in_real_git() {
+        let (tmp, _bare) = cloned_repo();
+        let dir = tmp.path();
+        kika_git::fake::git(dir, &["branch", "-q", "feature", "origin/feature"]);
+        let runner = kika_git::CliRunner::isolated(dir);
+        let tracking = GitOp::CheckoutTracking {
+            name: "feature".into(),
+            from: RemoteBranch {
+                remote: "origin".into(),
+                short: b"feature".to_vec(),
+                refname: b"refs/remotes/origin/feature".to_vec(),
+            },
+        };
+        assert!(run_op(&runner, &tracking).is_err(), "the old op fails");
+
+        run_op(&runner, &GitOp::Checkout("feature".into())).unwrap();
+        let head = kika_git::fake::git(dir, &["symbolic-ref", "--short", "HEAD"]);
+        assert_eq!(head, b"feature\n");
+    }
 }

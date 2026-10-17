@@ -12,7 +12,7 @@
 //! - the types [`RemotesList`], [`RemoteLine`] and [`RemotePending`], and
 //!   `lines`, which flattens a load's remotes into the tab's rows;
 //! - the handlers in `update.rs`: `remotes_loaded`, `move_remote`,
-//!   `ask_track_name`, `track_named`, `ask_remote_name`, `remote_named`,
+//!   `track_selected`, `track_named`, `ask_remote_name`, `remote_named`,
 //!   `remote_url`, `ask_remote_rename`, `rename_remote_to`,
 //!   `ask_remove_remote`, `confirm_remove_remote` and
 //!   `remotes_popup_closed`;

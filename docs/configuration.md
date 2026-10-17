@@ -1455,7 +1455,7 @@ branches below it.
 |---|---|---|---|
 | `remotes.next` | `j`, `down` | Select the next remote or remote branch | |
 | `remotes.prev` | `k`, `up` | Select the previous remote or remote branch | |
-| `remotes.checkout` | `space` | Check out the selected remote branch as a new branch tracking it | |
+| `remotes.checkout` | `space` | Check out the selected remote branch: its local branch if one exists, else a new branch tracking it | |
 | `remotes.add` | `a` | Add a remote; fetch to see its branches | |
 | `remotes.rename` | `R` | Rename the selected remote | |
 | `remotes.remove` | `d` | Remove the selected remote and its remote-tracking branches, asking first | locked |
