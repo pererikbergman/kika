@@ -426,6 +426,18 @@ impl Palette {
             style
         }
     }
+
+    /// The style for `neutral` text (checks that are neutral or skipped).
+    /// With no colour left, the terminal's dim style keeps them below the
+    /// passed and failed ones.
+    pub(crate) const fn neutral_style(&self) -> Style {
+        let style = Style::new().fg(self.neutral);
+        if is_reset(self.neutral) {
+            style.add_modifier(Modifier::DIM)
+        } else {
+            style
+        }
+    }
 }
 
 impl Default for Palette {
@@ -458,6 +470,27 @@ mod tests {
         let mut p = Palette::DEFAULT;
         p.dim = Color::Reset;
         assert_eq!(p.dim_style().add_modifier, Modifier::DIM);
+    }
+
+    #[test]
+    fn under_no_color_the_neutral_style_adds_the_terminals_dim() {
+        let style = Palette::NO_COLOR.neutral_style();
+        assert_eq!(style.fg, Some(Color::Reset));
+        assert_eq!(style.add_modifier, Modifier::DIM);
+    }
+
+    #[test]
+    fn a_coloured_neutral_role_keeps_its_colour_and_no_modifier() {
+        for p in [Palette::DEFAULT, Palette::LIGHT, Palette::HIGH_CONTRAST] {
+            assert_eq!(p.neutral_style(), Style::new().fg(p.neutral));
+        }
+    }
+
+    #[test]
+    fn a_neutral_role_set_to_reset_alone_also_gets_the_terminals_dim() {
+        let mut p = Palette::DEFAULT;
+        p.neutral = Color::Reset;
+        assert_eq!(p.neutral_style().add_modifier, Modifier::DIM);
     }
 
     #[test]
