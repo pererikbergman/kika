@@ -14,6 +14,7 @@ use super::threads_view::clip_line;
 use crate::theme::Palette;
 use crate::view::centered;
 use kika_forge::discussion::PrDiscussion;
+use kika_forge::forge::Words;
 
 /// The smallest box drawn, when the panel has room for it.
 const MIN_WIDTH: u16 = 20;
@@ -43,6 +44,7 @@ pub fn render_reader(
     files: &PrFiles,
     discussion: Option<&PrDiscussion>,
     reader: &ThreadReader,
+    words: &'static Words,
     frame: &mut Frame,
     area: Rect,
 ) {
@@ -60,7 +62,8 @@ pub fn render_reader(
                 .selected()
                 .map(|row| row.file.path.display())
                 .unwrap_or_default();
-            fresh = reader_lines(palette, &ThreadScope::of(files, discussion), t, path, width);
+            let scope = ThreadScope::of(files, discussion).in_words(words);
+            fresh = reader_lines(palette, &scope, t, path, width);
             &fresh
         }
         _ => &[],
@@ -224,6 +227,13 @@ mod tests {
         }
         let rows = draw(&state, 100, 30);
         row_with(&rows, "7 more comments on GitHub");
+
+        // On GitLab, drawn again: GitLab has the rest.
+        let mut state = crate::features::review::state::tests::on_gitlab(state);
+        let reader = state.review.files.as_mut().unwrap().reader.as_mut();
+        reader.unwrap().rendered = None;
+        let rows = draw(&state, 100, 30);
+        row_with(&rows, "7 more comments on GitLab");
     }
 
     #[test]

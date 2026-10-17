@@ -6,7 +6,7 @@
 //! remote. A branch that has diverged from the head, or that another
 //! worktree has checked out, is never moved.
 
-use super::files::{NO_FETCH_REMOTE, STILL_MISSING};
+use super::files::{no_fetch_remote, still_missing};
 use super::git::{BranchAt, CheckoutPlan, pr_branch};
 use super::merge::merge_disabled;
 use super::state::NO_FORGE;
@@ -16,6 +16,7 @@ use crate::keymap::{KeyScope, OP_RUNNING, Reason, in_progress_disabled};
 use crate::model::AppState;
 use crate::op::GitOp;
 use crate::popup::Popup;
+use kika_forge::forge::Words;
 use kika_git::branches::BranchName;
 use kika_git::commit_files::CommitId;
 use kika_git::repo_state::{Operation, resumable};
@@ -88,7 +89,12 @@ fn short(id: &CommitId) -> &str {
 }
 
 /// The op a plan allows, or why there is none.
-fn op_for(number: u64, head: &CommitId, plan: &CheckoutPlan) -> Result<GitOp, Reason> {
+fn op_for(
+    number: u64,
+    head: &CommitId,
+    plan: &CheckoutPlan,
+    words: &Words,
+) -> Result<GitOp, Reason> {
     let branch = pr_branch(number);
     let name = branch.display();
     if !plan.in_progress.is_empty() {
@@ -118,7 +124,7 @@ fn op_for(number: u64, head: &CommitId, plan: &CheckoutPlan) -> Result<GitOp, Re
         }
     };
     if !plan.head_here && plan.remote.is_none() {
-        return Err(NO_FETCH_REMOTE.into());
+        return Err(no_fetch_remote(words).into());
     }
     Ok(GitOp::CheckoutPrBranch {
         number,
@@ -241,10 +247,10 @@ impl AppState {
         };
         // After the fetch the head must be here, whatever else the plan says.
         if checkout.plan.is_some() && !plan.head_here {
-            self.notice = Some(STILL_MISSING.into());
+            self.notice = Some(still_missing(self.review_words()).into());
             return vec![];
         }
-        let op = match op_for(checkout.number, &checkout.head, &plan) {
+        let op = match op_for(checkout.number, &checkout.head, &plan, self.review_words()) {
             Ok(op) => op,
             Err(reason) => {
                 self.notice = Some(reason);
@@ -381,6 +387,7 @@ mod tests {
 
     use super::*;
     use crate::features::review::ReviewIntent;
+    use crate::features::review::files::tests::{NO_FETCH_REMOTE, STILL_MISSING};
     use crate::features::review::state::tests::{fixture_detail, opened_on, press, repo};
     use crate::intent::AppIntent;
     use crate::model::Context;

@@ -1,4 +1,4 @@
-//! A pull request's review threads on its files screen: read from GitHub
+//! A request's review threads on its files screen: read from the forge
 //! right after the detail (`LoadPrDiscussion`), placed on the lines of the
 //! streamed diff by `kika_forge::anchor`, and stepped through with `]` and
 //! `[`. A thread whose row has not streamed in yet is waited for: core
@@ -15,6 +15,7 @@ use crate::model::AppState;
 use kika_forge::ForgeRepo;
 use kika_forge::anchor::{self, AnchorView, Placement, RowNumber};
 use kika_forge::discussion::PrDiscussion;
+use kika_forge::forge::{Words, words_or_default};
 use kika_forge::review::ReviewError;
 use kika_git::commit_files::CommitId;
 use kika_git::patch::{LineId, LineSide};
@@ -40,12 +41,14 @@ pub(crate) struct FileThreads {
 }
 
 /// What placing a thread needs: the discussion, the view shown and the
-/// head the files screen reviews.
+/// head the files screen reviews; and, for its labels, how the forge
+/// names the request.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ThreadScope<'a> {
     pub discussion: &'a PrDiscussion,
     pub view: AnchorView,
     pub head: &'a CommitId,
+    pub words: &'static Words,
 }
 
 impl<'a> ThreadScope<'a> {
@@ -58,7 +61,13 @@ impl<'a> ThreadScope<'a> {
             discussion,
             view,
             head: &files.head,
+            words: words_or_default(None),
         }
+    }
+
+    /// The scope with its labels in `words`, for what is drawn.
+    pub(crate) fn in_words(self, words: &'static Words) -> Self {
+        Self { words, ..self }
     }
 
     /// Where thread `t` goes in this view; `None` when there is no such

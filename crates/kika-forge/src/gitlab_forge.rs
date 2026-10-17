@@ -1,6 +1,6 @@
 //! The GitLab forge adapter: badges, the review (queues, detail and
-//! discussion) and submitting a pending review, through `glab`, and
-//! nothing else yet.
+//! discussion), submitting a pending review, and replying, resolving and
+//! commenting, through `glab`, and nothing else yet.
 
 use crate::cache::Cached;
 use crate::cli::{CliStatus, CliVersion, judge};
@@ -20,8 +20,13 @@ use kika_git::commit_files::CommitId;
 pub struct GitLabForge<'a>(pub(crate) Glab<'a>);
 
 impl GitLabForge<'_> {
-    /// What GitLab can be asked so far.
-    pub const SUPPORTS: &'static [Capability] = &[Capability::Badges, Capability::Review];
+    /// What GitLab can be asked so far: merging, creating and viewed
+    /// marks are not on it.
+    pub const SUPPORTS: &'static [Capability] = &[
+        Capability::Badges,
+        Capability::Review,
+        Capability::DiscussionWrite,
+    ];
 
     /// How GitLab is named to the user: merge requests, numbered `!N`.
     pub const WORDS: Words = Words {
@@ -31,6 +36,7 @@ impl GitLabForge<'_> {
         requests: "merge requests",
         short: "MR",
         sign: '!',
+        host_key: "gitlab_ask",
     };
 
     /// The kinds of review GitLab takes: an approval, or comments alone.
@@ -98,10 +104,8 @@ impl Forge for GitLabForge<'_> {
         Err(CreateError::Unsupported(Self::lacks(Capability::Viewed)))
     }
 
-    /// Only a whole review can be submitted so far, as draft notes
-    /// published together; a reply, a resolve or a comment answers
-    /// [`Unsupported`] without a call. `DiscussionWrite` stays off
-    /// [`Self::SUPPORTS`] until they can.
+    /// A whole review goes as draft notes published together; a reply, a
+    /// resolve or a comment is one GraphQL note mutation.
     fn write_discussion(&self, write: &DiscussionWrite) -> Result<Written, CreateError> {
         match write {
             DiscussionWrite::SubmitReview {
@@ -113,9 +117,7 @@ impl Forge for GitLabForge<'_> {
             } => self.0.submit_review(pull, commit, *event, body, threads),
             DiscussionWrite::Reply { .. }
             | DiscussionWrite::Resolve { .. }
-            | DiscussionWrite::Comment { .. } => Err(CreateError::Unsupported(Self::lacks(
-                Capability::DiscussionWrite,
-            ))),
+            | DiscussionWrite::Comment { .. } => self.0.write_note(write),
         }
     }
 
@@ -153,7 +155,7 @@ mod tests {
     }
 
     #[test]
-    fn every_method_but_badges_and_the_review_reads_is_unsupported_without_a_call() {
+    fn merging_creating_and_viewed_marks_are_unsupported_without_a_call() {
         let runner = FakeGlab::new();
         let sink = CommandSink::new();
         let host = ForgeHost::parse("gitlab.example.com")
@@ -172,10 +174,6 @@ mod tests {
         };
         let created = |capability| CreateError::Unsupported(lacks(capability));
         let head = CommitId::parse(&"a".repeat(40)).unwrap();
-        let write = DiscussionWrite::Comment {
-            subject: "MR_1".into(),
-            body: "Thanks".into(),
-        };
 
         assert_eq!(forge.kind(), ForgeKind::GitLab);
         assert_eq!(
@@ -194,29 +192,72 @@ mod tests {
             forge.set_file_viewed("MR_1", "src/a.rs", true).unwrap_err(),
             created(Capability::Viewed)
         );
-        let reply = DiscussionWrite::Reply {
-            thread: "gid://gitlab/Discussion/1".into(),
-            body: "Thanks".into(),
-        };
-        let resolve = DiscussionWrite::Resolve {
-            thread: "gid://gitlab/Discussion/1".into(),
-            resolved: true,
-        };
-        for write in [write, reply, resolve] {
-            assert_eq!(
-                forge.write_discussion(&write).unwrap_err(),
-                created(Capability::DiscussionWrite),
-                "{write:?}"
-            );
-        }
         assert!(runner.calls().is_empty());
         // Each one is a capability the adapter does not list.
         for capability in Capability::ALL {
             assert_eq!(
                 GitLabForge::SUPPORTS.contains(&capability),
-                matches!(capability, Capability::Badges | Capability::Review)
+                matches!(
+                    capability,
+                    Capability::Badges | Capability::Review | Capability::DiscussionWrite
+                )
             );
         }
+    }
+
+    #[test]
+    fn replies_resolves_and_comments_go_through_glab() {
+        use crate::github::answer;
+        use crate::gitlab_discussion_write::fixtures::{NOTE_CREATED, RESOLVED};
+        let runner = FakeGlab::new()
+            .reply(answer(NOTE_CREATED))
+            .reply(answer(RESOLVED))
+            .reply(answer(NOTE_CREATED));
+        let sink = CommandSink::new();
+        let host = ForgeHost::parse_gitlab("gitlab.example.com").unwrap();
+        let forge = GitLabForge(Glab {
+            runner: &runner,
+            sink: &sink,
+            host: &host,
+            cwd: "/cache".into(),
+            now: 0,
+        });
+        let mr = "gid://gitlab/MergeRequest/4242";
+        let thread = "gid://gitlab/Discussion/1";
+        let writes = [
+            (
+                DiscussionWrite::Reply {
+                    thread: thread.into(),
+                    subject: mr.into(),
+                    body: "Thanks".into(),
+                },
+                Written::Posted,
+            ),
+            (
+                DiscussionWrite::Resolve {
+                    thread: thread.into(),
+                    resolved: true,
+                },
+                Written::Resolved(true),
+            ),
+            (
+                DiscussionWrite::Comment {
+                    subject: mr.into(),
+                    body: "Thanks".into(),
+                },
+                Written::Posted,
+            ),
+        ];
+        for (write, want) in writes {
+            assert_eq!(forge.write_discussion(&write), Ok(want), "{write:?}");
+        }
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 3);
+        assert!(
+            calls
+                .iter()
+                .all(|c| matches!(c.kind, crate::gitlab::GlabCall::Graphql { .. }))
+        );
     }
 
     #[test]
@@ -243,8 +284,6 @@ mod tests {
         };
         assert_eq!(forge.write_discussion(&write), Ok(Written::Posted));
         assert_eq!(runner.calls().len(), 2);
-        // Still off the list until replies and resolves can be written.
-        assert!(!GitLabForge::SUPPORTS.contains(&Capability::DiscussionWrite));
     }
 
     #[test]

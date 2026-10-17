@@ -944,6 +944,7 @@ mod tests {
         };
         let reply = DiscussionWrite::Reply {
             thread: "PRRT_kwDOA1".into(),
+            subject: "PR_kwDOA1".into(),
             body: "Done".into(),
         };
         let send = |host: ForgeHost| Effect::WriteDiscussion {

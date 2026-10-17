@@ -486,7 +486,13 @@ gitlab_ask = ["gitlab.example.com"]
   limited · until HH:MM UTC` or `GitLab: rate limit over · fetch to retry`.
   `B` during a rate limit says `GitLab is rate limited; refresh after the
   limit resets`.
-- Review mode, creating and merging are GitHub only. On a GitLab host
+- Review mode works on a `gitlab_ask` host too: the queues, a merge
+  request's detail, files and threads, submitting a pending review,
+  replying to a discussion (`a`), resolving or unresolving it (`R`), a
+  comment on the merge request (`a` on the conversation) and code
+  suggestions, written in GitLab's `suggestion:-N+0` form (at most 101
+  lines). Viewed marks are not available on GitLab. Merging, checking out
+  and creating are GitHub only so far. On a GitLab host
   **Create pull request…** is off and says so, and the page `o` opens stays
   the filtered list of merge requests.
 
@@ -1259,7 +1265,7 @@ means a repository's `.kika.toml` cannot change it.
 | `workspace.worktrees` | `W` | Show worktrees, to switch to, add or remove one | |
 | `workspace.command_log` | `@` | Show the git commands Kika ran | |
 | `workspace.recent` | `O` | Show recent repositories, to switch to one | |
-| `workspace.review` | `G` | Review this repository's pull requests on GitHub | locked |
+| `workspace.review` | `G` | Review this repository's pull or merge requests on the forge | locked |
 | `workspace.focus_status` | `1` | Focus the Status panel | |
 | `workspace.focus_files` | `2` | Focus the Files panel | |
 | `workspace.focus_branches` | `3` | Focus the Branches panel | |
@@ -2130,7 +2136,7 @@ GitHub and cannot be undone, so `enter` does not answer it.
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
-| `merge_pr.yes` | `y` | Yes, merge the pull request on GitHub | locked |
+| `merge_pr.yes` | `y` | Yes, merge the request on the forge | locked |
 | `merge_pr.no` | `n`, `esc` | No, merge nothing | locked |
 | `merge_pr.quit` | `ctrl-c` | Quit Kika | locked |
 
@@ -2153,7 +2159,7 @@ where it was. Uncommitted changes come along, or git refuses.
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
-| `checkout_pr.yes` | `y` | Yes, check out the pull request's branch | locked |
+| `checkout_pr.yes` | `y` | Yes, check out the pull or merge request's branch | locked |
 | `checkout_pr.no` | `n`, `esc` | No, check out nothing | locked |
 | `checkout_pr.quit` | `ctrl-c` | Quit Kika | locked |
 
@@ -2171,22 +2177,22 @@ where it was. Uncommitted changes come along, or git refuses.
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
-| `review.next` | `j`, `down` | Select the next pull request or file, or scroll the open one down | |
-| `review.prev` | `k`, `up` | Select the previous pull request or file, or scroll the open one up | |
-| `review.open` | `enter` | Open the selected pull request | locked |
+| `review.next` | `j`, `down` | Select the next pull or merge request or file, or scroll the open one down | |
+| `review.prev` | `k`, `up` | Select the previous pull or merge request or file, or scroll the open one up | |
+| `review.open` | `enter` | Open the selected pull or merge request | locked |
 | `review.next_queue` | `tab` | Show the next queue | |
 | `review.prev_queue` | `shift-tab` | Show the previous queue | |
 | `review.filter` | `/` | Filter the queue by number, title or author | |
-| `review.refresh` | `r` | Ask GitHub again for the queues or the open pull request | locked |
+| `review.refresh` | `r` | Ask the forge again for the queues or the open request | locked |
 | `review.open_check` | `o` | Open a failing check's page in the browser | locked |
-| `review.back` | `esc` | Back to the pull request from its files or conversation, else to the queue; in the queue, clear the filter, else back to the workspace | locked |
-| `review.files` | `f` | Show the pull request's changed files and diff, fetching its commits once if they are not here | locked |
-| `review.merge` | `M` | Merge the open pull request on GitHub, after a question only y answers | locked |
-| `review.checkout` | `b` | Check out the open pull request as branch pr/<number> and go to the workspace, after a question only y answers | locked |
-| `review.conversation` | `C` | Show the pull request's conversation: its comments and review bodies, oldest first | |
-| `review.comment_general` | `a` | Write a comment on the pull request, posted to GitHub after a question only y answers | locked |
-| `review.page_down` | `pgdn` | Scroll the pull request or its conversation down a page | |
-| `review.page_up` | `pgup` | Scroll the pull request or its conversation up a page | |
+| `review.back` | `esc` | Back to the pull or merge request from its files or conversation, else to the queue; in the queue, clear the filter, else back to the workspace | locked |
+| `review.files` | `f` | Show the pull or merge request's changed files and diff, fetching its commits once if they are not here | locked |
+| `review.merge` | `M` | Merge the open pull or merge request on the forge, after a question only y answers | locked |
+| `review.checkout` | `b` | Check out the open pull or merge request as branch pr/<number> and go to the workspace, after a question only y answers | locked |
+| `review.conversation` | `C` | Show the pull or merge request's conversation: its comments and review bodies, oldest first | |
+| `review.comment_general` | `a` | Write a comment on the pull or merge request, posted to the forge after a question only y answers | locked |
+| `review.page_down` | `pgdn` | Scroll the pull or merge request or its conversation down a page | |
+| `review.page_up` | `pgup` | Scroll the pull or merge request or its conversation up a page | |
 
 ### Review files (one pull request's changed files and diff)
 
@@ -2201,15 +2207,15 @@ lines changed still read `outdated`.
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
 | `review_files.focus` | `tab` | Move the keys between the file list and the diff | |
-| `review_files.viewed` | `v` | Mark the selected file viewed on GitHub, or not viewed if it is | locked |
-| `review_files.commit` | `c` | Review the whole pull request or one of its commits | |
+| `review_files.viewed` | `v` | Mark the selected file viewed on the forge, or not viewed if it is | locked |
+| `review_files.commit` | `c` | Review the whole pull or merge request or one of its commits | |
 | `review_files.next_thread` | `]` | Go to the next unresolved review thread | |
 | `review_files.prev_thread` | `[` | Go to the previous unresolved review thread | |
 | `review_files.thread` | `enter` | Read the selected review thread, or the file's first, with every comment in full | |
-| `review_files.open_line` | `o` | Open the selected thread's line, else the top line, on GitHub's pull request page | locked |
+| `review_files.open_line` | `o` | Open the selected thread's line, else the top line, on the pull or merge request's page in the browser | locked |
 | `review_files.comment` | `a` | Pick a diff line or range and write a comment on it, kept in the pending review | |
 | `review_files.pending` | `P` | List the pending review's comments, to edit or delete them | |
-| `review_files.submit` | `S` | Submit the pending review to GitHub: approve, request changes or comment, with a summary | locked |
+| `review_files.submit` | `S` | Submit the pending review to the forge: approve, comment, or request changes where the forge takes it, with a summary | locked |
 | `review_diff.down` | `j`, `down` | Scroll the diff down a line | |
 | `review_diff.up` | `k`, `up` | Scroll the diff up a line | |
 | `review_diff.page_down` | `pgdn` | Scroll the diff down a page | |
@@ -2231,8 +2237,8 @@ lines changed still read `outdated`.
 | `review_thread.page_up` | `pgup` | Scroll the thread up a page | |
 | `review_thread.next` | `]` | Read the file's next review thread, resolved ones included | |
 | `review_thread.prev` | `[` | Read the file's previous review thread, resolved ones included | |
-| `review_thread.reply` | `a` | Write a reply to the thread, posted to GitHub after a question only y answers | locked |
-| `review_thread.resolve` | `R` | Resolve the thread on GitHub, or unresolve it if it is resolved | locked |
+| `review_thread.reply` | `a` | Write a reply to the thread, posted to the forge after a question only y answers | locked |
+| `review_thread.resolve` | `R` | Resolve the thread on the forge, or unresolve it if it is resolved | locked |
 | `review_thread.close` | `esc` | Close the thread and go back to the files | |
 | `review_thread.quit` | `ctrl-c` | Quit Kika | locked |
 
@@ -2274,7 +2280,7 @@ counts as `ctrl-s`.
 | `review_pending.up` | `k`, `up` | Select the previous pending comment | |
 | `review_pending.edit` | `enter`, `e` | Edit the selected comment | |
 | `review_pending.delete` | `d` | Delete the selected comment, after a question only y answers | |
-| `review_pending.submit` | `S` | Submit the pending review to GitHub: approve, request changes or comment, with a summary | locked |
+| `review_pending.submit` | `S` | Submit the pending review to the forge: approve, comment, or request changes where the forge takes it, with a summary | locked |
 | `review_pending.close` | `esc` | Close the list | |
 | `review_pending.quit` | `ctrl-c` | Quit Kika | locked |
 
@@ -2284,7 +2290,7 @@ The comment is lost, so `enter` does not answer it.
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
-| `review_comment_confirm.yes` | `y` | Yes: delete or discard the comment, or post it to GitHub | locked |
+| `review_comment_confirm.yes` | `y` | Yes: delete or discard the comment, or post it to the forge | locked |
 | `review_comment_confirm.no` | `n`, `esc` | No, keep the comment | locked |
 | `review_comment_confirm.quit` | `ctrl-c` | Quit Kika | locked |
 
