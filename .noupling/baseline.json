@@ -1,7 +1,7 @@
 {
   "version": 3,
-  "timestamp": "1791990758",
-  "issue_count": 12,
+  "timestamp": "1792212231",
+  "issue_count": 13,
   "fingerprints": [
     "coupling_violation:src/e2e -> src/features",
     "zone_flag:src",
@@ -14,6 +14,7 @@
     "low_cohesion:src/features/commits/custom_patch",
     "low_cohesion:src/features/commits/rewrite",
     "low_cohesion:src/features/operation",
-    "low_cohesion:src/features/repos"
+    "low_cohesion:src/features/repos",
+    "low_cohesion:tests"
   ]
 }
