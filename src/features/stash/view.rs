@@ -93,10 +93,9 @@ pub(crate) fn render_stash_panel(
     let paragraph = match &stash.list.error {
         Some(error) => error_paragraph(error, Some("Press r to retry")),
         None if stash.list.rows.is_empty() && !stash.list.loaded => Paragraph::new("Loading…"),
-        None if stash.list.rows.is_empty() => Paragraph::new(Line::styled(
-            "No stashes",
-            Style::new().fg(look.palette.dim),
-        )),
+        None if stash.list.rows.is_empty() => {
+            Paragraph::new(Line::styled("No stashes", look.palette.dim_style()))
+        }
         None if !expanded => Paragraph::new(entry_line(&look.palette, &stash.list.rows[0], width)),
         None => {
             let shown = stash.list.visible();
@@ -160,7 +159,7 @@ fn render_stash_files(open: &StashFilesList, look: &PanelLook, frame: &mut Frame
         Some(error) => error_paragraph(error, None),
         None if list.rows.is_empty() => Paragraph::new(Line::styled(
             "No files in this stash",
-            Style::new().fg(look.palette.dim),
+            look.palette.dim_style(),
         )),
         None => {
             let start = files_start(list.selected, height);

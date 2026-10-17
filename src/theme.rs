@@ -6,7 +6,7 @@
 //! `AppState`; only this module names terminal colours. Colour is an extra
 //! signal only: symbols and text carry the meaning in every palette.
 
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier, Style};
 use serde::Deserialize;
 
 /// One colour per semantic role. Some roles share a colour today
@@ -397,6 +397,13 @@ pub(crate) fn no_color(value: Option<&std::ffi::OsStr>) -> bool {
     value.is_some_and(|v| !v.is_empty())
 }
 
+/// Whether a role draws in the terminal's own colour, so it marks nothing
+/// by colour and a view must mark it some other way. `const`, since `==` on
+/// `Color` is not.
+pub(crate) const fn is_reset(colour: Color) -> bool {
+    matches!(colour, Color::Reset)
+}
+
 /// The palette a session starts with: `NO_COLOR` wins over the configured
 /// theme and its colour overrides.
 pub(crate) fn startup_palette(configured: Palette, no_color: bool) -> Palette {
@@ -404,6 +411,20 @@ pub(crate) fn startup_palette(configured: Palette, no_color: bool) -> Palette {
         Palette::NO_COLOR
     } else {
         configured
+    }
+}
+
+impl Palette {
+    /// The style for `dim` text. With no colour left (`dim` is the
+    /// terminal's own colour), the terminal's dim style is the only way to
+    /// keep hints and unfocused borders below normal text.
+    pub(crate) const fn dim_style(&self) -> Style {
+        let style = Style::new().fg(self.dim);
+        if is_reset(self.dim) {
+            style.add_modifier(Modifier::DIM)
+        } else {
+            style
+        }
     }
 }
 
@@ -417,6 +438,27 @@ impl Default for Palette {
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn under_no_color_the_dim_style_adds_the_terminals_dim() {
+        let style = Palette::NO_COLOR.dim_style();
+        assert_eq!(style.fg, Some(Color::Reset));
+        assert_eq!(style.add_modifier, Modifier::DIM);
+    }
+
+    #[test]
+    fn a_coloured_dim_role_keeps_its_colour_and_no_modifier() {
+        for p in [Palette::DEFAULT, Palette::LIGHT, Palette::HIGH_CONTRAST] {
+            assert_eq!(p.dim_style(), Style::new().fg(p.dim));
+        }
+    }
+
+    #[test]
+    fn a_dim_role_set_to_reset_alone_also_gets_the_terminals_dim() {
+        let mut p = Palette::DEFAULT;
+        p.dim = Color::Reset;
+        assert_eq!(p.dim_style().add_modifier, Modifier::DIM);
+    }
 
     #[test]
     fn no_color_is_set_only_by_a_non_empty_value() {
