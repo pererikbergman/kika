@@ -2176,4 +2176,74 @@ pub(crate) mod tests {
         let other = ForgeHost::parse("github.example.com").unwrap();
         assert_eq!(limited_until(&limited, &other, NOW), None);
     }
+
+    fn nested_lab() -> (ForgeHost, ForgeRepo) {
+        let host = ForgeHost::parse_gitlab("gitlab.example.com").unwrap();
+        let repo = ForgeRepo {
+            host: "gitlab.example.com".into(),
+            owner: "acme/sub".into(),
+            name: "widgets".into(),
+        };
+        (host, repo)
+    }
+
+    #[test]
+    fn a_nested_gitlab_remote_resolves_and_an_allow_entry_for_its_top_group_covers_it() {
+        let (host, nested) = nested_lab();
+        let git = origin(b"https://gitlab.example.com/acme/sub/widgets");
+        assert_eq!(
+            resolve(&git, std::slice::from_ref(&host), None),
+            Some((host.clone(), nested.clone()))
+        );
+        git.assert_done();
+
+        let rule = |text: &str| crate::allow::AllowRule::parse(text).unwrap();
+        let listed = [host.clone().with_allow(vec![rule("acme")])];
+        let git = origin(b"https://gitlab.example.com/acme/sub/widgets");
+        assert_eq!(
+            resolve(&git, &listed, None),
+            Some((listed[0].clone(), nested.clone()))
+        );
+        let other = [host.with_allow(vec![rule("other")])];
+        assert_eq!(
+            resolve(&kika_git::fake::FakeRunner::new(), &other, Some(&nested)),
+            None
+        );
+    }
+
+    #[test]
+    fn commits_of_a_nested_gitlab_project_are_fetched_only_from_its_own_remote() {
+        let (host, nested) = nested_lab();
+        let hosts = [host];
+        let git = remote_named("origin", b"https://gitlab.example.com/acme/sub/widgets");
+        assert_eq!(
+            fetch_remote(&git, &hosts, &nested),
+            Some(RemoteName::from("origin"))
+        );
+        git.assert_done();
+        for url in [
+            &b"https://gitlab.example.com/acme/other/widgets"[..],
+            b"https://gitlab.example.com/acme/widgets",
+            b"https://gitlab.example.com/acme/sub/sub/widgets",
+        ] {
+            let git = remote_named("origin", url);
+            assert_eq!(fetch_remote(&git, &hosts, &nested), None, "{url:?}");
+        }
+    }
+
+    #[test]
+    fn github_stays_two_parts_a_nested_remote_or_owner_asks_nobody() {
+        let git = origin(b"https://github.com/a/b/c");
+        assert_eq!(resolve(&git, &[host()], None), None);
+
+        let runner = FakeGh::new();
+        let nested = ForgeRepo {
+            owner: "a/b".into(),
+            name: "c".into(),
+            ..repo()
+        };
+        let result = gh(&runner, &CommandSink::new(), &host()).fetch_queues(&nested);
+        assert_eq!(result, Err(Refusal::Status(ForgeStatus::Failed)));
+        assert_eq!(runner.calls(), []);
+    }
 }
