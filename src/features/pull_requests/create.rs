@@ -559,7 +559,7 @@ impl AppState {
                 self.push_error(ErrorPopup::new(
                     "Could not create the pull request",
                     &error.message(),
-                    "Press Esc to close",
+                    "",
                 ));
                 vec![]
             }
