@@ -137,6 +137,13 @@ pub enum AppIntent {
         op: GitOp,
         result: Result<(), String>,
     },
+    /// A Git operation was refused before git ran, so nothing changed and
+    /// there is nothing to resolve.
+    OpRefused {
+        tag: Tag,
+        op: GitOp,
+        reason: String,
+    },
 
     // --- core: watch and refresh ---
     /// Time to look for changes made outside Kika.

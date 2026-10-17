@@ -164,6 +164,20 @@ impl PatchError {
     }
 }
 
+impl PatchError {
+    /// The sentence for a commit's change, where the Files panel cannot help: these
+    /// files are refused by the custom patch, not staged elsewhere.
+    pub fn in_commit_message(self) -> &'static str {
+        match self {
+            PatchError::Binary => "Binary file: it cannot go into the custom patch",
+            PatchError::Renamed => "Renamed file: it cannot go into the custom patch",
+            PatchError::Copied => "Copied file: it cannot go into the custom patch",
+            PatchError::Unsupported => "This change cannot go into the custom patch",
+            other => other.message(),
+        }
+    }
+}
+
 impl fmt::Display for PatchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.message())
@@ -1048,6 +1062,30 @@ mod tests {
         assert_eq!(
             PatchError::Renamed.to_string(),
             "Renamed file: stage it from the Files panel"
+        );
+    }
+
+    #[test]
+    fn a_commits_change_names_the_custom_patch_not_the_files_panel() {
+        assert_eq!(
+            PatchError::Binary.in_commit_message(),
+            "Binary file: it cannot go into the custom patch"
+        );
+        assert_eq!(
+            PatchError::Renamed.in_commit_message(),
+            "Renamed file: it cannot go into the custom patch"
+        );
+        assert_eq!(
+            PatchError::Copied.in_commit_message(),
+            "Copied file: it cannot go into the custom patch"
+        );
+        assert_eq!(
+            PatchError::Unsupported.in_commit_message(),
+            "This change cannot go into the custom patch"
+        );
+        assert_eq!(
+            PatchError::NoSuchHunk.in_commit_message(),
+            PatchError::NoSuchHunk.message()
         );
     }
 

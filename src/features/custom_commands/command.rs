@@ -163,9 +163,13 @@ impl CustomCommand {
                 if let Part::Prompt(k) = part
                     && *k > table.prompts.len()
                 {
+                    let have = match table.prompts.len() {
+                        0 => "there are no prompts".to_string(),
+                        1 => "there is only 1 prompt".to_string(),
+                        n => format!("there are only {n} prompts"),
+                    };
                     return Err(fail(format!(
-                        "\"{{prompt{k}}}\" in \"{element}\" but there are only {} prompts",
-                        table.prompts.len()
+                        "\"{{prompt{k}}}\" in \"{element}\" but {have}"
                     )));
                 }
                 if !table.context.allows(part) {
@@ -689,7 +693,15 @@ mod tests {
     fn a_prompt_must_exist() {
         assert_eq!(
             error(Panel::Files, &["echo", "{prompt1}", "{prompt2}"], &["One"]),
-            r#"command 2: "{prompt2}" in "{prompt2}" but there are only 1 prompts"#
+            r#"command 2: "{prompt2}" in "{prompt2}" but there is only 1 prompt"#
+        );
+        assert_eq!(
+            error(Panel::Files, &["echo", "{prompt1}"], &[]),
+            r#"command 2: "{prompt1}" in "{prompt1}" but there are no prompts"#
+        );
+        assert_eq!(
+            error(Panel::Files, &["echo", "{prompt3}"], &["One", "Two"]),
+            r#"command 2: "{prompt3}" in "{prompt3}" but there are only 2 prompts"#
         );
         assert!(
             parse(

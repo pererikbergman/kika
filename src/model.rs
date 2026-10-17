@@ -542,6 +542,7 @@ impl AppState {
             }
             AppIntent::Discard => self.ask_discard(),
             AppIntent::OpFinished { tag, op, result } => return self.op_finished(tag, op, result),
+            AppIntent::OpRefused { tag, op, reason } => return self.op_refused(tag, op, &reason),
             AppIntent::OpenMenu(id) => {
                 if self.context == Context::Workspace {
                     self.popups.push(Popup::Menu { id, cursor: 0 });
@@ -4202,6 +4203,109 @@ mod tests {
             assert_eq!(failure_title(&op), title, "{op:?}");
             assert_eq!(failure_next(&op), next, "{op:?}");
         }
+    }
+
+    #[test]
+    fn a_failed_tag_or_remote_op_says_which_list_was_reloaded() {
+        let tags = "The tag list was reloaded. Fix the cause above, then try again.";
+        let remotes = "The remote list was reloaded. Fix the cause above, then try again.";
+        let cases = [
+            (
+                GitOp::CreateTag {
+                    name: "v1".into(),
+                    target: cid("c1"),
+                    message: None,
+                },
+                tags,
+            ),
+            (
+                GitOp::DeleteTag {
+                    name: "v1".into(),
+                    oid: "aaaa".into(),
+                },
+                tags,
+            ),
+            (GitOp::DeleteTags(vec![("v1".into(), "aaaa".into())]), tags),
+            (
+                GitOp::AddRemote {
+                    name: "fork".into(),
+                    url: "u".into(),
+                },
+                remotes,
+            ),
+            (
+                GitOp::RenameRemote {
+                    from: "fork".into(),
+                    to: "mine".into(),
+                },
+                remotes,
+            ),
+            (GitOp::RemoveRemote("fork".into()), remotes),
+            (GitOp::RemoveRemotes(vec!["fork".into()]), remotes),
+        ];
+        for (op, next) in cases {
+            assert_eq!(failure_next(&op), next, "{op:?}");
+            let mut state = AppState::new(Context::Workspace);
+            let (tag, op) = op_of(&state.start_op(Ok(Some(op))));
+            state.update(finished(tag, op.clone(), Err("fatal: no".into())));
+            assert_eq!(state.held_seq(), None, "{op:?}");
+            match state.popups.as_slice() {
+                [Popup::Error(error)] => assert_eq!(error.next, next, "{op:?}"),
+                other => panic!("{op:?}: expected an error popup, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_pick_refused_before_git_ran_frees_the_slot_and_says_nothing_changed() {
+        let mut state = AppState::new(Context::Workspace);
+        let pick = GitOp::CherryPick(vec![cid(&"a".repeat(40))]);
+        let (tag, op) = op_of(&state.start_op(Ok(Some(pick))));
+
+        let effects = state.update(AppIntent::OpRefused {
+            tag,
+            op,
+            reason: "aaaaaaa is already on the current branch".into(),
+        });
+
+        assert_eq!(effects, vec![], "nothing changed, so nothing reloads");
+        assert_eq!(state.held_seq(), None);
+        assert!(!state.is_busy());
+        match state.popups.as_slice() {
+            [Popup::Error(error)] => {
+                assert_eq!(error.title, "Could not cherry-pick");
+                assert!(
+                    error
+                        .message
+                        .contains("aaaaaaa is already on the current branch"),
+                    "{error:?}"
+                );
+                assert_eq!(
+                    error.next,
+                    "Nothing was changed. Fix the cause above, then try again."
+                );
+                assert!(!error.next.contains("conflicts"), "{error:?}");
+            }
+            other => panic!("expected an error popup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_stale_refusal_frees_the_slot_and_shows_nothing() {
+        let mut state = AppState::new(Context::Workspace);
+        let pick = GitOp::CherryPick(vec![cid(&"a".repeat(40))]);
+        let (tag, op) = op_of(&state.start_op(Ok(Some(pick))));
+        state.generation += 1;
+
+        let effects = state.update(AppIntent::OpRefused {
+            tag,
+            op,
+            reason: "aaaaaaa is already on the current branch".into(),
+        });
+
+        assert_eq!(effects, vec![]);
+        assert_eq!(state.held_seq(), None);
+        assert_eq!(state.popups, vec![]);
     }
 
     // --- Re-checking the guards when a move question is answered ---

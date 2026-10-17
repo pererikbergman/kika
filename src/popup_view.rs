@@ -1020,6 +1020,33 @@ mod tests {
     }
 
     #[test]
+    fn the_delete_questions_bar_offers_only_the_key_that_answers() {
+        use crate::features::branches::delete_branch_question;
+        use crate::op::GitOp;
+
+        let delete = |force| GitOp::DeleteBranch {
+            name: "wip".into(),
+            force,
+        };
+        let mut state = workspace(&["a.rs"]);
+        state.popups = vec![Popup::Question(delete_branch_question(
+            "wip".into(),
+            delete(true),
+        ))];
+        let (_, rows) = draw(&state, 80, 12);
+        assert!(rows[11].starts_with(" D force delete  n keep"), "{rows:#?}");
+        assert!(!rows[11].contains("y delete"), "{rows:#?}");
+
+        state.popups = vec![Popup::Question(delete_branch_question(
+            "wip".into(),
+            delete(false),
+        ))];
+        let (_, rows) = draw(&state, 80, 12);
+        assert!(rows[11].starts_with(" y delete  n keep"), "{rows:#?}");
+        assert!(!rows[11].contains("force delete"), "{rows:#?}");
+    }
+
+    #[test]
     fn the_abort_question_wraps_whole_inside_a_narrow_terminal() {
         use kika_git::repo_state::Operation;
 
@@ -2061,7 +2088,7 @@ mod tests {
         assert!(reversed(&buffer, find(&rows, "libs/ok")), "{rows:#?}");
         assert!(!reversed(&buffer, find(&rows, "libs/new")), "{rows:#?}");
         assert!(
-            rows[23].starts_with(" enter enter  u update  i init  esc close  ctrl-c quit"),
+            rows[23].starts_with(" enter open  u update  i init  esc close  ctrl-c quit"),
             "{rows:#?}"
         );
     }

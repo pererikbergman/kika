@@ -361,6 +361,14 @@ impl GitOp {
     }
 }
 
+/// `Merge branch '<name>'`, built from the name's raw bytes.
+fn merge_message(branch: &BranchName) -> std::ffi::OsString {
+    let mut bytes = b"Merge branch '".to_vec();
+    bytes.extend(&branch.0);
+    bytes.push(b'\'');
+    kika_git::path::os_string(&bytes)
+}
+
 /// The command for `op`. Unlike reads, these need `index.lock`, so most
 /// run with [`EnvProfile::Write`](kika_git::runner::EnvProfile::Write):
 /// no `GIT_OPTIONAL_LOCKS=0`, and file names from the repo read literally,
@@ -474,15 +482,19 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         // ref, so a name like an option, or one a tag shadows, stays this
         // branch.
         GitOp::Merge { branch, strategy } => {
-            let flag = match strategy {
-                MergeStrategy::FastForwardOnly => "--ff-only",
-                MergeStrategy::NoFastForward => "--no-ff",
-                MergeStrategy::Squash => "--squash",
+            let cmd = match strategy {
+                MergeStrategy::FastForwardOnly => GitCommand::new("merge").arg("--ff-only"),
+                MergeStrategy::Squash => GitCommand::new("merge").arg("--squash"),
+                // Merging the full ref would make git's default message name
+                // it, so the message names the short branch; `--edit` keeps
+                // the editor open, as git's own message does.
+                MergeStrategy::NoFastForward => GitCommand::new("merge")
+                    .arg("--no-ff")
+                    .arg("--edit")
+                    .arg("-m")
+                    .arg(merge_message(branch)),
             };
-            return GitCommand::new("merge")
-                .arg(flag)
-                .arg(branch.full_ref())
-                .user_env();
+            return cmd.arg(branch.full_ref()).user_env();
         }
         GitOp::Rebase { onto } => {
             return GitCommand::new("rebase").arg(onto.full_ref()).user_env();
@@ -831,9 +843,21 @@ mod tests {
                 merge(MergeStrategy::FastForwardOnly),
                 &["merge", "--ff-only", "refs/heads/feature"],
             ),
+            // The message names the branch by its short name, as git's own
+            // default does, not by the full ref the argv merges.
             (
-                merge(MergeStrategy::NoFastForward),
-                &["merge", "--no-ff", "refs/heads/feature"],
+                GitOp::Merge {
+                    branch: "feature/unmerged".into(),
+                    strategy: MergeStrategy::NoFastForward,
+                },
+                &[
+                    "merge",
+                    "--no-ff",
+                    "--edit",
+                    "-m",
+                    "Merge branch 'feature/unmerged'",
+                    "refs/heads/feature/unmerged",
+                ],
             ),
             (
                 merge(MergeStrategy::Squash),
@@ -845,7 +869,14 @@ mod tests {
                     branch: "-x".into(),
                     strategy: MergeStrategy::NoFastForward,
                 },
-                &["merge", "--no-ff", "refs/heads/-x"],
+                &[
+                    "merge",
+                    "--no-ff",
+                    "--edit",
+                    "-m",
+                    "Merge branch '-x'",
+                    "refs/heads/-x",
+                ],
             ),
             (
                 GitOp::Rebase {
@@ -1253,7 +1284,17 @@ mod tests {
                 .to_vec(),
             stderr: b"Automatic merge failed\n".to_vec(),
         };
-        let runner = FakeRunner::new().expect(&["merge", "--no-ff", "refs/heads/feature"], output);
+        let runner = FakeRunner::new().expect(
+            &[
+                "merge",
+                "--no-ff",
+                "--edit",
+                "-m",
+                "Merge branch 'feature'",
+                "refs/heads/feature",
+            ],
+            output,
+        );
 
         let error = run_op(&runner, &op).unwrap_err();
 

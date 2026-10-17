@@ -139,7 +139,8 @@ pub fn build(runner: &dyn GitRunner, picks: &CustomPatch) -> Result<Vec<u8>, Str
             &diff_command(picks, path),
             kika_git::diff::DiffSide::Index,
         )?;
-        let file = patch::parse(&stdout).map_err(|e| format!("{}: {e}", path.display()))?;
+        let file = patch::parse(&stdout)
+            .map_err(|e| format!("{}: {}", path.display(), e.in_commit_message()))?;
         let all: BTreeSet<_> = file
             .hunks
             .iter()
@@ -156,7 +157,7 @@ pub fn build(runner: &dyn GitRunner, picks: &CustomPatch) -> Result<Vec<u8>, Str
             &PatchSelection::Lines(lines.clone()),
             Direction::Stage,
         )
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+        .map_err(|e| format!("{}: {}", path.display(), e.in_commit_message()))?;
         // The whole change goes as git wrote it, with its `new file`,
         // `deleted file` and mode lines, which `git apply` needs to add or
         // delete the file and the engine leaves out.
@@ -883,6 +884,8 @@ mod tests {
             .expect(&strs(&diff), ok(binary));
         let error = run_with(&refused, &plan, &PatchAction::Remove).unwrap_err();
         assert!(error.contains("Binary file"), "{error}");
+        assert!(error.contains("cannot go into the custom patch"), "{error}");
+        assert!(!error.contains("Files panel"), "{error}");
         refused.assert_done();
     }
 }

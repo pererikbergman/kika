@@ -121,7 +121,7 @@ pub(crate) static SUBMODULES_KEYS: &[Binding] = &[
         scope: KeyScope::Submodules,
         intent: AppIntent::Submodules(SubmodulesIntent::Enter),
         description: "Work in the selected submodule",
-        label: "enter",
+        label: "open",
         bar: true,
         disabled: enter_submodule_disabled,
     },
@@ -248,6 +248,31 @@ mod tests {
         ] {
             assert_eq!(run(k), None, "{k:?}");
         }
+    }
+
+    #[test]
+    fn the_submodule_bar_says_enter_open() {
+        use crate::features::submodules::SubmoduleList;
+        use crate::popup::Popup;
+        use kika_git::submodule::{Submodule, SubmoduleState};
+
+        let mut state = AppState::new(Context::Workspace);
+        let mut list = SubmoduleList::loading(0);
+        crate::test_support::load_list(
+            &mut list.list,
+            Ok(vec![Submodule {
+                path: "sub".into(),
+                oid: "abc".into(),
+                state: SubmoduleState::UpToDate,
+            }]),
+        );
+        state.popups = vec![Popup::Submodules(list)];
+        let rows = crate::test_support::screen::draw(&state, 100, 20);
+        assert!(rows[19].contains("enter open"), "{rows:#?}");
+        assert!(
+            !rows.iter().any(|row| row.contains("enter enter")),
+            "{rows:#?}"
+        );
     }
 
     #[test]
