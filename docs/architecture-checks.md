@@ -1,9 +1,11 @@
 # Architecture checks
 
 CI runs [noupling](https://github.com/pererikbergman/noupling) over Kika's Rust sources
-in the `architecture` job of `.github/workflows/ci.yml`. CI runs it on the self-hosted
-Apple-silicon Mac runner (labels `self-hosted`, `mac`). It runs only in CI and on a
-developer's machine; Kika's binary and `Cargo.toml` do not depend on it.
+in the `architecture` job of `.github/workflows/ci.yml`. Pushes and PRs from
+branches in this repository run it on the self-hosted Apple-silicon Mac runner (labels
+`self-hosted`, `mac`). Fork PRs run it on GitHub-hosted `macos-latest` (see
+`docs/ci.md`). It runs only in CI and on a developer's machine; Kika's binary and
+`Cargo.toml` do not depend on it.
 
 ## What is checked
 
