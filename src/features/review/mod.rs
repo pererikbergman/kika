@@ -129,7 +129,9 @@ pub(crate) use update::update;
 /// The review screens the mouse's tests in core are built on.
 #[cfg(test)]
 pub(crate) mod fixtures {
-    pub(crate) use super::files::tests::large_ready;
-    pub(crate) use super::pending::tests::{comment, commenting, right, with_review};
-    pub(crate) use super::state::tests::{in_detail, in_queues};
+    pub(crate) use crate::features::review::files::tests::large_ready;
+    pub(crate) use crate::features::review::pending::tests::{
+        comment, commenting, right, with_review,
+    };
+    pub(crate) use crate::features::review::state::tests::{in_detail, in_queues};
 }
