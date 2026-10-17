@@ -1,7 +1,8 @@
 //! Keeps `docs/configuration.md` honest: its binding table must list every
 //! binding in the keymap with its default keys and whether a repository
 //! file may change it. A new or re-keyed binding fails here until the page
-//! says so, and the failure prints the row to paste. Its `[theme]` section
+//! says so, and the failure prints the row to paste. The Commit message
+//! rows must also say what the help menu says. Its `[theme]` section
 //! must name every colour role and built-in theme, with each theme's colour
 //! for each role.
 
@@ -9,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crossterm::event::KeyCode;
 
-use crate::keymap::{Binding, KeyPattern, REPO_LOCKED, parse_key, registry};
+use crate::keymap::{Binding, KeyPattern, KeyScope, REPO_LOCKED, parse_key, registry};
 use crate::theme::{self, ColourValue, ROLES, THEMES};
 
 const PAGE: &str = include_str!("../docs/configuration.md");
@@ -140,6 +141,63 @@ fn mismatches(page: &str) -> Vec<String> {
         }
     }
     problems
+}
+
+/// Where the page's Action text differs from the help menu's sentence for a
+/// binding in `scope`. Checked per scope, because a stale Action row tells a
+/// reader the wrong thing even when its keys and lock are right.
+fn action_mismatches(page: &str, scope: KeyScope) -> Vec<String> {
+    let rows = rows(page);
+    registry()
+        .iter()
+        .filter(|binding| binding.scope == scope)
+        .filter_map(|binding| {
+            let row = rows.iter().find(|row| row.id == binding.id)?;
+            (row.action != binding.description).then(|| {
+                format!(
+                    "`{}` action says \"{}\"; use this row:\n{}",
+                    binding.id,
+                    row.action,
+                    expected_row(binding)
+                )
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn the_commit_message_rows_say_what_their_bindings_do() {
+    let problems = action_mismatches(PAGE, KeyScope::CommitEditor);
+    assert!(
+        problems.is_empty(),
+        "docs/configuration.md's Commit message rows differ from the help menu:\n{}",
+        problems.join("\n")
+    );
+}
+
+#[test]
+fn a_stale_commit_message_action_fails_with_the_row_to_paste() {
+    let page = page_in_sync();
+    assert_eq!(
+        action_mismatches(&page, KeyScope::CommitEditor),
+        Vec::<String>::new()
+    );
+    let quit = registry()
+        .iter()
+        .find(|b| b.id == "commit_editor.quit")
+        .unwrap();
+    let stale = page.replace(
+        &expected_row(quit),
+        "| `commit_editor.quit` | `ctrl-c` | Quit Kika, stopping a commit that is running | locked |",
+    );
+    assert_ne!(stale, page);
+    let problems = action_mismatches(&stale, KeyScope::CommitEditor);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].ends_with(&expected_row(quit)),
+        "{}",
+        problems[0]
+    );
 }
 
 #[test]
