@@ -14,6 +14,7 @@ use kika_git::branches::Branch;
 use kika_git::log::LogPage;
 use kika_git::refs::RefsSnapshot;
 use kika_git::remotes::Remote;
+use kika_git::status::Head;
 use kika_git::tags::TagRef;
 
 /// Start a user reload, as `r` does, and return the loads it started.
@@ -196,6 +197,41 @@ fn reflog_a_held_move_moves_over_the_reloaded_rows() {
     state.update(reflog_loaded(tag, reflog));
 
     assert_eq!(state.commits.reflog.list.selected, 1);
+}
+
+#[test]
+fn a_reflog_read_ended_by_an_unborn_head_releases_its_held_keys() {
+    let mut state = undoable();
+    let tag = reflog_load(&press_char(&mut state, ']'));
+    state.update(reflog_loaded(tag, commit_reflog('c')));
+    let loads = refresh(&mut state);
+    let user_read = reflog_load(&loads);
+    press_char(&mut state, 'j');
+    assert!(state.key_hold.has_keys(), "held");
+
+    // HEAD went unborn outside Kika; the watch's reload ends the read
+    // in flight without one to land.
+    state.branch = Some(on_branch("orphan"));
+    if let Some(branch) = &mut state.branch {
+        branch.head = Head::Unborn("orphan".into());
+    }
+    state.reload_commits();
+
+    assert!(!state.key_hold.has_keys(), "replayed on the Reflog tab");
+    assert!(!state.holds_keys(), "nothing left armed");
+    assert_eq!(state.commits.reflog.list.selected, 0);
+    // The user's read is stale now, and the keys typed for the reflog
+    // never reach Branches.
+    state.update(reflog_loaded(user_read, commit_reflog('c')));
+    state.focus = Focus::Branches;
+    let effects = land_branches(&mut state, &loads, three_branches());
+    assert_eq!(ops(&effects), []);
+    press_char(&mut state, 'j');
+    assert_eq!(
+        selected_name(&state),
+        "topic",
+        "a key pressed now acts at once"
+    );
 }
 
 #[test]

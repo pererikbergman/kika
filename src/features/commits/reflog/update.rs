@@ -52,8 +52,10 @@ impl AppState {
             return vec![];
         }
         if self.head_unborn() {
+            // That ends any read in flight: keys held for it replay now,
+            // or they would wait with no load left to land.
             self.commits.reflog.unborn();
-            return vec![];
+            return self.list_landed(HeldList::Reflog, true);
         }
         let seq = self.take_seq();
         self.commits.reflog.list.begin(seq);
