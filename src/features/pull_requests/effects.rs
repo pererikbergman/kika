@@ -40,6 +40,7 @@ pub(crate) fn load(
         None => {
             let _ = tx.send(AppIntent::PullRequests(PullRequestsIntent::RepoNone {
                 tag,
+                several_urls: None,
             }));
         }
         Some(forge) => {
@@ -108,7 +109,9 @@ pub(crate) fn check_clis(
 /// The intent that reports `event` of the load tagged `tag`.
 pub(crate) fn load_intent(tag: Tag, event: LoadEvent) -> AppIntent {
     match event {
-        LoadEvent::RepoNone => AppIntent::PullRequests(PullRequestsIntent::RepoNone { tag }),
+        LoadEvent::RepoNone { several_urls } => {
+            AppIntent::PullRequests(PullRequestsIntent::RepoNone { tag, several_urls })
+        }
         LoadEvent::Cached { repo, badges } => {
             AppIntent::PullRequests(PullRequestsIntent::Cached { tag, repo, badges })
         }
@@ -242,7 +245,8 @@ mod tests {
         assert_eq!(
             rx.recv().await,
             Some(AppIntent::PullRequests(PullRequestsIntent::RepoNone {
-                tag: forge_tag()
+                tag: forge_tag(),
+                several_urls: None,
             }))
         );
         // Without a forge client, even named hosts reach nobody.
@@ -252,7 +256,8 @@ mod tests {
         assert_eq!(
             rx.recv().await,
             Some(AppIntent::PullRequests(PullRequestsIntent::RepoNone {
-                tag: forge_tag()
+                tag: forge_tag(),
+                several_urls: None,
             }))
         );
         git.assert_done();
@@ -279,10 +284,20 @@ mod tests {
                 ci: None,
             },
         )]);
-        assert_eq!(
-            load_intent(forge_tag(), LoadEvent::RepoNone),
-            AppIntent::PullRequests(PullRequestsIntent::RepoNone { tag: forge_tag() })
-        );
+        for several_urls in [None, Some(kika_git::remotes::RemoteName::from("origin"))] {
+            assert_eq!(
+                load_intent(
+                    forge_tag(),
+                    LoadEvent::RepoNone {
+                        several_urls: several_urls.clone()
+                    }
+                ),
+                AppIntent::PullRequests(PullRequestsIntent::RepoNone {
+                    tag: forge_tag(),
+                    several_urls
+                })
+            );
+        }
         assert_eq!(
             load_intent(
                 forge_tag(),
@@ -444,7 +459,7 @@ mod tests {
             let git = FakeRunner::new()
                 .expect(&["remote"], ok(b"origin\n"))
                 .expect(
-                    &["config", "-z", "--get", "remote.origin.url"],
+                    &["config", "-z", "--get-all", "remote.origin.url"],
                     ok(b"https://x:pw_USERINFO@github.com/acme/widgets\0"),
                 )
                 .expect(&UPSTREAMS_ARGV, ok(b""));

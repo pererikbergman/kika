@@ -1530,7 +1530,7 @@ mod tests {
             FakeRunner::new()
                 .expect(&["remote"], ok(b"origin\n"))
                 .expect(
-                    &["config", "-z", "--get", "remote.origin.url"],
+                    &["config", "-z", "--get-all", "remote.origin.url"],
                     ok(b"git@github.com:acme/widgets.git\0"),
                 )
                 .expect(&kika_git::forge_remote::UPSTREAMS_ARGV, ok(b"")),
@@ -1593,7 +1593,7 @@ mod tests {
             lines,
             [
                 "git remote",
-                "git config -z --get remote.origin.url",
+                "git config -z --get-all remote.origin.url",
                 "git for-each-ref \
                  --format=%(refname)%00%(upstream:remotename)%00%(upstream:remoteref) refs/heads",
                 probe_line,

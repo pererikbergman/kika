@@ -61,7 +61,7 @@ pub fn thread_summary(review: &ReviewState, words: &Words) -> Option<String> {
     if let Some(problem) = error {
         return Some(format!(
             "Threads: could not be read ({}), r to try again",
-            problem_text(*problem, words).0
+            problem_text(problem, words).0
         ));
     }
     let discussion = review.discussion.as_ref()?;
