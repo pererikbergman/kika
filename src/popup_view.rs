@@ -2353,6 +2353,7 @@ mod tests {
         assert!(contains(&rows, "(y/n)"), "{rows:#?}");
         let bar = rows.last().unwrap();
         assert!(bar.contains("y yes") && bar.contains("n no"), "{bar:?}");
+        assert!(!bar.contains("enter"), "{bar:?}");
     }
 
     #[test]
