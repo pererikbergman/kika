@@ -53,9 +53,13 @@
 //!   `threads.rs`, `line_link.rs`, `merge.rs`, `checkout.rs` and
 //!   `submit.rs` that `update` calls, including the `review_files_shown` guard and
 //!   `open_line_disabled`;
-//! - `pr_branch`, `verify_pr_branch` and `pr_checkout_commands`
-//!   (`git.rs`), which core's `GitOp::CheckoutPrBranch` is named, checked
-//!   and run by;
+//! - `pr_branch`, `verify_pr_head`, `verify_pr_branch` and
+//!   `pr_checkout_commands` (`git.rs`), which core's
+//!   `GitOp::CheckoutPrBranch` is named, checked and run by;
+//! - `run_pr_checkout` (`checkout.rs`), which core's `run_head_move`
+//!   calls once the left-behind check (`model/left_behind.rs`) or its
+//!   "Leave commits behind?" question lets a checkout from a detached
+//!   `HEAD` go on;
 //! - `review_jump_landed` (`threads.rs`), which core's `AppIntent::Diff`
 //!   arm calls after each diff chunk, so a thread `]`/`[` waits for is
 //!   scrolled to once its row streams in;
@@ -118,6 +122,7 @@ pub(crate) use comment_pick::comment_pick_open;
 pub(crate) use files::review_diff_focused;
 pub(crate) use git::{
     CommitsHere, PrCommit, PrFileRow, pr_branch, pr_checkout_commands, verify_pr_branch,
+    verify_pr_head,
 };
 pub(crate) use intent::ReviewIntent;
 pub(crate) use merge::PrMerging;
