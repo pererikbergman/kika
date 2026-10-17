@@ -9,6 +9,11 @@ use kika_git::path::RepoPath;
 /// Lines read beyond the bottom of the pane, so scrolling rarely waits on git.
 pub const DIFF_PREFETCH: usize = 200;
 
+/// What the pane says for an untracked folder: git lists one only when it
+/// holds its own repository, and there is no file diff to show for it.
+pub const UNTRACKED_REPO_FOLDER: &str =
+    "Untracked folder with its own git repository: no diff to show";
+
 /// What the Diff pane shows: the lines streamed so far for the selected file,
 /// plus where the user has scrolled to. Pure state; the streaming lives in
 /// `diff::stream`. Equality is the stream's: the hunk cursor is focus
@@ -26,6 +31,8 @@ pub struct DiffPane {
     /// The load is slow enough that the pane says "Loading…".
     pub show_loading: bool,
     pub error: Option<String>,
+    /// Text shown instead of a diff, for an entry git has none for.
+    pub notice: Option<&'static str>,
     /// Index of the top visible line.
     pub scroll: usize,
     /// Lines asked of the stream so far.
@@ -49,6 +56,7 @@ impl PartialEq for DiffPane {
             pending,
             show_loading,
             error,
+            notice,
             scroll,
             requested,
             search,
@@ -62,6 +70,7 @@ impl PartialEq for DiffPane {
             pending,
             show_loading,
             error,
+            notice,
             scroll,
             requested,
             search,
@@ -73,6 +82,7 @@ impl PartialEq for DiffPane {
             &other.pending,
             &other.show_loading,
             &other.error,
+            &other.notice,
             &other.scroll,
             &other.requested,
             &other.search,
@@ -107,8 +117,25 @@ impl DiffPane {
         self.pending = true;
         self.show_loading = false;
         self.error = None;
+        self.notice = None;
         self.requested = self.wanted(rows);
         self.requested
+    }
+
+    /// Show `text` for `path` instead of a diff: no request, no lines, and
+    /// nothing left to load.
+    pub fn show_notice(&mut self, path: &RepoPath, text: &'static str) {
+        self.path = Some(path.clone());
+        self.seq = None;
+        self.lines.clear();
+        self.scroll = 0;
+        self.requested = 0;
+        self.search = None;
+        self.done = true;
+        self.pending = false;
+        self.show_loading = false;
+        self.error = None;
+        self.notice = Some(text);
     }
 
     /// With `Top`, forget the path so the next `open` starts at the top.
