@@ -11,8 +11,9 @@
 //! Its `pub(crate)` API: the intent enum [`SyncIntent`] and the free
 //! function [`update`]; the handlers `fetch_finished`, `start_remote`,
 //! `current_remote`, `remote_notice`, `spinner_tick` and `remote_finished` on
-//! `AppState`, the last asking `force_push_question` after a rejected push; the chunks `keys::{SYNC_WORKSPACE, SYNC_CREDENTIAL}`; and
-//! `effects::{fetch, remote}`.
+//! `AppState`, the last asking `force_push_question` after a rejected push;
+//! the chunks `keys::{SYNC_WORKSPACE, SYNC_CREDENTIAL,
+//! SYNC_FORCE_PUSH_CONFIRM}`; and `effects::{fetch, remote}`.
 //!
 //! Kept cross-feature reads and calls, left as they are because this slice
 //! only moves code:

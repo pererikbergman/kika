@@ -146,17 +146,18 @@ impl AppState {
 }
 
 /// "Push with a lease?", asked when a plain push was rejected because the
-/// remote moved on. `y` or Enter answers: `--force-with-lease` refuses if
-/// someone pushed since the last fetch.
+/// remote moved on. Only `y` answers, since a force push replaces commits
+/// on the remote; `--force-with-lease` still refuses if someone pushed
+/// since the last fetch.
 pub(crate) fn force_push_question() -> ConfirmQuestion {
     ConfirmQuestion {
-        scope: KeyScope::Confirm,
+        scope: KeyScope::ForcePushConfirm,
         title: "Push rejected".into(),
         text: "The remote has commits this branch does not. Push with \
                --force-with-lease, replacing them only if nobody pushed since \
                your last fetch? (y/n)"
             .into(),
-        answer: Answer::YOrEnter,
+        answer: Answer::YOnly,
         then: Then::Intent(Box::new(AppIntent::Sync(SyncIntent::ForcePush))),
         range: false,
         head: None,
@@ -452,6 +453,38 @@ mod tests {
         assert_eq!(state.popups, []);
         assert_eq!(state.remote, None);
         assert_eq!(state.held_seq(), None);
+    }
+
+    #[test]
+    fn only_y_answers_the_lease_question_and_enter_does_nothing() {
+        let rejected = || {
+            let mut state = remote_ready();
+            let (tag, _) = remote_of(&shift(&mut state, 'P'));
+            state.update(remote_finished(
+                tag,
+                PUSH,
+                Err(RemoteFailure::Rejected("r".into())),
+            ));
+            state
+        };
+        let asked = [Popup::Question(force_push_question())];
+
+        let mut state = rejected();
+        assert_eq!(press(&mut state, KeyCode::Enter), []);
+        assert_eq!(state.popups, asked, "Enter leaves the question open");
+        assert_eq!(state.remote, None);
+
+        for no in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut state = rejected();
+            assert_eq!(press(&mut state, no), [], "{no:?}");
+            assert_eq!(state.popups, [], "{no:?}");
+            assert_eq!(state.remote, None, "{no:?}");
+        }
+
+        let mut state = rejected();
+        let (_, op) = remote_of(&press_char(&mut state, 'y'));
+        assert_eq!(op, FORCE_PUSH);
+        assert_eq!(state.popups, []);
     }
 
     #[test]
