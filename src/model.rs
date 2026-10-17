@@ -947,10 +947,10 @@ impl AppState {
 
     /// Answer the question on top, asked in `scope`. No closes any
     /// question, and its feature forgets the draft it kept for it. Yes
-    /// answers a discard, the `y`-or-Enter questions (quit, force push,
-    /// stage resolved and the detached checkout) and the `y`-only
-    /// questions whose binding sends `ConfirmYes` (abort, bisect reset,
-    /// autosquash, custom patch and drop range). Every other question
+    /// answers a discard, the `y`-or-Enter questions (quit, stage
+    /// resolved and the detached checkout) and the `y`-only questions
+    /// whose binding sends `ConfirmYes` (abort, bisect reset, skip, force
+    /// push, autosquash, custom patch and drop range). Every other question
     /// answers only to its own intent (such as
     /// `BranchesIntent::ConfirmDelete` or `PullRequestsIntent::ConfirmCreate`), so
     /// yes here keeps it open.
@@ -978,6 +978,7 @@ impl AppState {
             KeyScope::Confirm => self.answer_question(scope, Answer::YOrEnter),
             KeyScope::AbortConfirm
             | KeyScope::SkipConfirm
+            | KeyScope::ForcePushConfirm
             | KeyScope::AutosquashConfirm
             | KeyScope::PatchConfirm
             | KeyScope::DropRangeConfirm
@@ -5729,7 +5730,7 @@ mod tests {
             (
                 force_push_question(),
                 AppIntent::Sync(SyncIntent::ForcePush),
-                true,
+                false,
             ),
             (
                 stage_resolved_question(),

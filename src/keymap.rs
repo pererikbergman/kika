@@ -290,6 +290,9 @@ pub enum KeyScope {
     /// "Skip the stopped commit and lose the work since the stop?" on top
     /// of the popup stack.
     SkipConfirm,
+    /// "Push with --force-with-lease?" after a rejected push, on top of
+    /// the popup stack.
+    ForcePushConfirm,
     /// "Fold every fixup! commit?" on top of the popup stack.
     AutosquashConfirm,
     /// "Rewrite the history with the custom patch?" on top of the popup
@@ -370,6 +373,7 @@ impl KeyScope {
             | KeyScope::DropStash
             | KeyScope::AbortConfirm
             | KeyScope::SkipConfirm
+            | KeyScope::ForcePushConfirm
             | KeyScope::AutosquashConfirm
             | KeyScope::PatchConfirm
             | KeyScope::DropRangeConfirm
@@ -440,6 +444,7 @@ impl KeyScope {
             KeyScope::DropStash => "Drop stash",
             KeyScope::AbortConfirm => "Abort",
             KeyScope::SkipConfirm => "Skip",
+            KeyScope::ForcePushConfirm => "Force push",
             KeyScope::AutosquashConfirm => "Autosquash",
             KeyScope::PatchConfirm => "Custom patch",
             KeyScope::DropRangeConfirm => "Drop commits",
@@ -596,6 +601,9 @@ pub const REPO_LOCKED: &[&str] = &[
     "skip_confirm.yes",
     "skip_confirm.no",
     "skip_confirm.quit",
+    "force_push_confirm.yes",
+    "force_push_confirm.no",
+    "force_push_confirm.quit",
     "remotes.remove",
     "remove_remote.yes",
     "remove_remote.no",
@@ -2487,6 +2495,7 @@ static CHUNKS: &[&[Binding]] = &[
     commit::keys::COMMIT_KEYS,
     CORE_POPUPS,
     sync::keys::SYNC_CREDENTIAL,
+    sync::keys::SYNC_FORCE_PUSH_CONFIRM,
     CORE_ERROR,
     files::keys::FILES_DISCARD_CONFIRM,
     branches::keys::BRANCHES_KEYS,
@@ -2734,7 +2743,7 @@ mod tests {
     }
 
     #[test]
-    fn a_repository_layer_cannot_put_enter_back_on_the_abort_or_skip_question() {
+    fn a_repository_layer_cannot_put_enter_back_on_the_abort_skip_or_force_push_question() {
         for id in [
             "abort_confirm.yes",
             "abort_confirm.no",
@@ -2742,6 +2751,9 @@ mod tests {
             "skip_confirm.yes",
             "skip_confirm.no",
             "skip_confirm.quit",
+            "force_push_confirm.yes",
+            "force_push_confirm.no",
+            "force_push_confirm.quit",
         ] {
             assert!(REPO_LOCKED.contains(&id), "{id}");
         }
@@ -2752,6 +2764,10 @@ mod tests {
         assert_eq!(
             build(&[("skip_confirm.yes", &["enter"])], Trust::Repo).unwrap_err(),
             r#""skip_confirm.yes" can only be changed in the global config file"#
+        );
+        assert_eq!(
+            build(&[("force_push_confirm.yes", &["enter"])], Trust::Repo).unwrap_err(),
+            r#""force_push_confirm.yes" can only be changed in the global config file"#
         );
         assert_eq!(
             build(&[("discard_confirm.yes", &["enter"])], Trust::Repo).unwrap_err(),
@@ -4758,6 +4774,7 @@ mod tests {
             KeyScope::DropStash => "drop_stash",
             KeyScope::AbortConfirm => "abort_confirm",
             KeyScope::SkipConfirm => "skip_confirm",
+            KeyScope::ForcePushConfirm => "force_push_confirm",
             KeyScope::AutosquashConfirm => "autosquash_confirm",
             KeyScope::PatchConfirm => "patch_confirm",
             KeyScope::DropRangeConfirm => "drop_range_confirm",
@@ -6056,6 +6073,9 @@ mod tests {
         "credential.answer",
         "credential.cancel",
         "credential.quit",
+        "force_push_confirm.yes",
+        "force_push_confirm.no",
+        "force_push_confirm.quit",
         "error.close",
         "error.quit",
         "discard_confirm.yes",

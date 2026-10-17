@@ -1315,7 +1315,7 @@ mod tests {
         );
         assert_eq!(
             (ask.scope, ask.answer),
-            (KeyScope::Confirm, Answer::YOrEnter)
+            (KeyScope::ForcePushConfirm, Answer::YOnly)
         );
         assert_eq!(ask.title, "Push rejected");
         assert!(ask.text.starts_with(
