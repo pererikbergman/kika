@@ -94,6 +94,12 @@ impl BranchesPanel {
         self.list.rows.iter().find(|b| b.head)
     }
 
+    /// The loaded local branch called `name`, matched byte for byte over
+    /// every row, shown or hidden by the filter.
+    pub fn local_named(&self, name: &[u8]) -> Option<&Branch> {
+        self.list.rows.iter().find(|b| b.name.0 == name)
+    }
+
     /// Drop the range on `tab`, which does not outlive the tab or the op
     /// it was asked for. The filter stays.
     pub fn clear_range(&mut self, tab: BranchesTab) {

@@ -11,9 +11,9 @@
 //!
 //! Its `pub(crate)` API: the type [`BlameView`]; the intent enum
 //! [`BlameIntent`] and the free function [`update`]; the handlers `open_blame`,
-//! `blame_loaded`, `with_blame`, `open_blame_commit`, `commit_loaded`,
-//! `close_blame_commit`, `scroll_commit` and `close_blame` on `AppState`; the
-//! chunks `keys::{BLAME_FILES, BLAME_KEYS, BLAME_COMMIT}`;
+//! `blame_loaded`, `blame_binary`, `with_blame`, `open_blame_commit`,
+//! `commit_loaded`, `close_blame_commit`, `scroll_commit` and `close_blame`
+//! on `AppState`; the chunks `keys::{BLAME_FILES, BLAME_KEYS, BLAME_COMMIT}`;
 //! `view::{render_blame, render_commit_view}`; and
 //! `effects::{load, load_commit}`.
 //!

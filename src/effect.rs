@@ -1894,6 +1894,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_blame_of_a_binary_file_reports_binary_with_the_same_tag() {
+        let oid = "a".repeat(40);
+        let out = format!("{oid} 1 1 1\nauthor Ann\n\tPNG\0\0\n");
+        let runner = Arc::new(FakeRunner::new().expect(
+            &["blame", "--porcelain", "--", "image.bin"],
+            ok(out.as_bytes()),
+        ));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 1,
+            seq: 4,
+            user: true,
+        };
+
+        runtime.spawn(Effect::LoadBlame {
+            tag,
+            path: "image.bin".into(),
+        });
+
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::Blame(BlameIntent::Binary { tag }))
+        );
+        runner.assert_done();
+    }
+
+    #[tokio::test]
     async fn a_panicking_blame_or_commit_load_still_reports_back() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let runtime = Runtime::new(Arc::new(HostilePanic), tx);
