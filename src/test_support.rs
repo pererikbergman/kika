@@ -899,20 +899,38 @@ pub(crate) fn detached_on_commit() -> AppState {
 /// The one left-behind check in `effects`: its tag and planned op,
 /// after checking it reads from `c0` to `c1`.
 pub(crate) fn check_of(effects: &[Effect]) -> (Tag, GitOp) {
+    check_to(effects, Some(cid("c1")))
+}
+
+/// The one left-behind check in `effects`: its tag and planned op, after
+/// checking it reads from `c0` to `target`.
+pub(crate) fn check_to(effects: &[Effect], target: Option<CommitId>) -> (Tag, GitOp) {
     match effects {
         [
             Effect::CheckLeftBehind {
                 tag,
                 op,
                 head,
-                target,
+                target: to,
             },
         ] => {
-            assert_eq!((head, target), (&cid("c0"), &cid("c1")));
+            assert_eq!((head, to), (&cid("c0"), &target));
             (*tag, op.clone())
         }
         other => panic!("expected one CheckLeftBehind, got {other:?}"),
     }
+}
+
+/// `with_branches` with `HEAD` detached on `c0`: no branch is current, so
+/// `main` (selected), `topic` and `wip` can each be checked out.
+pub(crate) fn detached_on_branch_list() -> AppState {
+    let mut state = with_branches();
+    let tag = branches_tag(&state.update(AppIntent::RefreshStatus));
+    let mut branches = three_branches();
+    branches[0].head = false;
+    state.update(branches_loaded(tag, branches));
+    state.branch = detached_on_commit().branch;
+    state
 }
 
 pub(crate) fn reset_op(mode: ResetMode) -> GitOp {
@@ -951,15 +969,23 @@ pub(crate) fn checked(
 ) -> (AppState, Vec<Effect>) {
     let mut state = detached_on_commit();
     let (tag, op) = check_of(&state.update(intent));
-    let effects = state.update(AppIntent::Commits(CommitsIntent::Rewrite(
-        RewriteIntent::LeftBehindChecked {
-            tag,
-            op,
-            head: cid("c0"),
-            result,
-        },
-    )));
+    let effects = state.update(left_behind_checked(tag, op, result));
     (state, effects)
+}
+
+/// The answer to a left-behind check from `c0`, as the effect sends it.
+/// Core builds it, so tests outside commits need not name its intent.
+pub(crate) fn left_behind_checked(
+    tag: Tag,
+    op: GitOp,
+    result: Result<Vec<CommitId>, String>,
+) -> AppIntent {
+    AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::LeftBehindChecked {
+        tag,
+        op,
+        head: cid("c0"),
+        result,
+    }))
 }
 
 pub(crate) fn ids(n: usize) -> Vec<CommitId> {
