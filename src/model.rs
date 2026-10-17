@@ -67,7 +67,7 @@ use kika_git::path::RepoPath;
 use kika_git::refs::RefsSnapshot;
 use kika_git::repo_state::Operation;
 use kika_git::status::{BranchStatus, EntryKind, RepoStatus};
-use kika_git::version::GitVersion;
+use kika_git::version::{self, GitVersion};
 // Names the tests below reach through `super::*` since the op slot moved
 // to `op_slot.rs`.
 #[cfg(test)]
@@ -1602,6 +1602,7 @@ impl AppState {
                 if self.watch.start_fetch(self.remote.is_some()) {
                     effects.push(Effect::Fetch {
                         tag: self.background_tag(),
+                        no_write_fetch_head: self.git_has(version::NO_WRITE_FETCH_HEAD),
                     });
                 }
             }
