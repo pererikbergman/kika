@@ -280,6 +280,8 @@ pub enum Effect {
     /// Fetch every remote; always answered by one `SyncIntent::FetchFinished`.
     Fetch {
         tag: Tag,
+        /// Whether git is new enough (2.29) for `--no-write-fetch-head`.
+        no_write_fetch_head: bool,
     },
     /// Fetch, pull or push, with git's and ssh's questions sent as
     /// `CredentialAsked`; always answered by one `SyncIntent::RemoteFinished`.
@@ -1157,7 +1159,10 @@ impl Runtime {
                 comment,
             } => rewrite::effects::write_todo(tx, tag, path, expected, content, comment),
             Effect::LoadReflog { tag } => reflog::effects::load(runner, tx, tag),
-            Effect::Fetch { tag } => sync::effects::fetch(runner, tx, tag),
+            Effect::Fetch {
+                tag,
+                no_write_fetch_head,
+            } => sync::effects::fetch(runner, tx, tag, no_write_fetch_head),
             Effect::LoadConfig { repo } => {
                 let paths = ConfigPaths::new(self.global_config.clone(), repo.as_deref());
                 background::run_with(
@@ -2544,23 +2549,32 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_reports_back_with_the_same_tag() {
-        let runner = Arc::new(FakeRunner::new().expect(
-            &["fetch", "--all", "--quiet", "--no-write-fetch-head"],
-            ok(b""),
-        ));
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(runner.clone(), tx);
+        let cases: [(&[&str], bool); 2] = [
+            (
+                &["fetch", "--all", "--quiet", "--no-write-fetch-head"],
+                true,
+            ),
+            (&["fetch", "--all", "--quiet"], false),
+        ];
+        for (argv, no_write_fetch_head) in cases {
+            let runner = Arc::new(FakeRunner::new().expect(argv, ok(b"")));
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let runtime = Runtime::new(runner.clone(), tx);
 
-        runtime.spawn(Effect::Fetch { tag: background(5) });
-
-        assert_eq!(
-            rx.recv().await,
-            Some(AppIntent::Sync(SyncIntent::FetchFinished {
+            runtime.spawn(Effect::Fetch {
                 tag: background(5),
-                result: Ok(()),
-            }))
-        );
-        runner.assert_done();
+                no_write_fetch_head,
+            });
+
+            assert_eq!(
+                rx.recv().await,
+                Some(AppIntent::Sync(SyncIntent::FetchFinished {
+                    tag: background(5),
+                    result: Ok(()),
+                }))
+            );
+            runner.assert_done();
+        }
     }
 
     #[tokio::test]
@@ -2568,7 +2582,10 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let runtime = Runtime::new(Arc::new(HostilePanic), tx);
 
-        runtime.spawn(Effect::Fetch { tag: background(6) });
+        runtime.spawn(Effect::Fetch {
+            tag: background(6),
+            no_write_fetch_head: true,
+        });
 
         match rx.recv().await {
             Some(AppIntent::Sync(SyncIntent::FetchFinished {
