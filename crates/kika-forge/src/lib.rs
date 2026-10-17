@@ -41,6 +41,7 @@ use std::collections::HashMap;
 use allow::AllowRule;
 use cli::CliStatus;
 use kika_git::branches::BranchName;
+use kika_git::remotes::RemoteName;
 use url::ForgeKind;
 
 /// A host the user lets Kika contact, checked when the config is read:
@@ -330,6 +331,9 @@ pub struct ForgeState {
     pub branches: Vec<BranchName>,
     /// The last load found the remote on no configured host.
     pub unmatched: bool,
+    /// The remote the last load passed over because it has several URLs,
+    /// so review mode can say why. Set only with `unmatched`.
+    pub several_urls: Option<RemoteName>,
     /// Per configured host, the second its rate limit resets. Kept across
     /// repositories, since the limit is the account's, and in memory only.
     pub limited: HashMap<String, i64>,
@@ -366,6 +370,7 @@ impl ForgeState {
             seq: None,
             branches: Vec::new(),
             unmatched: false,
+            several_urls: None,
             limited: HashMap::new(),
             limited_until: None,
             created: HashMap::new(),
@@ -462,7 +467,8 @@ impl ForgeState {
     }
 
     /// The remote matched none of the hosts: show nothing, as when off.
-    pub fn repo_none(&mut self, seq: impl Into<LoadSeq>) {
+    /// `several_urls` names the remote when that is why.
+    pub fn repo_none(&mut self, seq: impl Into<LoadSeq>, several_urls: Option<RemoteName>) {
         if !self.current(seq.into()) {
             return;
         }
@@ -471,6 +477,7 @@ impl ForgeState {
         self.status = ForgeView::Off;
         self.in_flight = false;
         self.unmatched = true;
+        self.several_urls = several_urls;
     }
 
     /// The cache's badges, shown at once. A miss keeps what is shown.
@@ -485,6 +492,7 @@ impl ForgeState {
         }
         self.repo = Some(repo);
         self.unmatched = false;
+        self.several_urls = None;
         if let Some(badges) = badges {
             self.badges = badges;
             self.show_created();
@@ -658,7 +666,7 @@ pub(crate) mod tests {
 
         // Answers to the older load change nothing.
         let before = forge.clone();
-        forge.repo_none(LoadSeq(1));
+        forge.repo_none(LoadSeq(1), None);
         forge.cached(
             LoadSeq(1),
             ForgeRepo {

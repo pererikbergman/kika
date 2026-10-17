@@ -14,7 +14,7 @@ use super::files::{FilesFocus, FilesStage, PrFile, PrFiles, ReviewView};
 use super::git::FileCounts;
 use super::markdown;
 use super::pending_view::{comment_marks, has_comment_marks, no_discussion};
-use super::state::{NO_FORGE, ReviewProblem, ReviewScreen, ReviewState};
+use super::state::{NO_FORGE, ReviewProblem, ReviewScreen, ReviewState, several_urls};
 use super::threads::{ThreadScope, thread_note};
 use super::threads_view::thread_diff_body;
 use crate::diff_pane_view::{diff_pane_body, diff_position, found_note};
@@ -67,14 +67,21 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
 }
 
 /// What a problem says, and what to do about it when there is a next step.
-pub fn problem_text(problem: ReviewProblem, words: &Words) -> (String, Option<String>) {
+pub fn problem_text(problem: &ReviewProblem, words: &Words) -> (String, Option<String>) {
     let Words { name, cli, .. } = words;
-    match problem {
+    match *problem {
         ReviewProblem::NoForgeHost => (
             NO_FORGE.to_string(),
             Some(format!(
                 "Add its host to [forge] {}, or its owner to [forge.allow].",
                 words.host_key
+            )),
+        ),
+        ReviewProblem::SeveralUrls(ref remote) => (
+            several_urls(remote),
+            Some(format!(
+                "Keep one: git remote set-url --delete {} <url>.",
+                remote.display()
             )),
         ),
         ReviewProblem::Limited(until) => (
@@ -119,7 +126,7 @@ pub fn problem_text(problem: ReviewProblem, words: &Words) -> (String, Option<St
 /// `width` so neither is cut off.
 fn problem_lines(
     palette: &Palette,
-    problem: ReviewProblem,
+    problem: &ReviewProblem,
     words: &Words,
     width: usize,
 ) -> Vec<Line<'static>> {
@@ -165,7 +172,7 @@ fn queue_lines(
         ));
     }
     let mut lines = vec![Line::from(tabs)];
-    if let Some(problem) = review.queues_fetch.error {
+    if let Some(problem) = &review.queues_fetch.error {
         lines.extend(problem_lines(
             palette,
             problem,
@@ -316,7 +323,7 @@ fn detail_screen(
     number: u64,
     inner: Rect,
 ) -> Vec<Line<'static>> {
-    if let Some(problem) = review.detail_fetch.error {
+    if let Some(problem) = &review.detail_fetch.error {
         return problem_lines(palette, problem, words, usize::from(inner.width));
     }
     match &review.detail {
@@ -1121,12 +1128,12 @@ mod tests {
         assert!(!rows.iter().any(|r| r.contains("GitHub")), "{rows:#?}");
         let gitlab = kika_forge::forge::words(kika_forge::url::ForgeKind::GitLab);
         assert_eq!(
-            problem_text(ReviewProblem::NoForgeHost, gitlab)
+            problem_text(&ReviewProblem::NoForgeHost, gitlab)
                 .1
                 .as_deref(),
             Some("Add its host to [forge] gitlab_ask, or its owner to [forge.allow].")
         );
-        let text = |status| problem_text(ReviewProblem::Status(status), gitlab);
+        let text = |status| problem_text(&ReviewProblem::Status(status), gitlab);
         assert_eq!(
             text(ForgeStatus::NotLoggedIn),
             (
@@ -1148,8 +1155,31 @@ mod tests {
         assert_eq!(text(ForgeStatus::Failed).0, "GitLab gave no usable answer");
         // GitHub keeps its own.
         assert_eq!(
-            problem_text(ReviewProblem::Status(ForgeStatus::NotLoggedIn), GITHUB).1,
+            problem_text(&ReviewProblem::Status(ForgeStatus::NotLoggedIn), GITHUB).1,
             Some("Run gh auth login.".to_string())
+        );
+    }
+
+    #[test]
+    fn a_remote_with_several_urls_is_named_and_not_called_off_the_forge() {
+        let mut state = reviewing(ReviewScreen::Queue);
+        let origin = kika_git::remotes::RemoteName::from("origin");
+        state.review.queues_fetch.error = Some(ReviewProblem::SeveralUrls(origin.clone()));
+        let rows = draw(&state, 80, 8);
+        assert!(
+            contains(
+                &rows,
+                "origin has several URLs; Kika uses a remote with one URL"
+            ),
+            "{rows:#?}"
+        );
+        assert!(!contains(&rows, "no forge host"), "{rows:#?}");
+        assert_eq!(
+            problem_text(&ReviewProblem::SeveralUrls(origin), GITHUB),
+            (
+                "origin has several URLs; Kika uses a remote with one URL".to_string(),
+                Some("Keep one: git remote set-url --delete origin <url>.".to_string())
+            )
         );
     }
 
@@ -1237,6 +1267,7 @@ mod tests {
         assert!(contains(&rows, "│global config, or not"), "{rows:#?}");
         let problems = [
             ReviewProblem::NoForgeHost,
+            ReviewProblem::SeveralUrls(kika_git::remotes::RemoteName::from("origin")),
             ReviewProblem::Limited(1_700_003_600),
             ReviewProblem::Missing(7),
             ReviewProblem::Unsupported(kika_forge::forge::Unsupported {
@@ -1252,9 +1283,9 @@ mod tests {
             ReviewProblem::Status(ForgeStatus::Failed),
         ];
         for problem in problems {
-            let (what, next) = problem_text(problem, GITHUB);
+            let (what, next) = problem_text(&problem, GITHUB);
             for width in [20, 40, 60] {
-                let lines = problem_lines(&Palette::DEFAULT, problem, GITHUB, width);
+                let lines = problem_lines(&Palette::DEFAULT, &problem, GITHUB, width);
                 let text: String = lines
                     .iter()
                     .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))

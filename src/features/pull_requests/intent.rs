@@ -9,12 +9,15 @@ use kika_forge::cli::CliStatus;
 use kika_forge::url::ForgeKind;
 use kika_forge::{CreateError, ForgeRepo, ForgeStatus, PrBadge};
 use kika_git::branches::BranchName;
+use kika_git::remotes::RemoteName;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PullRequestsIntent {
     /// The remote is on none of the forge hosts: no badges.
+    /// `several_urls` names the remote when it has several URLs.
     RepoNone {
         tag: Tag,
+        several_urls: Option<RemoteName>,
     },
     /// The forge repository found, and its cached badges; `None` is a miss.
     Cached {

@@ -10,14 +10,14 @@
 use super::comment_pick::CommentPick;
 use super::git::{CommitsHere, FileCounts, PrCommit, PrFileRow};
 use super::reader::ThreadReader;
-use super::state::{ReviewScreen, ReviewState};
+use super::state::{ReviewScreen, ReviewState, several_urls};
 use crate::diff_pane::DiffStart;
 use crate::effect::{Effect, Tag};
 use crate::intent::Scroll;
 use crate::keymap::{OP_RUNNING, Reason};
 use crate::model::{AppState, Context};
 use kika_forge::forge::{Words, head_ref};
-use kika_forge::review::ViewedState;
+use kika_forge::review::{NoFetchRemote, ViewedState};
 use kika_git::commit_files::{CommitFile, CommitId, CommitRange};
 use kika_git::diff::DiffRequest;
 use kika_git::path::RepoPath;
@@ -37,11 +37,17 @@ fn fetched_before(words: &Words) -> String {
     )
 }
 
-pub(super) fn no_fetch_remote(words: &Words) -> String {
-    format!(
-        "{} head is not here, and no remote names this repository on a [forge] {} host",
-        words.short, words.host_key
-    )
+/// Why a head that is not here cannot be fetched.
+pub(super) fn no_fetch_remote(words: &Words, why: &NoFetchRemote) -> String {
+    match why {
+        NoFetchRemote::NotNamed => format!(
+            "{} head is not here, and no remote names this repository on a [forge] {} host",
+            words.short, words.host_key
+        ),
+        NoFetchRemote::SeveralUrls(remote) => {
+            format!("{} head is not here: {}", words.short, several_urls(remote))
+        }
+    }
 }
 
 fn no_detail(words: &Words) -> String {
@@ -381,8 +387,8 @@ impl AppState {
             Some(still_missing(words))
         } else if fetched_heads.contains(&key) {
             Some(fetched_before(words))
-        } else if missing.1.is_none() {
-            Some(no_fetch_remote(words))
+        } else if let Err(why) = &missing.1 {
+            Some(no_fetch_remote(words, why))
         } else {
             None
         };
@@ -390,7 +396,7 @@ impl AppState {
             files.stage = FilesStage::Failed(message);
             return vec![];
         }
-        let (oids, Some(remote)) = missing else {
+        let (oids, Ok(remote)) = missing else {
             return vec![];
         };
         // A user effect holding the git slot, like a fetch from the
@@ -602,6 +608,8 @@ pub(crate) mod tests {
          fetch it with git, then press f";
     pub(crate) const NO_FETCH_REMOTE: &str =
         "PR head is not here, and no remote names this repository on a [forge] github host";
+    pub(crate) const SEVERAL_URLS: &str =
+        "PR head is not here: origin has several URLs; Kika uses a remote with one URL";
     const NO_DETAIL: &str = "Open a pull request first";
     const DETAIL_LOADING: &str = "The pull request is still loading";
     const NO_OIDS: &str = "GitHub gave no commit ids for this pull request";
@@ -686,7 +694,7 @@ pub(crate) mod tests {
     fn missing(remote: Option<&str>) -> Result<CommitsHere, String> {
         Ok(CommitsHere::Missing {
             oids: vec![head()],
-            remote: remote.map(RemoteName::from),
+            remote: remote.map(RemoteName::from).ok_or(NoFetchRemote::NotNamed),
         })
     }
 
@@ -1019,6 +1027,23 @@ pub(crate) mod tests {
         }));
         assert_eq!(effects, []);
         assert_eq!(stage(&state), FilesStage::Failed(NO_FETCH_REMOTE.into()));
+        assert_eq!((state.busy_count(), state.held_seq()), (0, None));
+        assert!(state.review.fetched_heads.is_empty());
+    }
+
+    #[test]
+    fn with_a_remote_of_several_urls_nothing_is_fetched_and_the_screen_names_it() {
+        let (mut state, tag) = opened();
+        let effects = state.update(AppIntent::Review(ReviewIntent::ObjectsChecked {
+            tag,
+            result: Ok(CommitsHere::Missing {
+                oids: vec![head()],
+                remote: Err(NoFetchRemote::SeveralUrls(RemoteName::from("origin"))),
+            }),
+        }));
+        assert_eq!(effects, []);
+        assert_eq!(stage(&state), FilesStage::Failed(SEVERAL_URLS.into()));
+        assert!(!SEVERAL_URLS.contains("no remote names this repository"));
         assert_eq!((state.busy_count(), state.held_seq()), (0, None));
         assert!(state.review.fetched_heads.is_empty());
     }

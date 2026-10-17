@@ -17,8 +17,9 @@ use super::remote::{allowed, parse_remote};
 use super::{ForgeHost, ForgeRepo, ForgeStatus, PrBadge};
 use kika_git::GitRunner;
 use kika_git::branches::BranchName;
-use kika_git::forge_remote::{read_remote_url, read_upstreams};
+use kika_git::forge_remote::{ForgeRemote, read_forge_remote, read_upstreams};
 use kika_git::recording::CommandSink;
+use kika_git::remotes::RemoteName;
 
 /// What the runtime needs to reach a forge. Only `main` builds one with
 /// the real `gh` and `glab`; without one every load answers that no
@@ -40,8 +41,9 @@ pub struct ForgeContext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadEvent {
     /// The remote is on no configured host, or its host's allow-list
-    /// leaves it out: nothing is shown.
-    RepoNone,
+    /// leaves it out: nothing is shown. `several_urls` names the remote
+    /// when it was passed over for having several URLs.
+    RepoNone { several_urls: Option<RemoteName> },
     /// The repository, and its cached badges when the cache has them.
     Cached {
         repo: ForgeRepo,
@@ -81,19 +83,31 @@ pub struct Load<'a> {
 /// A repository its host's allow-list leaves out answers `RepoNone`.
 pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn Fn(LoadEvent)) {
     // Defence in depth: with no hosts nothing is read, run or written.
+    let none = || LoadEvent::RepoNone { several_urls: None };
     if load.hosts.is_empty() {
-        send(LoadEvent::RepoNone);
+        send(none());
         return;
     }
     let found = match load.known {
         Some(repo) => Some(repo.clone()),
-        None => read_remote_url(git).and_then(|url| parse_remote(&url)),
+        None => match read_forge_remote(git) {
+            Some(ForgeRemote::One { url, .. }) => parse_remote(&url),
+            // Which URL git fetches from is not which one a plain read
+            // gives, so the remote names no one repository.
+            Some(ForgeRemote::Several(name)) => {
+                send(LoadEvent::RepoNone {
+                    several_urls: Some(name),
+                });
+                return;
+            }
+            None => None,
+        },
     }
     // A repository `[forge.allow]` leaves out is as if on no host: its
     // cache is not read either, so nothing about it is shown.
     .and_then(|repo| Some((allowed(&repo, load.hosts)?, repo)));
     let Some((host, repo)) = found else {
-        send(LoadEvent::RepoNone);
+        send(none());
         return;
     };
     let key = load
@@ -129,7 +143,7 @@ pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn
     // the allow-list miss's answer should the two ever disagree.
     let forge = match ctx.forge(host, &repo, load.now) {
         Ok(forge) => forge,
-        Err(Shut::Outside) => return send(LoadEvent::RepoNone),
+        Err(Shut::Outside) => return send(none()),
         Err(Shut::Cli(status)) => return fetched(Err(ForgeStatus::Cli(status)), None),
     };
     let heads = heads(branches, &read_upstreams(git), &repo);
@@ -155,7 +169,7 @@ pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn
         Err(Refusal::Limited { until }) => limited(until),
         Err(Refusal::Status(status)) => fetched(Err(status), None),
         // A forge kind without badges shows nothing, as when off.
-        Err(Refusal::Unsupported(_)) => send(LoadEvent::RepoNone),
+        Err(Refusal::Unsupported(_)) => send(none()),
     }
 }
 
@@ -198,12 +212,18 @@ mod tests {
 
     use kika_git::forge_remote::UPSTREAMS_ARGV as UPSTREAMS;
 
+    /// The plain miss: no remote with several URLs to name.
+    const NONE: LoadEvent = LoadEvent::RepoNone { several_urls: None };
+
     fn origin(url: &[u8]) -> FakeRunner {
         let mut out = url.to_vec();
         out.push(0);
         FakeRunner::new()
             .expect(&["remote"], ok(b"origin\n"))
-            .expect(&["config", "-z", "--get", "remote.origin.url"], ok(&out))
+            .expect(
+                &["config", "-z", "--get-all", "remote.origin.url"],
+                ok(&out),
+            )
     }
 
     /// `origin` at `url`, read again on a refresh, when no branch has an
@@ -250,7 +270,7 @@ mod tests {
     fn apply(forge: &mut ForgeState, seq: LoadSeq, events: Vec<LoadEvent>) {
         for event in events {
             match event {
-                LoadEvent::RepoNone => forge.repo_none(seq),
+                LoadEvent::RepoNone { several_urls } => forge.repo_none(seq, several_urls),
                 LoadEvent::Cached { repo, badges } => forge.cached(seq, repo, badges),
                 LoadEvent::Fetched {
                     result,
@@ -375,7 +395,7 @@ mod tests {
         let ctx = context(Arc::clone(&gh), Some(cache_dir.clone()));
         let branches = ["main".into()];
         let sent = sent(&git, &ctx, &refresh(&[], &branches, tmp.path()));
-        assert_eq!(sent, [LoadEvent::RepoNone]);
+        assert_eq!(sent, [NONE]);
         git.assert_done();
         assert_eq!(gh.calls(), []);
         assert!(!cache_dir.exists());
@@ -391,8 +411,52 @@ mod tests {
             top: None,
             ..refresh(&hosts, &branches, Path::new("/r"))
         };
-        assert_eq!(sent(&git, &ctx, &load), [LoadEvent::RepoNone]);
+        assert_eq!(sent(&git, &ctx, &load), [NONE]);
         assert_eq!(gh.calls(), []);
+    }
+
+    #[test]
+    fn a_remote_with_several_urls_is_none_by_name_in_either_order() {
+        // A mirror then the real repository, and the other way round:
+        // neither URL is read as the repository, and nobody is asked.
+        for urls in [
+            &b"https://github.com/me/mirror.git\0https://github.com/acme/widgets.git\0"[..],
+            &b"https://github.com/acme/widgets.git\0https://github.com/me/mirror.git\0"[..],
+        ] {
+            let git = FakeRunner::new()
+                .expect(&["remote"], ok(b"origin\n"))
+                .expect(
+                    &["config", "-z", "--get-all", "remote.origin.url"],
+                    ok(urls),
+                );
+            let gh = Arc::new(FakeGh::new());
+            let ctx = context(Arc::clone(&gh), None);
+            let (hosts, branches) = (hosts(), ["main".into()]);
+            let load = Load {
+                top: None,
+                ..refresh(&hosts, &branches, Path::new("/r"))
+            };
+            let sent = sent(&git, &ctx, &load);
+            git.assert_done();
+            assert_eq!(
+                sent,
+                [LoadEvent::RepoNone {
+                    several_urls: Some(RemoteName::from("origin"))
+                }]
+            );
+            assert_eq!(gh.calls(), []);
+
+            // The model keeps the name for review mode, until a load
+            // finds a repository.
+            let mut forge = ForgeState::new(hosts.clone());
+            forge.load(LoadSeq(1));
+            apply(&mut forge, LoadSeq(1), sent);
+            assert!(forge.unmatched);
+            assert_eq!(forge.several_urls, Some(RemoteName::from("origin")));
+            forge.load(LoadSeq(2));
+            forge.cached(LoadSeq(2), repo(), None);
+            assert_eq!(forge.several_urls, None);
+        }
     }
 
     /// github.com, narrowed by `[forge.allow]` to the owner `acme`.
@@ -434,7 +498,7 @@ mod tests {
         let git = origin(b"https://github.com/other/repo");
         let sent = sent(&git, &ctx, &refresh(&hosts, &branches, tmp.path()));
         git.assert_done();
-        assert_eq!(sent, [LoadEvent::RepoNone]);
+        assert_eq!(sent, [NONE]);
 
         // Known from an earlier load: still nothing.
         let git = FakeRunner::new();
@@ -445,7 +509,7 @@ mod tests {
                 ..refresh(&hosts, &branches, tmp.path())
             };
             let sent = self::sent(&git, &ctx, &load);
-            assert_eq!(sent, [LoadEvent::RepoNone]);
+            assert_eq!(sent, [NONE]);
         }
         git.assert_done();
         assert_eq!(gh.calls(), []);
@@ -1181,7 +1245,7 @@ mod tests {
                 known: Some(&known),
                 ..refresh(&[], &branches, tmp.path())
             };
-            assert_eq!(sent(&git, &ctx, &load), [LoadEvent::RepoNone]);
+            assert_eq!(sent(&git, &ctx, &load), [NONE]);
             git.assert_done();
             assert_eq!(glab.calls(), []);
             assert!(!dir.exists());

@@ -23,6 +23,7 @@ use kika_forge::review::{CheckStatus, PrDetail, PrSummary, QueueKind, Queues, Re
 use kika_forge::url::ForgeKind;
 use kika_forge::{ForgeHost, ForgeRepo, ForgeStatus, REFRESH_LIMITED};
 use kika_git::commit_files::CommitId;
+use kika_git::remotes::RemoteName;
 use ratatui::text::Line;
 
 pub const NO_FORGE: &str =
@@ -53,11 +54,23 @@ pub enum ReviewScreen {
     Conversation(u64),
 }
 
+/// Why a remote with several URLs is not used: git fetches from the
+/// first, so no one of them is the repository.
+pub(super) fn several_urls(remote: &RemoteName) -> String {
+    format!(
+        "{} has several URLs; Kika uses a remote with one URL",
+        remote.display()
+    )
+}
+
 /// Why a screen has nothing to show.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReviewProblem {
     /// The remote is on no `[forge] github` host; nobody was asked.
     NoForgeHost,
+    /// The remote has several URLs, so it names no one repository;
+    /// nobody was asked.
+    SeveralUrls(RemoteName),
     /// GitHub refuses calls until this second; none is made before it.
     Limited(i64),
     Status(ForgeStatus),
@@ -71,6 +84,7 @@ impl From<ReviewError> for ReviewProblem {
     fn from(error: ReviewError) -> Self {
         match error {
             ReviewError::NoForgeHost => ReviewProblem::NoForgeHost,
+            ReviewError::SeveralUrls(remote) => ReviewProblem::SeveralUrls(remote),
             ReviewError::Limited { until } => ReviewProblem::Limited(until),
             ReviewError::Status(status) => ReviewProblem::Status(status),
             ReviewError::Unsupported(unsupported) => ReviewProblem::Unsupported(unsupported),
@@ -357,14 +371,20 @@ impl AppState {
 
     /// Where a load may go: the configured hosts and, when known, the
     /// repository. Refused when the remote is known to be on none of the
-    /// hosts or left out by its allow-list, or its host is rate limited
-    /// past now.
+    /// hosts, to have several URLs, or to be left out by its allow-list,
+    /// or its host is rate limited past now.
     pub(super) fn review_target(
         &self,
     ) -> Result<(Vec<ForgeHost>, Option<ForgeRepo>), ReviewProblem> {
         let hosts = &self.forge.hosts;
-        if hosts.is_empty() || self.forge.unmatched {
+        if hosts.is_empty() {
             return Err(ReviewProblem::NoForgeHost);
+        }
+        if self.forge.unmatched {
+            return Err(match &self.forge.several_urls {
+                Some(remote) => ReviewProblem::SeveralUrls(remote.clone()),
+                None => ReviewProblem::NoForgeHost,
+            });
         }
         let repo = self.forge.repo.clone().or_else(|| self.review.repo.clone());
         if let Some(repo) = &repo {
@@ -1042,6 +1062,32 @@ pub(crate) mod tests {
         assert_eq!(
             state.review.queues_fetch.error,
             Some(ReviewProblem::NoForgeHost)
+        );
+    }
+
+    #[test]
+    fn a_remote_with_several_urls_opens_review_on_its_own_problem() {
+        let origin = kika_git::remotes::RemoteName::from("origin");
+        // The badge load passed the remote over for its several URLs.
+        let mut state = workspace();
+        state.forge.repo = None;
+        state.forge.load(kika_forge::LoadSeq(1));
+        state
+            .forge
+            .repo_none(kika_forge::LoadSeq(1), Some(origin.clone()));
+        assert_eq!(state.update(AppIntent::Review(ReviewIntent::Enter)), []);
+        assert_eq!(
+            state.review.queues_fetch.error,
+            Some(ReviewProblem::SeveralUrls(origin.clone()))
+        );
+        // A review load that read the remote itself says the same.
+        assert_eq!(
+            ReviewProblem::from(ReviewError::SeveralUrls(origin.clone())),
+            ReviewProblem::SeveralUrls(origin.clone())
+        );
+        assert_eq!(
+            several_urls(&origin),
+            "origin has several URLs; Kika uses a remote with one URL"
         );
     }
 
