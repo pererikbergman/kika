@@ -909,6 +909,32 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_narrow_bar_names_the_unreadable_file_to_remove() {
+        let name = "0123456789abcdef.json";
+        let file = format!("/Users/someone/Library/Application Support/kika/reviews/{name}");
+        for why in [
+            "it is a symbolic link",
+            "it is not a pending review Kika wrote",
+        ] {
+            let (mut state, tag) = loading();
+            state.update(AppIntent::Review(ReviewIntent::PendingLoaded {
+                tag,
+                result: Err(PendingError::Unreadable(why)),
+                file: Some(PathBuf::from(&file)),
+            }));
+            assert_eq!(type_char(&mut state, 'a'), [], "{why}");
+            for width in [80u16, 95] {
+                let bar = &crate::test_support::screen::draw(&state, width, 24)[23];
+                assert!(bar.trim_end().ends_with(name), "{why} at {width}: {bar:?}");
+                assert!(
+                    bar.starts_with(" The saved pending review"),
+                    "{why} at {width}: {bar:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn p_lists_e_edits_in_place_keeping_the_id_and_lines() {
         let range = PendingComment {
             start: Some(left(2)),

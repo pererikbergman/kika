@@ -722,10 +722,12 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
         ));
     }
     if let Some(notice) = notice {
-        // Marked advice survives a narrow bar (`fit_reason`); anything
-        // else, a path too, is cut from the right.
+        // Marked advice and the file name of a marked path survive a
+        // narrow bar (`fit_reason`); anything else is cut from the right.
         let text = match &state.notice {
-            Some(own) if room > 0 && own.advice_split().is_some() => {
+            Some(own)
+                if room > 0 && (own.advice_split().is_some() || own.path_split().is_some()) =>
+            {
                 format!(" {}", fit_reason(own, room - 1))
             }
             _ => elide_right(&format!(" {notice}"), room),
@@ -3958,6 +3960,31 @@ mod tests {
         assert_eq!(notice.style.fg, Some(Color::Yellow));
         assert!(notice.content.starts_with(" Input"), "{notice:?}");
         assert!(notice.content.ends_with('…'), "{notice:?}");
+    }
+
+    #[test]
+    fn a_path_notice_on_a_narrow_bar_keeps_the_file_name() {
+        let mut state = loaded(vec![file("a.rs")]);
+        let lead = "The saved pending review for #430 could not be read \
+                    (it is a symbolic link); it was left as it is. To start again, remove ";
+        let name = "0123456789abcdef.json";
+        state.notice = Some(crate::notice::Notice::with_path(
+            lead,
+            &format!("/a/b/kika/reviews/{name}"),
+        ));
+        for width in [80u16, 95, 40] {
+            let rows = draw(&state, width, 24);
+            let bar = &rows[23];
+            assert!(width_of(bar) <= usize::from(width), "{width}: {bar:?}");
+            assert!(bar.trim_end().ends_with(name), "{width}: {bar:?}");
+            // Too narrow for it all: the lead and the dirs give way first.
+            if width != 95 {
+                assert!(bar.contains(&format!("… …/{name}")), "{width}: {bar:?}");
+            }
+            let (line, _) = status_bar(&state, width);
+            let notice = line.spans.last().unwrap();
+            assert_eq!(notice.style.fg, Some(Color::Yellow), "{width}");
+        }
     }
 
     #[test]
