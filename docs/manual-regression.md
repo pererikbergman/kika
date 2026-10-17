@@ -932,3 +932,4 @@ marked "(writes)" change GitLab: run them only on a test project, by hand.
 - [ ] GITLAB-36 A project not found or no access `[gitlab]`: `GitLab: repository not found or no access`
 - [ ] GITLAB-37 The detail's merge line `[gitlab]`: names the methods as the `M` pick list does (`Merge: merge · squash`), never "merge commit"
 - [ ] GITLAB-38 A retried job `[gitlab]` (writes): retry a failed job on a real merge request, let it finish, reopen the detail (enter): one row for that job, showing the retried result and linking to the new job's page
+- [ ] GITLAB-39 A merge request with more than 100 discussions `[gitlab]`, with line threads after the first 100: `f` then `]` reaches those threads, and the title's thread count includes them

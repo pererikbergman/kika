@@ -98,7 +98,8 @@ pub struct PrDiscussion {
     /// The head GitHub had when it answered; `None` when it sent no hex id.
     pub head_oid: Option<CommitId>,
     pub threads: Vec<ReviewThread>,
-    /// How many threads GitHub says there are.
+    /// How many threads GitHub says there are. On GitLab, a lower bound
+    /// when discussions were left unread.
     pub threads_total: u64,
     /// Issue comments and review bodies, oldest first.
     pub conversation: Vec<ConversationItem>,
