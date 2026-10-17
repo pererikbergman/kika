@@ -10,11 +10,12 @@ use crate::effect::Tag;
 use crate::features::blame::BlameIntent;
 use crate::intent::AppIntent;
 use kika_git::GitRunner;
-use kika_git::blame::{read_blame, read_commit};
+use kika_git::blame::{Blamed, read_blame, read_commit};
 use kika_git::diff::EmojiZwj;
 use kika_git::path::RepoPath;
 
-/// Blame `path` and report it as `BlameIntent::Loaded`.
+/// Blame `path` and report it as `BlameIntent::Loaded`, or as
+/// `BlameIntent::Binary` when there is no text to show.
 pub(crate) fn load(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,
@@ -27,7 +28,19 @@ pub(crate) fn load(
         move || read_blame(runner.as_ref(), &path, emoji),
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("git blame"),
-        move |result| AppIntent::Blame(BlameIntent::Loaded { tag, result }),
+        move |result| {
+            AppIntent::Blame(match result {
+                Ok(Blamed::Lines(lines)) => BlameIntent::Loaded {
+                    tag,
+                    result: Ok(lines),
+                },
+                Ok(Blamed::Binary) => BlameIntent::Binary { tag },
+                Err(e) => BlameIntent::Loaded {
+                    tag,
+                    result: Err(e),
+                },
+            })
+        },
     );
 }
 
