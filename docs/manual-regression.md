@@ -548,7 +548,7 @@ Run `scripts/make-sandbox.sh <dir> conflict` first.
 - [ ] REFLOG-01 `]` (or `[`) in Commits `[sandbox]`: the Reflog tab lists every place HEAD has been, newest first, with what moved it
 - [ ] REFLOG-02 `j`/`k` `[sandbox]`: move through the entries
 - [ ] REFLOG-03 `/checkout` `[sandbox]`: only matching rows show; `enter` keeps the filter; `esc` clears it; `esc` again quits
-- [ ] REFLOG-04 `L` or `A` `[sandbox]`: does not filter; says path and author filters work on the log tab
+- [ ] REFLOG-04 `L` or `A` `[sandbox]`: does not filter; says path and author filters work on the log tab. `?` in the Reflog tab describes `L` and `A` as only pointing to the log tab, not as filters
 - [ ] REFLOG-05 `ctrl-z` from the Reflog tab with a filter set `[sandbox]`: undo works on the last action, whatever the filter hides
 - [ ] REFLOG-06 `]` again `[sandbox]`: back to the log
 - [ ] REFLOG-07 On the Reflog tab, cursor on the second row, run `git checkout -q - && git checkout -q -` in another terminal, then `r` and at once `j` `[sandbox]`: the cursor ends one row below the entry it was on, in the reloaded list

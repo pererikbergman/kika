@@ -1,17 +1,17 @@
 //! Keeps `docs/configuration.md` honest: its binding table must list every
 //! binding in the keymap with its default keys and whether a repository
 //! file may change it. A new or re-keyed binding fails here until the page
-//! says so, and the failure prints the row to paste. The Commit message
-//! rows must also say what the help menu says. Its `[theme]` section
-//! must name every colour role and built-in theme, with each theme's colour
-//! for each role. The README's Quick start keys must be real default keys,
-//! and its Configuration example must load without errors.
+//! says so, and the failure prints the row to paste. Every row must also
+//! say what the help menu says. Its `[theme]` section must name every
+//! colour role and built-in theme, with each theme's colour for each role.
+//! The README's Quick start keys must be real default keys, and its
+//! Configuration example must load without errors.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crossterm::event::KeyCode;
 
-use crate::keymap::{Binding, KeyPattern, KeyScope, REPO_LOCKED, parse_key, registry};
+use crate::keymap::{Binding, KeyPattern, REPO_LOCKED, parse_key, registry};
 use crate::theme::{self, ColourValue, ROLES, THEMES};
 
 const PAGE: &str = include_str!("../docs/configuration.md");
@@ -151,13 +151,12 @@ fn mismatches(page: &str) -> Vec<String> {
 }
 
 /// Where the page's Action text differs from the help menu's sentence for a
-/// binding in `scope`. Checked per scope, because a stale Action row tells a
+/// binding. Checked for every binding, because a stale Action row tells a
 /// reader the wrong thing even when its keys and lock are right.
-fn action_mismatches(page: &str, scope: KeyScope) -> Vec<String> {
+fn action_mismatches(page: &str) -> Vec<String> {
     let rows = rows(page);
     registry()
         .iter()
-        .filter(|binding| binding.scope == scope)
         .filter_map(|binding| {
             let row = rows.iter().find(|row| row.id == binding.id)?;
             (row.action != binding.description).then(|| {
@@ -173,37 +172,45 @@ fn action_mismatches(page: &str, scope: KeyScope) -> Vec<String> {
 }
 
 #[test]
-fn the_commit_message_rows_say_what_their_bindings_do() {
-    let problems = action_mismatches(PAGE, KeyScope::CommitEditor);
+fn every_row_says_what_its_binding_does() {
+    let problems = action_mismatches(PAGE);
     assert!(
         problems.is_empty(),
-        "docs/configuration.md's Commit message rows differ from the help menu:\n{}",
+        "docs/configuration.md's Action text differs from the help menu:\n{}",
         problems.join("\n")
+    );
+}
+
+/// Swaps `id`'s row in an in-sync page for `stale_row` and asserts the
+/// Action check reports it once, ending with the row to paste.
+fn assert_stale_action_reported(id: &str, stale_row: &str) {
+    let page = page_in_sync();
+    assert_eq!(action_mismatches(&page), Vec::<String>::new());
+    let binding = registry().iter().find(|b| b.id == id).unwrap();
+    let stale = page.replace(&expected_row(binding), stale_row);
+    assert_ne!(stale, page);
+    let problems = action_mismatches(&stale);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].ends_with(&expected_row(binding)),
+        "{}",
+        problems[0]
     );
 }
 
 #[test]
 fn a_stale_commit_message_action_fails_with_the_row_to_paste() {
-    let page = page_in_sync();
-    assert_eq!(
-        action_mismatches(&page, KeyScope::CommitEditor),
-        Vec::<String>::new()
-    );
-    let quit = registry()
-        .iter()
-        .find(|b| b.id == "commit_editor.quit")
-        .unwrap();
-    let stale = page.replace(
-        &expected_row(quit),
+    assert_stale_action_reported(
+        "commit_editor.quit",
         "| `commit_editor.quit` | `ctrl-c` | Quit Kika, stopping a commit that is running | locked |",
     );
-    assert_ne!(stale, page);
-    let problems = action_mismatches(&stale, KeyScope::CommitEditor);
-    assert_eq!(problems.len(), 1, "{problems:?}");
-    assert!(
-        problems[0].ends_with(&expected_row(quit)),
-        "{}",
-        problems[0]
+}
+
+#[test]
+fn a_stale_action_in_another_panel_fails_with_the_row_to_paste() {
+    assert_stale_action_reported(
+        "reflog.filter_path",
+        "| `reflog.filter_path` | `L` | Show only the commits that changed a typed path, across renames | |",
     );
 }
 
