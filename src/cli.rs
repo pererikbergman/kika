@@ -42,4 +42,14 @@ mod tests {
         assert_eq!(cli.context(), Context::Workspace);
         assert!(Cli::try_parse_from(["kika", "review", "x"]).is_err());
     }
+
+    #[test]
+    fn version_flag_prints_the_cargo_version() {
+        let err = Cli::try_parse_from(["kika", "--version"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+        assert_eq!(
+            err.render().to_string(),
+            format!("kika {}\n", env!("CARGO_PKG_VERSION"))
+        );
+    }
 }

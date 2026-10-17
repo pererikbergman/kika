@@ -2,6 +2,13 @@
 name = "kika"
 version = "0.1.0"
 edition = "2024"
+description = "A terminal Git client and pull request review tool"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/pererikbergman/kika"
+homepage = "https://github.com/pererikbergman/kika"
+readme = "README.md"
+keywords = ["git", "tui", "terminal", "review", "pull-request"]
+categories = ["command-line-utilities", "development-tools"]
 
 [workspace]
 members = ["crates/kika-git", "crates/kika-forge"]
