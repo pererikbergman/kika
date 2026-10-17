@@ -4,7 +4,8 @@
 //! says so, and the failure prints the row to paste. The Commit message
 //! rows must also say what the help menu says. Its `[theme]` section
 //! must name every colour role and built-in theme, with each theme's colour
-//! for each role.
+//! for each role. The README's Quick start keys must be real default keys,
+//! and its Configuration example must load without errors.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -14,6 +15,7 @@ use crate::keymap::{Binding, KeyPattern, KeyScope, REPO_LOCKED, parse_key, regis
 use crate::theme::{self, ColourValue, ROLES, THEMES};
 
 const PAGE: &str = include_str!("../docs/configuration.md");
+const README: &str = include_str!("../README.md");
 
 /// One row of the binding table, cells trimmed and backticks kept.
 #[derive(Debug)]
@@ -24,13 +26,18 @@ struct Row<'a> {
     lock: &'a str,
 }
 
+/// The trimmed cells of a Markdown table row, or `None` for any other line.
+fn cells(line: &str) -> Option<Vec<&str>> {
+    let inner = line.trim().strip_prefix('|')?.strip_suffix('|')?;
+    Some(inner.split('|').map(str::trim).collect())
+}
+
 /// Every table row in `page` whose first cell is a backticked id. Other
 /// tables and rows, and the headings around them, are ignored.
 fn rows(page: &str) -> Vec<Row<'_>> {
     page.lines()
         .filter_map(|line| {
-            let inner = line.trim().strip_prefix('|')?.strip_suffix('|')?;
-            let cells: Vec<&str> = inner.split('|').map(str::trim).collect();
+            let cells = cells(line)?;
             let [first, keys, action, lock] = cells.as_slice() else {
                 return None;
             };
@@ -367,14 +374,9 @@ fn theme_mismatches(page: &str) -> Vec<String> {
         .collect();
     let palettes = THEMES.map(|name| theme::builtin(name).expect("a built-in theme"));
     for line in section.lines() {
-        let Some(inner) = line
-            .trim()
-            .strip_prefix('|')
-            .and_then(|l| l.strip_suffix('|'))
-        else {
+        let Some(cells) = cells(line) else {
             continue;
         };
-        let cells: Vec<&str> = inner.split('|').map(str::trim).collect();
         let [role, _, colours @ ..] = cells.as_slice() else {
             continue;
         };
@@ -423,5 +425,122 @@ fn a_missing_role_or_a_wrong_colour_fails() {
     assert!(
         problems.contains(&"`added` in `default` is Green but the page says `red`".to_string()),
         "{problems:?}"
+    );
+}
+
+/// The text of the `## {title}` section of `page`, up to the next `## `.
+fn section<'a>(page: &'a str, title: &str) -> &'a str {
+    let heading = format!("## {title}\n");
+    let Some(start) = page.find(&heading) else {
+        return "";
+    };
+    let body = &page[start + heading.len()..];
+    let end = body.find("\n## ").map_or(body.len(), |i| i + 1);
+    &body[..end]
+}
+
+/// Every way the Quick start table in `readme` differs from the registry:
+/// a row whose binding is unknown, or whose key is not one of its defaults,
+/// and a key the section should name but does not.
+fn quick_start_mismatches(readme: &str) -> Vec<String> {
+    let quick = section(readme, "Quick start");
+    let mut problems = Vec::new();
+    let mut named = BTreeSet::new();
+    for line in quick.lines() {
+        let Some(cells) = cells(line) else {
+            continue;
+        };
+        let [key, _, id] = cells.as_slice() else {
+            continue;
+        };
+        let Some(id) = id.strip_prefix('`').and_then(|i| i.strip_suffix('`')) else {
+            continue;
+        };
+        let key = key.trim_matches('`');
+        let Some(binding) = registry().iter().find(|b| b.id == id) else {
+            problems.push(format!("`{id}` is not a binding: {line}"));
+            continue;
+        };
+        // Compared in the page's spelling: a default such as `q` takes any
+        // modifiers, while `parse_key("q")` takes none, yet both are `q`.
+        match parse_key(key) {
+            Ok(pattern) if binding.keys.iter().any(|k| doc_key(k) == doc_key(&pattern)) => {
+                named.insert(key.to_string());
+            }
+            Ok(_) => problems.push(format!(
+                "`{key}` is not a default key of `{id}` (it has {}): {line}",
+                keys_cell(binding.keys)
+            )),
+            Err(err) => problems.push(format!("{err}: {line}")),
+        }
+    }
+    for key in [
+        "1", "2", "3", "4", "5", "?", "space", "c", "P", "p", "G", "q",
+    ] {
+        if !named.contains(key) {
+            problems.push(format!("the Quick start table does not list `{key}`"));
+        }
+    }
+    problems
+}
+
+#[test]
+fn readme_quick_start_keys_are_default_keys_of_their_bindings() {
+    let problems = quick_start_mismatches(README);
+    assert!(
+        problems.is_empty(),
+        "README.md's Quick start is out of date:\n{}",
+        problems.join("\n")
+    );
+}
+
+#[test]
+fn a_wrong_or_missing_quick_start_key_fails() {
+    let readme = "## Quick start\n\n| Key | Does | Binding |\n|---|---|---|\n| `U` | Push | `workspace.push` |\n| `x` | Nothing | `no.such` |\n\n## Next\n| `q` | Quit | `global.quit` |\n";
+    let problems = quick_start_mismatches(readme);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.starts_with("`U` is not a default key of `workspace.push`")),
+        "{problems:?}"
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.starts_with("`no.such` is not a binding")),
+        "{problems:?}"
+    );
+    // A row after the section does not count.
+    assert!(
+        problems.contains(&"the Quick start table does not list `q`".to_string()),
+        "{problems:?}"
+    );
+}
+
+/// The first ```toml block under `## Configuration` in `readme`.
+fn config_example(readme: &str) -> Option<&str> {
+    let body = section(readme, "Configuration");
+    let start = body.find("```toml\n")? + "```toml\n".len();
+    let len = body[start..].find("```")?;
+    Some(&body[start..start + len])
+}
+
+#[test]
+fn readme_config_example_loads_without_errors() {
+    let example = config_example(README).expect("a ```toml block under ## Configuration");
+    let dir = std::env::temp_dir().join(format!("kika-readme-config-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let global = dir.join("config.toml");
+    std::fs::write(&global, example).unwrap();
+    let loaded = crate::config::load(&crate::config::ConfigPaths {
+        global: Some(global),
+        repo: None,
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        loaded.errors.is_empty(),
+        "README.md's Configuration example does not load:\n{:?}\n{example}",
+        loaded.errors
     );
 }
