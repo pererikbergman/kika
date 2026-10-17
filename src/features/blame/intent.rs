@@ -16,6 +16,10 @@ pub(crate) enum BlameIntent {
         tag: Tag,
         result: Result<Vec<BlameLine>, String>,
     },
+    /// The blame load found a binary file; `tag` says which one.
+    Binary {
+        tag: Tag,
+    },
     /// Move the blame cursor a line or a page down or up.
     Next,
     Prev,
