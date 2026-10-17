@@ -237,7 +237,9 @@ mod tests {
         let stop = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
         assert!(!edited_since(stop, Some(stop - Duration::from_secs(1))));
         assert!(!edited_since(stop, Some(stop)));
-        assert!(edited_since(stop, Some(stop + Duration::from_nanos(1))));
+        // 100 ns is the finest step every platform's clock holds: Windows counts
+        // in 100 ns ticks, so a 1 ns step would round away to `stop` itself.
+        assert!(edited_since(stop, Some(stop + Duration::from_nanos(100))));
         assert!(edited_since(stop, None));
     }
 
