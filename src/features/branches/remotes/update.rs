@@ -23,7 +23,7 @@ pub(crate) fn update(state: &mut AppState, intent: RemotesIntent) -> Vec<Effect>
         RemotesIntent::Next => return state.move_remote(1),
         RemotesIntent::Prev => return state.move_remote(-1),
         RemotesIntent::MoveBy(delta) => return state.move_remote(delta),
-        RemotesIntent::Track => state.ask_track_name(),
+        RemotesIntent::Track => return state.track_selected(),
         RemotesIntent::TrackNamed(text) => return state.track_named(&text),
         RemotesIntent::Add => state.ask_remote_name(),
         RemotesIntent::AddNamed(text) => state.remote_named(&text),
@@ -84,23 +84,37 @@ impl AppState {
         true
     }
 
-    /// Ask what to call the local branch, starting from the remote
-    /// branch's own short name.
-    pub(crate) fn ask_track_name(&mut self) {
+    /// Check out the selected remote branch's local branch when one of
+    /// that name is loaded; otherwise ask what to call the new local
+    /// branch, starting from the remote branch's own short name. A stale
+    /// local list falls back to asking.
+    pub(crate) fn track_selected(&mut self) -> Vec<Effect> {
         if !self.remotes_action(keys::track_disabled) {
-            return;
+            return vec![];
         }
         let Some(from) = self.branches.remotes.selected_branch().cloned() else {
-            return;
+            return vec![];
         };
+        if let Some(local) = self.branches.local_named(&from.short) {
+            if local.head {
+                self.notice = Some(format!("Already on {}", local.name.display()).into());
+                return vec![];
+            }
+            let op = GitOp::Checkout(local.name.clone());
+            return self.move_head_to_branch(op);
+        }
         let input = LineInput::with_text(&from.short_display());
         self.branches.remotes.pending = Some(RemotePending::Track(from));
         self.popups.push(Popup::Prompt {
             kind: PromptKind::TrackBranch,
             input,
         });
+        vec![]
     }
 
+    /// Track the remote branch as a new local branch called `text`. A name
+    /// an existing local branch has runs nothing: that branch may be
+    /// unrelated to the remote one.
     pub(crate) fn track_named(&mut self, text: &str) -> Vec<Effect> {
         let Some(RemotePending::Track(from)) = self.branches.remotes.pending.take() else {
             return vec![];
@@ -112,6 +126,10 @@ impl AppState {
         let name = text.trim();
         if name.is_empty() {
             self.notice = Some("A branch needs a name".into());
+            return vec![];
+        }
+        if let Some(local) = self.branches.local_named(name.as_bytes()) {
+            self.notice = Some(format!("Branch {} already exists", local.name.display()).into());
             return vec![];
         }
         if self.op_is_running() {
@@ -278,12 +296,13 @@ mod tests {
     use crate::op::GitOp;
     use crate::popup::{Popup, PromptKind};
     use crate::test_support::{
-        branches_loaded, branches_tag, check_to, detached_on_branch_list, finished, git_remote,
-        ids, left_behind_checked, log_load, on_remote_row, op_of, press, press_char,
+        branches_loaded, branches_tag, check_to, detached_on_branch_list, finished, git_branch,
+        git_remote, ids, left_behind_checked, log_load, on_remote_row, op_of, press, press_char,
         reload_remotes, remotes_tag, shift, start_bisecting, three_branches, three_remotes,
         type_text, with_branches, with_remotes,
     };
     use crossterm::event::KeyCode;
+    use kika_git::branches::Branch;
 
     #[test]
     fn a_stale_or_other_repository_remotes_load_is_dropped() {
@@ -383,7 +402,8 @@ mod tests {
 
     #[test]
     fn checking_out_a_remote_branch_asks_for_the_name_and_tracks_it() {
-        let mut state = on_remote_row(0);
+        // No local `topic`, so origin/topic needs a new branch.
+        let mut state = on_remote_row_with(0, vec![git_branch("main", true, true)]);
         assert_eq!(press_char(&mut state, ' '), vec![]);
         assert_eq!(state.notice, Some("Select a remote branch".into()));
         assert_eq!(state.popups, []);
@@ -415,10 +435,75 @@ mod tests {
         assert_eq!(state.branches.remotes.pending, None);
     }
 
+    /// `on_remote_row`, with the local list reloaded as `branches`.
+    fn on_remote_row_with(row: usize, branches: Vec<Branch>) -> AppState {
+        let mut state = on_remote_row(row);
+        let tag = branches_tag(&state.update(AppIntent::RefreshStatus));
+        state.update(branches_loaded(tag, branches));
+        state
+    }
+
+    #[test]
+    fn a_remote_branch_whose_local_branch_exists_checks_that_branch_out() {
+        // origin/topic, with local `main` (HEAD) and `topic` loaded.
+        let mut state = on_remote_row(3);
+        let (_, op) = op_of(&press_char(&mut state, ' '));
+        assert_eq!(op, GitOp::Checkout("topic".into()));
+        assert_eq!(state.popups, []);
+        assert_eq!(state.branches.remotes.pending, None);
+    }
+
+    #[test]
+    fn a_remote_branch_whose_local_branch_is_head_says_so_and_runs_nothing() {
+        // origin/main, with local `main` as HEAD.
+        let mut state = on_remote_row(2);
+        assert_eq!(press_char(&mut state, ' '), vec![]);
+        assert_eq!(state.popups, []);
+        assert_eq!(state.notice, Some("Already on main".into()));
+        assert_eq!(state.branches.remotes.pending, None);
+    }
+
+    #[test]
+    fn a_local_branch_hidden_by_the_filter_is_still_found() {
+        let mut state = on_remote_row(3);
+        state.branches.list.filter = "wip".into();
+        let (_, op) = op_of(&press_char(&mut state, ' '));
+        assert_eq!(op, GitOp::Checkout("topic".into()));
+    }
+
+    #[test]
+    fn from_a_detached_head_an_existing_local_branch_checks_for_left_behind_commits() {
+        let mut state = detached_on_branch_list();
+        reload_remotes(&mut state, three_remotes());
+        press_char(&mut state, ']');
+        state.branches.remotes.list.move_by(3);
+        let (_, op) = check_to(&press_char(&mut state, ' '), None);
+        assert_eq!(op, GitOp::Checkout("topic".into()));
+        assert_eq!(state.popups, []);
+        assert_eq!(state.branches.remotes.pending, None);
+    }
+
+    #[test]
+    fn naming_the_new_branch_after_an_existing_one_says_so_and_runs_nothing() {
+        let mut state = on_remote_row_with(3, vec![git_branch("main", true, true)]);
+        press_char(&mut state, ' ');
+        for _ in 0.."topic".len() {
+            press(&mut state, KeyCode::Backspace);
+        }
+        type_text(&mut state, "main");
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.notice, Some("Branch main already exists".into()));
+        assert_eq!(state.popups, []);
+        assert_eq!(state.branches.remotes.pending, None);
+    }
+
     /// From a detached `HEAD` on `c0`, the tracking checkout of
     /// `origin/topic` as `topic`, up to its left-behind check.
     fn detached_track_check() -> (AppState, Tag, GitOp) {
         let mut state = detached_on_branch_list();
+        // No local `topic`, so origin/topic needs a new branch.
+        let tag = branches_tag(&state.update(AppIntent::RefreshStatus));
+        state.update(branches_loaded(tag, vec![git_branch("main", false, true)]));
         reload_remotes(&mut state, three_remotes());
         press_char(&mut state, ']');
         state.branches.remotes.list.move_by(3);
