@@ -1174,7 +1174,32 @@ fn render_help(state: &AppState, frame: &mut Frame, area: Rect) {
     }
     frame.render_widget(Clear, popup);
     let first = u16::try_from(first).unwrap_or(u16::MAX);
+    let inner = usize::from(popup.width.saturating_sub(2));
+    let lines: Vec<Line> = lines
+        .into_iter()
+        .map(|line| fit_help_line(line, inner))
+        .collect();
     frame.render_widget(Paragraph::new(lines).scroll((first, 0)).block(block), popup);
+}
+
+/// `line` within `width` columns, for a box the screen squeezed below its
+/// lines' width: a rule is shortened, a key or mouse line ends in `…`, as
+/// cut text does in every pane. Its trailing pad goes first, so a line
+/// that only needs it gone stays whole.
+fn fit_help_line(line: Line<'static>, width: usize) -> Line<'static> {
+    if line.width() <= width {
+        return line;
+    }
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    let fitted = if text.chars().all(|c| c == '─') {
+        "─".repeat(width)
+    } else if width_of(text.trim_end()) <= width {
+        text.trim_end().to_string()
+    } else {
+        clip_cut(&text, 0, width).0
+    };
+    let style = line.spans.first().map(|s| s.style).unwrap_or_default();
+    Line::from(Span::styled(fitted, style)).style(line.style)
 }
 
 /// What the help list is titled with: the focused panel's name, also for
@@ -3157,6 +3182,80 @@ mod tests {
             let rows = draw(&state, width, height);
             assert!(contains(&rows, "Mouse: click selects"), "{rows:#?}");
             assert!(!contains(&rows, "more ▼"), "{rows:#?}");
+        }
+    }
+
+    /// The inner rows help draws at `width` x 40 with Files focused,
+    /// scrolled from its top to its end, each with the popup's left and
+    /// right border columns.
+    fn every_help_row(width: u16, mouse: bool) -> Vec<String> {
+        use crate::intent::{AppIntent, Scroll};
+        let mut state = loaded(vec![file("a.rs")]);
+        state.files.selected = 0;
+        state.mouse = mouse;
+        state.update(AppIntent::Resize { width, height: 40 });
+        state.update(AppIntent::OpenHelp);
+        let [main, _] = screen_layout(Rect::new(0, 0, width, 40));
+        let popup = help_box(&state, main);
+        let columns = popup.x..popup.x + popup.width;
+        let inner = popup.y + 1..popup.y + popup.height - 1;
+        let mut rows = Vec::new();
+        let mut last = usize::MAX;
+        while state.help_scroll != last {
+            last = state.help_scroll;
+            let buffer = draw_buffer(&state, width, 40);
+            rows.extend(inner.clone().map(|y| row_text(&buffer, y, columns.clone())));
+            state.update(AppIntent::ScrollHelp(Scroll::LineDown));
+        }
+        rows
+    }
+
+    #[test]
+    fn help_descriptions_that_do_not_fit_end_in_an_ellipsis() {
+        let state = loaded(vec![file("a.rs")]);
+        assert_eq!(state.focus, Focus::Files);
+        let descriptions: Vec<&str> =
+            available(registry(), &state.keymap, state.panel_focus(), &state)
+                .into_iter()
+                .map(|(binding, _)| binding.description)
+                .collect();
+        for width in [60, 80] {
+            let rows = every_help_row(width, false);
+            for row in &rows {
+                assert!(row.starts_with('│') && row.ends_with('│'), "{row:?}");
+            }
+            // What each cut row still shows of its description, before the `…`.
+            let cut: Vec<&str> = rows
+                .iter()
+                .filter_map(|row| row.strip_suffix("…│"))
+                .filter_map(|row| Some(row.split_once("  ")?.1.trim_start()))
+                .collect();
+            if width == 60 {
+                assert!(!cut.is_empty(), "{rows:#?}");
+            }
+            for description in &descriptions {
+                let whole = [" ", "│"]
+                    .iter()
+                    .any(|end| contains(&rows, &format!("  {description}{end}")));
+                let shortened = cut
+                    .iter()
+                    .any(|shown| !shown.is_empty() && description.starts_with(shown));
+                assert!(whole || shortened, "{width}: {description:?} in {rows:#?}");
+            }
+        }
+    }
+
+    #[test]
+    fn help_rules_fill_the_narrow_popup_without_an_ellipsis() {
+        for width in [60, 80] {
+            let rows = every_help_row(width, true);
+            let rule = rows
+                .iter()
+                .find(|row| row.contains("│─"))
+                .unwrap_or_else(|| panic!("no rule in {rows:#?}"));
+            let inside = &rule["│".len()..rule.len() - "│".len()];
+            assert!(inside.chars().all(|c| c == '─'), "{rule:?}");
+            assert_eq!(width_of(rule), width_of(&rows[0]), "{rows:#?}");
         }
     }
 
