@@ -38,6 +38,14 @@ pub fn blame_command(path: &RepoPath) -> GitCommand {
         .standard_env()
 }
 
+/// A blame's outcome. A binary file blames to raw bytes nobody can read,
+/// so it comes back as its own case for the caller to turn down.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Blamed {
+    Lines(Vec<BlameLine>),
+    Binary,
+}
+
 /// What porcelain output says about a commit. Git prints it only on the
 /// commit's first line, so it is kept for the lines after.
 #[derive(Default)]
@@ -50,13 +58,18 @@ struct CommitInfo {
 /// Parse `git blame --porcelain`. Each line is a `<oid> <orig> <final>
 /// [<count>]` header, then `key value` rows (only on a commit's first
 /// line), then the line itself after a tab. `emoji` applies to the line
-/// text only; the author name always escapes.
-pub fn parse_blame(out: &[u8], emoji: EmojiZwj) -> Result<Vec<BlameLine>, String> {
+/// text only; the author name always escapes. A NUL byte in any line's
+/// content, git's own binary test, makes the whole blame binary; it is
+/// checked on the raw bytes, before sanitising hides it.
+pub fn parse_blame(out: &[u8], emoji: EmojiZwj) -> Result<Blamed, String> {
     let mut commits: HashMap<String, CommitInfo> = HashMap::new();
     let mut lines = Vec::new();
     let mut current: Option<(String, usize)> = None;
     for row in out.split(|&b| b == b'\n') {
         if let Some(text) = row.strip_prefix(b"\t") {
+            if text.contains(&0) {
+                return Ok(Blamed::Binary);
+            }
             let (oid, line_no) = current
                 .take()
                 .ok_or("Could not read git blame's output: a line without a commit")?;
@@ -89,7 +102,7 @@ pub fn parse_blame(out: &[u8], emoji: EmojiZwj) -> Result<Vec<BlameLine>, String
     if current.is_some() {
         return Err("Could not read git blame's output: it ended mid-line".into());
     }
-    Ok(lines)
+    Ok(Blamed::Lines(lines))
 }
 
 impl CommitInfo {
@@ -161,7 +174,7 @@ pub fn read_blame(
     runner: &dyn GitRunner,
     path: &RepoPath,
     emoji: EmojiZwj,
-) -> Result<Vec<BlameLine>, String> {
+) -> Result<Blamed, String> {
     let stdout = run(runner, &blame_command(path), "git blame failed")?;
     parse_blame(&stdout, emoji)
 }
@@ -256,6 +269,14 @@ mod tests {
         .into_bytes()
     }
 
+    /// The lines of a blame that must be text.
+    fn text_lines(blamed: Result<Blamed, String>) -> Vec<BlameLine> {
+        match blamed {
+            Ok(Blamed::Lines(lines)) => lines,
+            other => panic!("expected text lines, got {other:?}"),
+        }
+    }
+
     fn line(oid: &str, author: &str, date: &str, line_no: usize, text: &str) -> BlameLine {
         BlameLine {
             oid: oid.into(),
@@ -271,19 +292,19 @@ mod tests {
         let ann = "Ann \u{FFFD}[31mA";
         assert_eq!(
             parse_blame(&fixture(), EmojiZwj::Escape),
-            Ok(vec![
+            Ok(Blamed::Lines(vec![
                 line(A, ann, "2023-11-15", 1, "one"),
                 line(A, ann, "2023-11-15", 2, "two\u{FFFD}[2J"),
                 line(B, "Bob", "2019-12-31", 3, "three    with tab"),
                 line(A, ann, "2023-11-15", 4, "four"),
-            ])
+            ]))
         );
     }
 
     #[test]
     fn line_text_keeps_a_joiner_that_the_author_name_escapes() {
         let out = format!("{A} 1 1 1\nauthor می\u{200C}خواهم\n\tمی\u{200C}خواهم\n");
-        let lines = parse_blame(out.as_bytes(), EmojiZwj::Escape).unwrap();
+        let lines = text_lines(parse_blame(out.as_bytes(), EmojiZwj::Escape));
         assert_eq!(lines[0].author, "می<U+200C>خواهم");
         assert_eq!(lines[0].text, "می\u{200C}خواهم");
     }
@@ -294,7 +315,7 @@ mod tests {
         let escaped = "👨<U+200D>👩<U+200D>👧";
         let out = format!("{A} 1 1 1\nauthor {family}\n\t{family}\n");
         for (emoji, text) in [(EmojiZwj::Keep, family), (EmojiZwj::Escape, escaped)] {
-            let lines = parse_blame(out.as_bytes(), emoji).unwrap();
+            let lines = text_lines(parse_blame(out.as_bytes(), emoji));
             assert_eq!(lines[0].author, escaped, "{emoji:?}");
             assert_eq!(lines[0].text, text, "{emoji:?}");
         }
@@ -308,7 +329,7 @@ mod tests {
             &["blame", "--porcelain", "--", "a.txt"],
             ok(blame.as_bytes()),
         );
-        let lines = read_blame(&runner, &"a.txt".into(), EmojiZwj::Keep).unwrap();
+        let lines = text_lines(read_blame(&runner, &"a.txt".into(), EmojiZwj::Keep));
         assert_eq!(lines[0].text, family);
         let show = format!("commit {A}\n\ndiff --git a/a b/a\n@@ -1 +1 @@\n+{family}\n");
         let runner = FakeRunner::new().expect(SHOW, ok(show.as_bytes()));
@@ -317,8 +338,26 @@ mod tests {
     }
 
     #[test]
+    fn a_nul_byte_in_a_content_line_makes_the_blame_binary() {
+        let out = format!("{A} 1 1 2\nauthor Ann\n\tPNG\n{A} 2 2\n\tx\0y\n");
+        assert_eq!(
+            parse_blame(out.as_bytes(), EmojiZwj::Escape),
+            Ok(Blamed::Binary)
+        );
+        // A NUL in a header row is not content.
+        let out = format!("{A} 1 1 1\nauthor A\0nn\n\ttext\n");
+        assert!(matches!(
+            parse_blame(out.as_bytes(), EmojiZwj::Escape),
+            Ok(Blamed::Lines(lines)) if lines.len() == 1
+        ));
+    }
+
+    #[test]
     fn empty_output_is_an_empty_file_and_garbage_is_an_error() {
-        assert_eq!(parse_blame(b"", EmojiZwj::Escape), Ok(vec![]));
+        assert_eq!(
+            parse_blame(b"", EmojiZwj::Escape),
+            Ok(Blamed::Lines(vec![]))
+        );
         assert!(parse_blame(b"\torphan line\n", EmojiZwj::Escape).is_err());
         assert!(parse_blame(b"nothex 1 1 1\n\tx\n", EmojiZwj::Escape).is_err());
     }
@@ -329,7 +368,7 @@ mod tests {
             "{A} 1 1 1\nauthor X\nauthor-time -86400\nauthor-tz +0530\n\tx\n\
              {B} 1 2 1\nauthor Y\nauthor-time 1700000000\nauthor-tz -0930\n\ty\n"
         );
-        let lines = parse_blame(out.as_bytes(), EmojiZwj::Escape).unwrap();
+        let lines = text_lines(parse_blame(out.as_bytes(), EmojiZwj::Escape));
         assert_eq!(lines[0].date, "1969-12-31");
         assert_eq!(lines[1].date, "2023-11-14");
     }
@@ -347,7 +386,11 @@ mod tests {
             &["blame", "--porcelain", "--", ":(top)a*.txt"],
             ok(&fixture()),
         );
-        let lines = read_blame(&runner, &":(top)a*.txt".into(), EmojiZwj::Escape).unwrap();
+        let lines = text_lines(read_blame(
+            &runner,
+            &":(top)a*.txt".into(),
+            EmojiZwj::Escape,
+        ));
         assert_eq!(lines.len(), 4);
         runner.assert_done();
         assert_eq!(runner.process_envs(), [env_list(&STANDARD_ENV)]);
@@ -412,7 +455,7 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "one\nTWO\nthree\n").unwrap();
 
         let runner = crate::CliRunner::isolated(dir);
-        let lines = read_blame(&runner, &"a.txt".into(), EmojiZwj::Escape).unwrap();
+        let lines = text_lines(read_blame(&runner, &"a.txt".into(), EmojiZwj::Escape));
         let seen: Vec<(&str, bool, usize, &str)> = lines
             .iter()
             .map(|l| {
@@ -428,6 +471,24 @@ mod tests {
         assert_eq!((seen[1].1, seen[1].2, seen[1].3), (true, 2, "TWO"));
         assert_eq!(seen[2], ("Bob", false, 3, "three"));
         assert_eq!(lines[0].date.len(), "YYYY-MM-DD".len());
+    }
+
+    #[test]
+    fn a_real_blame_of_a_committed_binary_file_is_binary() {
+        use crate::fake::{TempDir, git};
+
+        let tmp = TempDir::new("blame-binary");
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        std::fs::write(dir.join("image.bin"), b"\x89PNG\0\0\x01\x02\n").unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["-c", "user.name=Ann", "commit", "-q", "-m", "image"]);
+
+        let runner = crate::CliRunner::isolated(dir);
+        assert_eq!(
+            read_blame(&runner, &"image.bin".into(), EmojiZwj::Escape),
+            Ok(Blamed::Binary)
+        );
     }
 
     const SHOW: &[&str] = &[

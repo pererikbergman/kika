@@ -2,7 +2,7 @@
 //! lines it changes, by `git blame` of `HEAD`. Read only; the parsing and
 //! the choice are pure.
 
-use kika_git::blame::parse_blame;
+use kika_git::blame::{Blamed, parse_blame};
 use kika_git::commit_files::CommitId;
 use kika_git::diff::EmojiZwj;
 use kika_git::path::RepoPath;
@@ -180,9 +180,13 @@ fn old_range(line: &[u8]) -> Option<OldRange> {
 }
 
 /// The commit of each line of `HEAD`'s version of a file, from `git blame
-/// --porcelain HEAD`: index 0 is line 1.
+/// --porcelain HEAD`: index 0 is line 1. A binary file has no lines, as
+/// its staged diff has no hunks to place.
 pub fn parse_line_commits(blame: &[u8]) -> Result<Vec<CommitId>, String> {
-    let lines = parse_blame(blame, EmojiZwj::default())?;
+    let lines = match parse_blame(blame, EmojiZwj::default())? {
+        Blamed::Lines(lines) => lines,
+        Blamed::Binary => vec![],
+    };
     let mut commits = vec![None; lines.len()];
     for line in lines {
         let slot = line

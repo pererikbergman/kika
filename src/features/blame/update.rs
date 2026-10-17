@@ -17,6 +17,7 @@ pub(crate) fn update(state: &mut AppState, intent: BlameIntent) -> Vec<Effect> {
     match intent {
         BlameIntent::Open => return state.open_blame(),
         BlameIntent::Loaded { tag, result } => state.blame_loaded(tag, result),
+        BlameIntent::Binary { tag } => return state.blame_binary(tag),
         BlameIntent::Next => state.with_blame(|view, rows| view.move_by(1, rows)),
         BlameIntent::Prev => state.with_blame(|view, rows| view.move_by(-1, rows)),
         BlameIntent::PageDown => state.with_blame(|view, rows| view.page(true, rows)),
@@ -61,6 +62,21 @@ impl AppState {
             return;
         }
         view.loaded(result);
+    }
+
+    /// The blame load found a binary file: say so and go back to the side
+    /// panel, as `b` does for a file it cannot blame.
+    pub(crate) fn blame_binary(&mut self, tag: Tag) -> Vec<Effect> {
+        // Every user effect reports back once, stale or not.
+        self.user_done(tag);
+        let Focus::Blame(view) = &self.focus else {
+            return vec![];
+        };
+        if tag.generation != self.generation || view.seq != Some(tag.seq) {
+            return vec![];
+        }
+        self.notice = Some("Binary file: nothing to blame".into());
+        self.close_blame()
     }
 
     /// Change the blame's cursor, given the pane's rows.
@@ -217,6 +233,46 @@ mod tests {
             tag,
             result: Ok(vec![blame_line(OID, 1)]),
         }));
+        assert_eq!(state.focus, Focus::Files);
+        assert_eq!(state.busy_count(), 0);
+    }
+
+    #[test]
+    fn a_binary_blame_says_so_and_goes_back_to_files() {
+        let (mut state, tag) = blaming(24);
+        state.update(AppIntent::Blame(BlameIntent::Binary { tag }));
+        assert_eq!(state.notice, Some("Binary file: nothing to blame".into()));
+        assert_eq!(state.panel_focus(), KeyScope::Files);
+        assert_eq!(state.busy_count(), 0);
+    }
+
+    #[test]
+    fn a_stale_binary_blame_only_lowers_busy() {
+        let (mut state, tag) = blaming(24);
+        let stale = Tag {
+            seq: tag.seq + 100,
+            ..tag
+        };
+        state.update(AppIntent::Blame(BlameIntent::Binary { tag: stale }));
+        assert_eq!(state.notice, None);
+        assert_eq!(state.panel_focus(), KeyScope::Blame);
+        assert_eq!(state.busy_count(), 0);
+
+        let old_generation = Tag {
+            generation: tag.generation + 1,
+            ..tag
+        };
+        state.update(AppIntent::Blame(BlameIntent::Binary {
+            tag: old_generation,
+        }));
+        assert_eq!(state.notice, None);
+        assert_eq!(state.panel_focus(), KeyScope::Blame);
+
+        // Closed before it landed: nothing to turn down.
+        let (mut state, tag) = blaming(24);
+        press(&mut state, KeyCode::Esc);
+        state.update(AppIntent::Blame(BlameIntent::Binary { tag }));
+        assert_eq!(state.notice, None);
         assert_eq!(state.focus, Focus::Files);
         assert_eq!(state.busy_count(), 0);
     }
