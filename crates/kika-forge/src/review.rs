@@ -18,7 +18,7 @@ use super::{ForgeHost, ForgeRepo, ForgeStatus, PrState};
 use kika_git::GitRunner;
 use kika_git::commit_files::CommitId;
 use kika_git::diff::{EmojiZwj, sanitize_body};
-use kika_git::forge_remote::{read_fetch_remote, read_remote_url};
+use kika_git::forge_remote::{ForgeRemote, read_forge_remote};
 use kika_git::recording::CommandOutcome;
 use kika_git::remotes::RemoteName;
 use kika_git::safe_text::sanitize;
@@ -289,10 +289,13 @@ pub enum ViewedGap {
 
 /// Why review mode has nothing to show. A fixed set: nothing `gh` or
 /// GitHub says is kept.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReviewError {
     /// The remote is on no `[forge] github` host; nobody was asked.
     NoForgeHost,
+    /// The remote has several URLs, so it names no one repository;
+    /// nobody was asked.
+    SeveralUrls(RemoteName),
     /// GitHub refuses calls until this second.
     Limited {
         until: i64,
@@ -1041,37 +1044,64 @@ pub(crate) fn capped_body(text: &str, max: usize) -> String {
 
 /// The configured host and repository the remote is on: `known` when an
 /// earlier load found it, else read from the remote as the badge load
-/// does. `None` when it is on no configured host, or that host's
+/// does. `SeveralUrls` when the remote has several URLs, and
+/// `NoForgeHost` when it is on no configured host, or that host's
 /// allow-list leaves it out.
 pub fn resolve(
     git: &dyn GitRunner,
     hosts: &[ForgeHost],
     known: Option<&ForgeRepo>,
-) -> Option<(ForgeHost, ForgeRepo)> {
+) -> Result<(ForgeHost, ForgeRepo), ReviewError> {
     let repo = match known {
         Some(repo) => repo.clone(),
-        None => read_remote_url(git).and_then(|url| parse_remote(&url))?,
+        None => match read_forge_remote(git) {
+            Some(ForgeRemote::One { url, .. }) => parse_remote(&url),
+            Some(ForgeRemote::Several(name)) => return Err(ReviewError::SeveralUrls(name)),
+            None => None,
+        }
+        .ok_or(ReviewError::NoForgeHost)?,
     };
-    let host = allowed(&repo, hosts)?.clone();
-    Some((host, repo))
+    let host = allowed(&repo, hosts)
+        .ok_or(ReviewError::NoForgeHost)?
+        .clone();
+    Ok((host, repo))
+}
+
+/// Why no remote may be fetched from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoFetchRemote {
+    /// No remote names the repository on a configured host.
+    NotNamed,
+    /// The remote has several URLs: the one checked need not be the one
+    /// git fetches from.
+    SeveralUrls(RemoteName),
 }
 
 /// The remote a pull request's commits may be fetched from: the one
-/// whose URL names `repo` itself, on one of `hosts`. `None` when the
-/// remote names another repository or host, or has a name git could read
-/// as an option; then nothing may be fetched.
+/// whose one URL names `repo` itself, on one of `hosts`. `NotNamed` when
+/// the remote names another repository or host, or has a name git could
+/// read as an option; `SeveralUrls` when it has several URLs, even if
+/// one of them names `repo`. Then nothing may be fetched.
 pub fn fetch_remote(
     git: &dyn GitRunner,
     hosts: &[ForgeHost],
     repo: &ForgeRepo,
-) -> Option<RemoteName> {
-    allowed(repo, hosts)?;
-    let (name, url) = read_fetch_remote(git)?;
-    let named = parse_remote(&url)?;
+) -> Result<RemoteName, NoFetchRemote> {
+    allowed(repo, hosts).ok_or(NoFetchRemote::NotNamed)?;
+    let (name, url) = match read_forge_remote(git) {
+        Some(ForgeRemote::One { name, url }) => (name, url),
+        Some(ForgeRemote::Several(name)) => return Err(NoFetchRemote::SeveralUrls(name)),
+        None => return Err(NoFetchRemote::NotNamed),
+    };
+    let named = parse_remote(&url).ok_or(NoFetchRemote::NotNamed)?;
     let same = named.host.eq_ignore_ascii_case(&repo.host)
         && named.owner == repo.owner
         && named.name == repo.name;
-    (same && matches(&named, hosts).is_some() && !name.0.starts_with(b"-")).then_some(name)
+    if same && matches(&named, hosts).is_some() && !name.0.starts_with(b"-") {
+        Ok(name)
+    } else {
+        Err(NoFetchRemote::NotNamed)
+    }
 }
 
 /// One review load's inputs, as the effect gave them.
@@ -1097,8 +1127,9 @@ pub fn run<T>(
     if load.hosts.is_empty() {
         return (None, Err(ReviewError::NoForgeHost));
     }
-    let Some((host, repo)) = resolve(git, load.hosts, load.known) else {
-        return (None, Err(ReviewError::NoForgeHost));
+    let (host, repo) = match resolve(git, load.hosts, load.known) {
+        Ok(found) => found,
+        Err(error) => return (None, Err(error)),
     };
     if let Some(until) = limited_until(load.limited, &host, load.now) {
         return (Some(repo), Err(ReviewError::Limited { until }));
@@ -1991,7 +2022,7 @@ pub(crate) mod tests {
         kika_git::fake::FakeRunner::new()
             .expect(&["remote"], kika_git::fake::ok(b"origin\n"))
             .expect(
-                &["config", "-z", "--get", "remote.origin.url"],
+                &["config", "-z", "--get-all", "remote.origin.url"],
                 kika_git::fake::ok(&out),
             )
     }
@@ -2099,7 +2130,7 @@ pub(crate) mod tests {
         // Nor may its commits be fetched.
         assert_eq!(
             fetch_remote(&kika_git::fake::FakeRunner::new(), &other_only, &known),
-            None
+            Err(NoFetchRemote::NotNamed)
         );
 
         // A listed repository is fetched as without a list.
@@ -2146,7 +2177,7 @@ pub(crate) mod tests {
         let git = remote_named("upstream", b"git@github.com:acme/widgets.git");
         assert_eq!(
             fetch_remote(&git, &hosts, &repo()),
-            Some(RemoteName::from("upstream"))
+            Ok(RemoteName::from("upstream"))
         );
         git.assert_done();
         for url in [
@@ -2155,17 +2186,91 @@ pub(crate) mod tests {
             b"/srv/git/widgets.git",
         ] {
             let git = remote_named("origin", url);
-            assert_eq!(fetch_remote(&git, &hosts, &repo()), None, "{url:?}");
+            assert_eq!(
+                fetch_remote(&git, &hosts, &repo()),
+                Err(NoFetchRemote::NotNamed),
+                "{url:?}"
+            );
         }
         // A host no longer configured is asked nothing, not even git.
         let git = kika_git::fake::FakeRunner::new();
-        assert_eq!(fetch_remote(&git, &[], &repo()), None);
+        assert_eq!(
+            fetch_remote(&git, &[], &repo()),
+            Err(NoFetchRemote::NotNamed)
+        );
         let other = [ForgeHost::parse("github.example.com").unwrap()];
-        assert_eq!(fetch_remote(&git, &other, &repo()), None);
+        assert_eq!(
+            fetch_remote(&git, &other, &repo()),
+            Err(NoFetchRemote::NotNamed)
+        );
         git.assert_done();
         // A name git would read as an option is never handed to it.
         let git = remote_named("-x", b"https://github.com/acme/widgets");
-        assert_eq!(fetch_remote(&git, &hosts, &repo()), None);
+        assert_eq!(
+            fetch_remote(&git, &hosts, &repo()),
+            Err(NoFetchRemote::NotNamed)
+        );
+    }
+
+    /// `origin` with a mirror URL and the real one, in either order.
+    const SEVERAL_URLS: [&[u8]; 2] = [
+        b"https://github.com/me/mirror.git\0https://github.com/acme/widgets.git\0",
+        b"https://github.com/acme/widgets.git\0https://github.com/me/mirror.git\0",
+    ];
+
+    fn several_urls(urls: &[u8]) -> kika_git::fake::FakeRunner {
+        kika_git::fake::FakeRunner::new()
+            .expect(&["remote"], kika_git::fake::ok(b"origin\n"))
+            .expect(
+                &["config", "-z", "--get-all", "remote.origin.url"],
+                kika_git::fake::ok(urls),
+            )
+    }
+
+    #[test]
+    fn a_remote_with_several_urls_names_no_repository_in_either_order() {
+        let gh = Arc::new(FakeGh::new());
+        let hosts = [host()];
+        let load = ReviewLoad {
+            hosts: &hosts,
+            known: None,
+            limited: &[],
+            now: NOW,
+        };
+        let origin = RemoteName::from("origin");
+        for urls in SEVERAL_URLS {
+            let git = several_urls(urls);
+            assert_eq!(
+                resolve(&git, &hosts, None),
+                Err(ReviewError::SeveralUrls(origin.clone()))
+            );
+            git.assert_done();
+            let git = several_urls(urls);
+            let (repo, result) = run(&git, &context(Arc::clone(&gh)), &load, |gh, repo| {
+                gh.fetch_queues(repo)
+            });
+            git.assert_done();
+            assert_eq!(
+                (repo, result),
+                (None, Err(ReviewError::SeveralUrls(origin.clone())))
+            );
+        }
+        assert_eq!(gh.calls(), []);
+    }
+
+    #[test]
+    fn commits_are_never_fetched_from_a_remote_with_several_urls() {
+        // Even with the real repository known from an earlier load, as
+        // when a URL was added during the session.
+        let hosts = [host()];
+        for urls in SEVERAL_URLS {
+            let git = several_urls(urls);
+            assert_eq!(
+                fetch_remote(&git, &hosts, &repo()),
+                Err(NoFetchRemote::SeveralUrls(RemoteName::from("origin")))
+            );
+            git.assert_done();
+        }
     }
 
     #[test]
@@ -2193,7 +2298,7 @@ pub(crate) mod tests {
         let git = origin(b"https://gitlab.example.com/acme/sub/widgets");
         assert_eq!(
             resolve(&git, std::slice::from_ref(&host), None),
-            Some((host.clone(), nested.clone()))
+            Ok((host.clone(), nested.clone()))
         );
         git.assert_done();
 
@@ -2202,12 +2307,12 @@ pub(crate) mod tests {
         let git = origin(b"https://gitlab.example.com/acme/sub/widgets");
         assert_eq!(
             resolve(&git, &listed, None),
-            Some((listed[0].clone(), nested.clone()))
+            Ok((listed[0].clone(), nested.clone()))
         );
         let other = [host.with_allow(vec![rule("other")])];
         assert_eq!(
             resolve(&kika_git::fake::FakeRunner::new(), &other, Some(&nested)),
-            None
+            Err(ReviewError::NoForgeHost)
         );
     }
 
@@ -2218,7 +2323,7 @@ pub(crate) mod tests {
         let git = remote_named("origin", b"https://gitlab.example.com/acme/sub/widgets");
         assert_eq!(
             fetch_remote(&git, &hosts, &nested),
-            Some(RemoteName::from("origin"))
+            Ok(RemoteName::from("origin"))
         );
         git.assert_done();
         for url in [
@@ -2227,14 +2332,21 @@ pub(crate) mod tests {
             b"https://gitlab.example.com/acme/sub/sub/widgets",
         ] {
             let git = remote_named("origin", url);
-            assert_eq!(fetch_remote(&git, &hosts, &nested), None, "{url:?}");
+            assert_eq!(
+                fetch_remote(&git, &hosts, &nested),
+                Err(NoFetchRemote::NotNamed),
+                "{url:?}"
+            );
         }
     }
 
     #[test]
     fn github_stays_two_parts_a_nested_remote_or_owner_asks_nobody() {
         let git = origin(b"https://github.com/a/b/c");
-        assert_eq!(resolve(&git, &[host()], None), None);
+        assert_eq!(
+            resolve(&git, &[host()], None),
+            Err(ReviewError::NoForgeHost)
+        );
 
         let runner = FakeGh::new();
         let nested = ForgeRepo {

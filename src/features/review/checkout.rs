@@ -133,8 +133,10 @@ fn op_for(
             return Err(format!("{name} is checked out in another worktree").into());
         }
     };
-    if !plan.head_here && plan.remote.is_none() {
-        return Err(no_fetch_remote(words).into());
+    if !plan.head_here
+        && let Err(why) = &plan.remote
+    {
+        return Err(no_fetch_remote(words, why).into());
     }
     Ok(GitOp::CheckoutPrBranch {
         number,
@@ -176,7 +178,7 @@ fn question(
         ),
     };
     let fetch = match (&plan.remote, plan.head_here) {
-        (Some(remote), false) => format!(" Fetches it from {} first.", remote.display()),
+        (Ok(remote), false) => format!(" Fetches it from {} first.", remote.display()),
         _ => String::new(),
     };
     ConfirmQuestion {
@@ -319,7 +321,7 @@ impl AppState {
         if plan.head_here {
             return self.start_pr_checkout(op);
         }
-        let Some(remote) = plan.remote.clone() else {
+        let Ok(remote) = plan.remote.clone() else {
             return vec![];
         };
         // A user effect holding the git slot, like the files screen's fetch.
@@ -409,12 +411,12 @@ mod tests {
 
     use super::*;
     use crate::features::review::ReviewIntent;
-    use crate::features::review::files::tests::{NO_FETCH_REMOTE, STILL_MISSING};
+    use crate::features::review::files::tests::{NO_FETCH_REMOTE, SEVERAL_URLS, STILL_MISSING};
     use crate::features::review::state::tests::{fixture_detail, opened_on, press, repo};
     use crate::intent::AppIntent;
     use crate::model::Context;
     use crate::test_support::{start_bisecting, start_merging};
-    use kika_forge::review::PrDetail;
+    use kika_forge::review::{NoFetchRemote, PrDetail};
     use kika_git::remotes::RemoteName;
 
     const HEAD: &str = "1111111111111111111111111111111111111111";
@@ -439,7 +441,7 @@ mod tests {
     fn here(at: BranchAt, current: bool) -> CheckoutPlan {
         CheckoutPlan {
             head_here: true,
-            remote: None,
+            remote: Err(NoFetchRemote::NotNamed),
             at,
             current,
             in_progress: vec![],
@@ -449,7 +451,7 @@ mod tests {
     fn missing(at: BranchAt, remote: Option<&str>) -> CheckoutPlan {
         CheckoutPlan {
             head_here: false,
-            remote: remote.map(RemoteName::from),
+            remote: remote.map(RemoteName::from).ok_or(NoFetchRemote::NotNamed),
             ..here(at, false)
         }
     }
@@ -625,6 +627,13 @@ mod tests {
                 "pr/12 is checked out in another worktree",
             ),
             (missing(BranchAt::Absent, None), NO_FETCH_REMOTE),
+            (
+                CheckoutPlan {
+                    remote: Err(NoFetchRemote::SeveralUrls(RemoteName::from("origin"))),
+                    ..missing(BranchAt::Absent, None)
+                },
+                SEVERAL_URLS,
+            ),
             (here(BranchAt::Same, true), "Already on pr/12 at 1111111"),
             (
                 CheckoutPlan {

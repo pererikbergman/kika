@@ -10,15 +10,19 @@ use super::path::os_string;
 use super::remotes::RemoteName;
 use super::runner::{GitCommand, GitRunner};
 
-/// The raw URL bytes, or `None` when no remote qualifies or git fails.
-pub fn read_remote_url(runner: &dyn GitRunner) -> Option<Vec<u8>> {
-    read_url(runner, &remote_name(runner)?)
+/// The forge remote as Kika may use it: its one URL, or only its name
+/// when it has several. A remote with several URLs is used for no forge
+/// lookup or fetch, since git fetches from the first while a plain
+/// `--get` reads the last.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForgeRemote {
+    One { name: RemoteName, url: Vec<u8> },
+    Several(RemoteName),
 }
 
-/// The remote's name and its one URL, for a fetch that must reach exactly
-/// the repository the URL names. `None` when the remote has several URLs:
-/// `--get` reads the last while a fetch uses the first.
-pub fn read_fetch_remote(runner: &dyn GitRunner) -> Option<(RemoteName, Vec<u8>)> {
+/// The forge remote and every URL it has, read once with `--get-all`.
+/// `None` when no remote qualifies, git fails, or the URL is empty.
+pub fn read_forge_remote(runner: &dyn GitRunner) -> Option<ForgeRemote> {
     let name = remote_name(runner)?;
     let output = runner.run(&url_command(&name, "--get-all")).ok()?;
     if !output.success {
@@ -26,8 +30,13 @@ pub fn read_fetch_remote(runner: &dyn GitRunner) -> Option<(RemoteName, Vec<u8>)
     }
     let body = output.stdout.strip_suffix(b"\0").unwrap_or(&output.stdout);
     let mut urls = body.split(|&b| b == 0);
+    let name = RemoteName::from_bytes(&name);
     match (urls.next(), urls.next()) {
-        (Some(url), None) if !url.is_empty() => Some((RemoteName::from_bytes(&name), url.to_vec())),
+        (Some(url), None) if !url.is_empty() => Some(ForgeRemote::One {
+            name,
+            url: url.to_vec(),
+        }),
+        (Some(_), Some(_)) => Some(ForgeRemote::Several(name)),
         _ => None,
     }
 }
@@ -167,17 +176,23 @@ mod tests {
     use crate::fake::{FakeRunner, fail, ok};
     use crate::runner::EnvProfile;
 
+    const GET_ALL_ORIGIN: [&str; 4] = ["config", "-z", "--get-all", "remote.origin.url"];
+
+    fn one(name: &str, url: &str) -> Option<ForgeRemote> {
+        Some(ForgeRemote::One {
+            name: RemoteName::from(name),
+            url: url.into(),
+        })
+    }
+
     #[test]
     fn origin_is_used_when_present() {
         let fake = FakeRunner::new()
             .expect(&["remote"], ok(b"fork\norigin\n"))
-            .expect(
-                &["config", "-z", "--get", "remote.origin.url"],
-                ok(b"git@github.com:o/r.git\0"),
-            );
+            .expect(&GET_ALL_ORIGIN, ok(b"git@github.com:o/r.git\0"));
         assert_eq!(
-            read_remote_url(&fake),
-            Some(b"git@github.com:o/r.git".to_vec())
+            read_forge_remote(&fake),
+            one("origin", "git@github.com:o/r.git")
         );
         fake.assert_done();
         // These reads always ran in the user's own env.
@@ -185,6 +200,7 @@ mod tests {
         for cmd in [
             remotes_command(),
             upstreams_command(),
+            url_command(b"origin", "--get-all"),
             url_command(b"origin", "--get"),
         ] {
             assert_eq!(cmd.env_profile(), Some(EnvProfile::UserEnv), "{cmd:?}");
@@ -192,30 +208,22 @@ mod tests {
     }
 
     #[test]
-    fn a_fetch_remote_comes_with_its_name_and_only_one_url() {
-        let get_all = ["config", "-z", "--get-all", "remote.upstream.url"];
-        let fake = FakeRunner::new()
-            .expect(&["remote"], ok(b"upstream\n"))
-            .expect(&get_all, ok(b"https://github.com/o/r\0"));
-        assert_eq!(
-            read_fetch_remote(&fake),
-            Some((
-                RemoteName::from("upstream"),
-                b"https://github.com/o/r".to_vec()
-            ))
-        );
-        // Two URLs: the one checked need not be the one fetched from.
-        let fake = FakeRunner::new()
-            .expect(&["remote"], ok(b"upstream\n"))
-            .expect(
-                &get_all,
-                ok(b"https://github.com/o/r\0https://evil.example/o/r\0"),
+    fn a_remote_with_several_urls_is_several_in_either_order() {
+        // The FakeRunner fails on any other command, so only `--get-all`
+        // is read: never `--get`, which gives the last URL.
+        for urls in [
+            &b"https://github.com/me/mirror.git\0https://github.com/o/r.git\0"[..],
+            &b"https://github.com/o/r.git\0https://github.com/me/mirror.git\0"[..],
+        ] {
+            let fake = FakeRunner::new()
+                .expect(&["remote"], ok(b"origin\n"))
+                .expect(&GET_ALL_ORIGIN, ok(urls));
+            assert_eq!(
+                read_forge_remote(&fake),
+                Some(ForgeRemote::Several(RemoteName::from("origin")))
             );
-        assert_eq!(read_fetch_remote(&fake), None);
-        let fake = FakeRunner::new()
-            .expect(&["remote"], ok(b"upstream\n"))
-            .expect(&get_all, fail(""));
-        assert_eq!(read_fetch_remote(&fake), None);
+            fake.assert_done();
+        }
     }
 
     #[test]
@@ -223,27 +231,32 @@ mod tests {
         let fake = FakeRunner::new()
             .expect(&["remote"], ok(b"upstream\n"))
             .expect(
-                &["config", "-z", "--get", "remote.upstream.url"],
+                &["config", "-z", "--get-all", "remote.upstream.url"],
                 ok(b"https://github.com/o/r\0"),
             );
         assert_eq!(
-            read_remote_url(&fake),
-            Some(b"https://github.com/o/r".to_vec())
+            read_forge_remote(&fake),
+            one("upstream", "https://github.com/o/r")
         );
     }
 
     #[test]
     fn several_remotes_without_origin_or_none_give_nothing() {
         let fake = FakeRunner::new().expect(&["remote"], ok(b"a\nb\n"));
-        assert_eq!(read_remote_url(&fake), None);
+        assert_eq!(read_forge_remote(&fake), None);
         let fake = FakeRunner::new().expect(&["remote"], ok(b""));
-        assert_eq!(read_remote_url(&fake), None);
+        assert_eq!(read_forge_remote(&fake), None);
         let fake = FakeRunner::new().expect(&["remote"], fail("not a repo"));
-        assert_eq!(read_remote_url(&fake), None);
+        assert_eq!(read_forge_remote(&fake), None);
         let fake = FakeRunner::new()
             .expect(&["remote"], ok(b"origin\n"))
-            .expect(&["config", "-z", "--get", "remote.origin.url"], fail(""));
-        assert_eq!(read_remote_url(&fake), None);
+            .expect(&GET_ALL_ORIGIN, fail(""));
+        assert_eq!(read_forge_remote(&fake), None);
+        // An empty URL is no URL.
+        let fake = FakeRunner::new()
+            .expect(&["remote"], ok(b"origin\n"))
+            .expect(&GET_ALL_ORIGIN, ok(b"\0"));
+        assert_eq!(read_forge_remote(&fake), None);
     }
 
     const UPSTREAMS: [&str; 3] = UPSTREAMS_ARGV;

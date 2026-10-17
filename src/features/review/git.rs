@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 
+use kika_forge::review::NoFetchRemote;
 use kika_git::branches::BranchName;
 use kika_git::commit_files::{
     CommitFile, CommitId, CommitRange, LineCounts, commit_files, numstat,
@@ -38,14 +39,13 @@ pub enum FileCounts {
 }
 
 /// Whether a pull request's commits are here, and where the missing ones
-/// may be fetched from: `None` when no remote names the reviewed
-/// repository on a configured host.
+/// may be fetched from, or why no remote may be.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommitsHere {
     All,
     Missing {
         oids: Vec<CommitId>,
-        remote: Option<RemoteName>,
+        remote: Result<RemoteName, NoFetchRemote>,
     },
 }
 
@@ -274,9 +274,9 @@ pub enum BranchAt {
 pub struct CheckoutPlan {
     /// The head commit is in the local repository.
     pub head_here: bool,
-    /// Where a missing head may be fetched from; `None` when it is here
-    /// or no remote names the reviewed repository on a configured host.
-    pub remote: Option<RemoteName>,
+    /// Where a missing head may be fetched from, or why no remote may be;
+    /// `NotNamed` while the head is here.
+    pub remote: Result<RemoteName, NoFetchRemote>,
     pub at: BranchAt,
     /// The branch is the one checked out in this worktree.
     pub current: bool,
@@ -465,7 +465,7 @@ pub fn plan_checkout(
     };
     Ok(CheckoutPlan {
         head_here,
-        remote: None,
+        remote: Err(NoFetchRemote::NotNamed),
         at,
         current,
         in_progress: operations(runner)?,
@@ -1190,7 +1190,7 @@ mod tests {
             absent,
             CheckoutPlan {
                 head_here: true,
-                remote: None,
+                remote: Err(NoFetchRemote::NotNamed),
                 at: BranchAt::Absent,
                 current: false,
                 in_progress: vec![],

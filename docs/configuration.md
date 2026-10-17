@@ -287,7 +287,10 @@ github = ["github.com", "github.example.com"]
   there is no `origin`. Its URL must be `https://host/owner/repo`,
   `ssh://host/owner/repo` or `user@host:owner/repo` (with or without `.git`),
   on the standard port, and the host must equal one you listed. Any other
-  repository shows nothing. A branch shows the newest pull request
+  repository shows nothing. A remote with several URLs (`git remote
+  set-url --add`) matches nothing either, since git fetches from its first
+  URL: it shows no badges, and review mode says the remote has several
+  URLs. A branch shows the newest pull request
   into that repository whose head branch has the same name.
 - Opening any clone whose origin is on a listed host runs read-only `gh`
   calls under your account, for that clone's owner/repo and branch names,

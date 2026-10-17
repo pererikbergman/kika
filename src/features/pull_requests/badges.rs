@@ -404,6 +404,7 @@ mod tests {
         // user fetch asks again.
         state.update(AppIntent::PullRequests(PullRequestsIntent::RepoNone {
             tag,
+            several_urls: None,
         }));
         assert_eq!(loads(&list_branches(&mut state, &["main"])), []);
         let effects = remote_ok(&mut state, remote_intent(&RemoteOp::Fetch), RemoteOp::Fetch);
@@ -499,6 +500,7 @@ mod tests {
         };
         state.update(AppIntent::PullRequests(PullRequestsIntent::RepoNone {
             tag,
+            several_urls: None,
         }));
         assert_eq!(state.forge.status, ForgeView::Off);
         assert!(!state.forge.in_flight);
@@ -596,6 +598,7 @@ mod tests {
         }));
         state.update(AppIntent::PullRequests(PullRequestsIntent::RepoNone {
             tag: old,
+            several_urls: None,
         }));
         state.update(AppIntent::PullRequests(PullRequestsIntent::Fetched {
             tag: old,
@@ -720,6 +723,7 @@ mod tests {
         };
         unmatched.update(AppIntent::PullRequests(PullRequestsIntent::RepoNone {
             tag,
+            several_urls: None,
         }));
         assert!(unmatched.forge.unmatched);
         assert_eq!(

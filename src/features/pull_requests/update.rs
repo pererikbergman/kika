@@ -12,9 +12,9 @@ use crate::popup::ErrorPopup;
 /// cannot clash with handlers.
 pub(crate) fn update(state: &mut AppState, intent: PullRequestsIntent) -> Vec<Effect> {
     match intent {
-        PullRequestsIntent::RepoNone { tag } => {
+        PullRequestsIntent::RepoNone { tag, several_urls } => {
             if tag.generation == state.generation {
-                state.forge.repo_none(tag);
+                state.forge.repo_none(tag, several_urls);
             }
         }
         PullRequestsIntent::Cached { tag, repo, badges } => {
