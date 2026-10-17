@@ -417,13 +417,15 @@ pub enum Effect {
     },
     /// Fetch `oids` from `remote` by id, with git's and ssh's questions
     /// sent as `CredentialAsked`; when that fails, fetch the forge's
-    /// `fallback` head ref instead, if it has one. Always answered by one
-    /// `ReviewIntent::HeadFetched`.
+    /// `fallback` head ref instead, if it has one. `no_write_fetch_head`
+    /// is whether git is new enough to be told to leave `FETCH_HEAD` alone.
+    /// Always answered by one `ReviewIntent::HeadFetched`.
     FetchReviewCommits {
         tag: Tag,
         remote: RemoteName,
         oids: Vec<CommitId>,
         fallback: Option<String>,
+        no_write_fetch_head: bool,
     },
     /// The merge base of `base` and `head`, and the files the pull request
     /// changes from it. Always answered by one `ReviewIntent::FilesLoaded`.
@@ -1355,6 +1357,7 @@ impl Runtime {
                 remote,
                 oids,
                 fallback,
+                no_write_fetch_head,
             } => review::effects::fetch_commits(
                 runner,
                 tx,
@@ -1362,6 +1365,7 @@ impl Runtime {
                 remote,
                 oids,
                 fallback,
+                no_write_fetch_head,
                 Arc::clone(&self.credential),
             ),
             Effect::LoadReviewFiles { tag, head, base } => {

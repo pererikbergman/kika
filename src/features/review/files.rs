@@ -21,6 +21,7 @@ use kika_forge::review::ViewedState;
 use kika_git::commit_files::{CommitFile, CommitId, CommitRange};
 use kika_git::diff::DiffRequest;
 use kika_git::path::RepoPath;
+use kika_git::version;
 
 const NOTHING_SEARCHED: &str = "Nothing searched yet (/)";
 
@@ -417,6 +418,7 @@ impl AppState {
             remote,
             oids,
             fallback,
+            no_write_fetch_head: self.git_has(version::NO_WRITE_FETCH_HEAD),
         }]
     }
 
@@ -843,12 +845,15 @@ pub(crate) mod tests {
                     remote,
                     oids,
                     fallback,
+                    no_write_fetch_head,
                 },
             ] => {
                 assert_eq!(*remote, RemoteName::from("upstream"));
                 assert_eq!(*oids, [head()]);
                 // GitHub serves the head by id alone.
                 assert_eq!(*fallback, None);
+                // An unknown git: no flag it may not have.
+                assert!(!no_write_fetch_head);
                 *tag
             }
             other => panic!("expected one fetch, got {other:?}"),
@@ -885,6 +890,29 @@ pub(crate) mod tests {
         assert_eq!(stage(&state), FilesStage::Failed(FETCHED_BEFORE.into()));
         state.review.restart();
         assert_eq!(state.review.fetched_heads, [(12, head())]);
+    }
+
+    #[test]
+    fn the_fetch_leaves_fetch_head_alone_only_where_git_can_be_told_to() {
+        use crate::test_support::version;
+        for (git, want) in [(version(29), true), (version(28), false), (None, false)] {
+            let (mut state, tag) = opened();
+            state.git_version = git;
+            let effects = state.update(AppIntent::Review(ReviewIntent::ObjectsChecked {
+                tag,
+                result: missing(Some("origin")),
+            }));
+            let [
+                Effect::FetchReviewCommits {
+                    no_write_fetch_head,
+                    ..
+                },
+            ] = effects.as_slice()
+            else {
+                panic!("{effects:?}");
+            };
+            assert_eq!(*no_write_fetch_head, want, "{git:?}");
+        }
     }
 
     #[test]

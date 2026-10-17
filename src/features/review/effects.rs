@@ -204,6 +204,7 @@ pub(crate) fn plan_checkout(
 
 /// Fetch `oids` from `remote`, with git's questions asked through the
 /// core credential `slot`; always answered by one `ReviewIntent::HeadFetched`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn fetch_commits(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,
@@ -211,6 +212,7 @@ pub(crate) fn fetch_commits(
     remote: RemoteName,
     oids: Vec<CommitId>,
     fallback: Option<String>,
+    no_write_fetch_head: bool,
     slot: AnswerSlot,
 ) {
     let bridge_tx = tx.clone();
@@ -223,6 +225,7 @@ pub(crate) fn fetch_commits(
                 &remote,
                 &oids,
                 fallback.as_deref(),
+                no_write_fetch_head,
                 bridge.env.as_ref(),
             )
         },
