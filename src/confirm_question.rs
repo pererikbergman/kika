@@ -190,7 +190,7 @@ mod tests {
 
     /// Each question's yes binding, with the answer its question is asked
     /// with.
-    const YES_BINDINGS: [(&str, KeyScope, Answer); 20] = [
+    const YES_BINDINGS: [(&str, KeyScope, Answer); 21] = [
         (
             "discard_confirm.yes",
             KeyScope::DiscardConfirm,
@@ -219,6 +219,11 @@ mod tests {
         ("confirm.yes", KeyScope::Confirm, Answer::YOrEnter),
         ("abort_confirm.yes", KeyScope::AbortConfirm, Answer::YOnly),
         ("skip_confirm.yes", KeyScope::SkipConfirm, Answer::YOnly),
+        (
+            "force_push_confirm.yes",
+            KeyScope::ForcePushConfirm,
+            Answer::YOnly,
+        ),
         (
             "autosquash_confirm.yes",
             KeyScope::AutosquashConfirm,
@@ -465,11 +470,12 @@ mod tests {
             crate::features::operation::skip_question(Operation::Rebase, None).unwrap(),
             crate::features::operation::skip_question_unchecked(Operation::CherryPick, None)
                 .unwrap(),
+            crate::features::sync::force_push_question(),
         ]
     }
 
     /// Whether `scope`'s yes binding sends `ConfirmYes`, which then
-    /// answers its question: the discard and the skip question.
+    /// answers its question: the discard, skip and force-push questions.
     fn yes_is_confirm_yes(scope: KeyScope) -> bool {
         crate::keymap::registry().iter().any(|b| {
             b.scope == scope && b.intent == AppIntent::ConfirmYes && b.id.ends_with(".yes")
@@ -477,8 +483,8 @@ mod tests {
     }
 
     #[test]
-    fn enter_never_answers_a_destructive_question_and_confirm_yes_only_a_discard_or_skip() {
-        // Only these two destructive questions take `ConfirmYes`; any other
+    fn enter_never_answers_a_destructive_question_and_confirm_yes_only_discard_skip_or_force() {
+        // Only these three destructive questions take `ConfirmYes`; any other
         // that starts to would drop its assertion below, so it must be
         // added here on purpose.
         let mut confirm_yes: Vec<KeyScope> = destructive_questions()
@@ -489,7 +495,11 @@ mod tests {
         confirm_yes.dedup();
         assert_eq!(
             confirm_yes,
-            [KeyScope::DiscardConfirm, KeyScope::SkipConfirm]
+            [
+                KeyScope::DiscardConfirm,
+                KeyScope::SkipConfirm,
+                KeyScope::ForcePushConfirm
+            ]
         );
         for question in destructive_questions() {
             let name = question.title.clone();

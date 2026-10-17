@@ -2110,6 +2110,18 @@ a staged change. If Kika cannot tell, it asks. With no work since the stop,
 | `skip_confirm.no` | `n`, `esc` | No, keep the work and the stop | locked |
 | `skip_confirm.quit` | `ctrl-c` | Quit Kika | locked |
 
+### Push with --force-with-lease?
+
+Asked when a push is rejected because the remote has commits the branch
+does not. A force push replaces those commits on the remote, so `enter` does
+not answer it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `force_push_confirm.yes` | `y` | Yes, push with --force-with-lease | locked |
+| `force_push_confirm.no` | `n`, `esc` | No, push nothing | locked |
+| `force_push_confirm.quit` | `ctrl-c` | Quit Kika | locked |
+
 ### Fold every fixup! commit?
 
 Autosquash rewrites commits you may not be looking at, so `enter` does not
