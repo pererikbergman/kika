@@ -843,4 +843,50 @@ mod tests {
         no_controls(&got.get(QueueKind::Assigned)[0].title);
         assert!(got.get(QueueKind::Assigned)[0].title.contains("red"));
     }
+
+    #[test]
+    fn a_nested_project_asks_the_queues_and_detail_by_its_full_path() {
+        let nested = ForgeRepo {
+            owner: "acme/sub".into(),
+            ..repo()
+        };
+        let fixed = [
+            "api",
+            "graphql",
+            "--include",
+            "--hostname",
+            "gitlab.example.com",
+            "--input",
+            "-",
+        ]
+        .map(OsString::from);
+
+        let runner = FakeGlab::new().reply(answer(QUEUES));
+        let got = glab(&runner, &CommandSink::new(), &host())
+            .fetch_queues(&nested)
+            .unwrap();
+        let [cmd] = runner.calls().try_into().unwrap();
+        assert_eq!(cmd.args(), fixed);
+        assert_eq!(
+            sent(&cmd)["variables"],
+            json!({ "path": "acme/sub/widgets", "userPath": "acme/sub/widgets" })
+        );
+        assert_eq!(got, queues(&FakeGlab::new().reply(answer(QUEUES))).unwrap());
+
+        let runner = FakeGlab::new().reply(answer(DETAIL));
+        let pr = glab(&runner, &CommandSink::new(), &host())
+            .fetch_detail(&nested, 42)
+            .unwrap();
+        let [cmd] = runner.calls().try_into().unwrap();
+        assert_eq!(cmd.args(), fixed);
+        assert_eq!(
+            sent(&cmd)["variables"],
+            json!({ "path": "acme/sub/widgets", "iid": "42" })
+        );
+        assert!(pr.is_some());
+        assert_eq!(
+            pr,
+            detail(&FakeGlab::new().reply(answer(DETAIL)), 42).unwrap()
+        );
+    }
 }

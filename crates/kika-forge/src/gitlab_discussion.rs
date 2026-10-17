@@ -360,6 +360,14 @@ mod tests {
     }
 
     fn fetch(runner: &FakeGlab, number: u64) -> Result<Option<PrDiscussion>, Refusal> {
+        fetch_in(runner, &repo(), number)
+    }
+
+    fn fetch_in(
+        runner: &FakeGlab,
+        repo: &ForgeRepo,
+        number: u64,
+    ) -> Result<Option<PrDiscussion>, Refusal> {
         let host = ForgeHost::parse("gitlab.example.com")
             .unwrap()
             .with_kind(ForgeKind::GitLab);
@@ -371,7 +379,7 @@ mod tests {
             cwd: "/cache".into(),
             now: 1_700_000_000,
         };
-        glab.fetch_discussion(&repo(), number)
+        glab.fetch_discussion(repo, number)
     }
 
     fn parsed(text: &str) -> PrDiscussion {
@@ -767,5 +775,30 @@ mod tests {
             seen += usize::from(item.body.contains("red"));
         }
         assert!(seen >= 5, "{seen}: {d:#?}");
+    }
+
+    #[test]
+    fn a_nested_project_loads_its_discussion_by_its_full_path() {
+        let nested = ForgeRepo {
+            owner: "acme/sub".into(),
+            ..repo()
+        };
+        let runner = FakeGlab::new().reply(answer(DISCUSSION));
+        let got = fetch_in(&runner, &nested, 42).unwrap();
+        let [cmd] = runner.calls().try_into().unwrap();
+        assert_eq!(
+            cmd.display_line(),
+            "glab api graphql --include --hostname gitlab.example.com --input -"
+        );
+        let body = sent(&cmd);
+        assert_eq!(body["query"], DISCUSSION_QUERY);
+        assert_eq!(
+            body["variables"],
+            serde_json::json!({ "path": "acme/sub/widgets", "iid": "42" })
+        );
+        let got = got.unwrap();
+        assert_eq!(got.threads.len(), 6);
+        assert_eq!(got.conversation.len(), 3);
+        assert_eq!(got, parsed(DISCUSSION));
     }
 }
