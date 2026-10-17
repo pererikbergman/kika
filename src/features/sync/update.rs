@@ -193,7 +193,7 @@ mod tests {
 
     fn fetch_tag(effects: &[Effect]) -> Tag {
         match effects {
-            [Effect::Fetch { tag }] => *tag,
+            [Effect::Fetch { tag, .. }] => *tag,
             other => panic!("expected one Fetch, got {other:?}"),
         }
     }
@@ -205,6 +205,25 @@ mod tests {
         assert!(!tag.user);
         assert_eq!(state.busy_count(), 0);
         assert!(watch(&mut state, WatchEvent::Fetch).is_empty());
+    }
+
+    #[test]
+    fn auto_fetch_leaves_fetch_head_alone_only_where_git_can_be_told_to() {
+        for (git, want) in [(version(29), true), (version(28), false), (None, false)] {
+            let mut state = idle_with_fetch();
+            state.git_version = git;
+            let effects = watch(&mut state, WatchEvent::Fetch);
+            let [
+                Effect::Fetch {
+                    no_write_fetch_head,
+                    ..
+                },
+            ] = effects.as_slice()
+            else {
+                panic!("{effects:?}");
+            };
+            assert_eq!(*no_write_fetch_head, want, "{git:?}");
+        }
     }
 
     #[test]

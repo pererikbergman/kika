@@ -7,7 +7,9 @@ use crate::clipboard::{self, CopyWhat};
 use crate::config::ConfigError;
 use crate::confirm_question::{Answer, ConfirmQuestion, Then, quit_question};
 use crate::diff_mark::DiffMark;
-use crate::diff_pane::{DiffPane, DiffStart, focused_hunks, focused_hunks_mut};
+use crate::diff_pane::{
+    DiffPane, DiffStart, UNTRACKED_REPO_FOLDER, focused_hunks, focused_hunks_mut,
+};
 use crate::effect::{Effect, Tag};
 use crate::features::blame::{self, BlameView};
 use crate::features::branches::remotes::RemotePending;
@@ -67,7 +69,7 @@ use kika_git::path::RepoPath;
 use kika_git::refs::RefsSnapshot;
 use kika_git::repo_state::Operation;
 use kika_git::status::{BranchStatus, EntryKind, RepoStatus};
-use kika_git::version::GitVersion;
+use kika_git::version::{self, GitVersion};
 // Names the tests below reach through `super::*` since the op slot moved
 // to `op_slot.rs`.
 #[cfg(test)]
@@ -1166,7 +1168,16 @@ impl AppState {
             self.diff.rewind(start);
             return vec![];
         }
-        let request = DiffRequest::for_entry(&self.files.rows[index], self.diff_options);
+        let entry = &self.files.rows[index];
+        if entry.is_untracked_dir() {
+            // git has no diff of a folder, so the pane says so instead.
+            self.diff.show_notice(&entry.path, UNTRACKED_REPO_FOLDER);
+            if self.hunk_view().is_some() {
+                self.focus = Focus::Files;
+            }
+            return vec![Effect::CancelDiff];
+        }
+        let request = DiffRequest::for_entry(entry, self.diff_options);
         let mut effects = self.open_diff(request.clone(), start);
         if let Some(view) = self.hunk_view_mut() {
             // A file that stopped (or started) being untracked has other
@@ -1242,10 +1253,15 @@ impl AppState {
     }
 
     /// Focus the next panel in screen order, the diff after the side
-    /// panels. The diff is skipped with no file to show.
+    /// panels. The diff is skipped with no file to show, or an untracked
+    /// folder, which has no hunks.
     fn cycle_focus(&mut self, back: bool) -> Vec<Effect> {
         let mut order: Vec<Panel> = SidePanel::ALL.into_iter().map(Panel::Side).collect();
-        if self.files.selected_row().is_some() {
+        if self
+            .files
+            .selected_row()
+            .is_some_and(|entry| !entry.is_untracked_dir())
+        {
             order.push(Panel::Diff);
         }
         let here = self.focus.panel();
@@ -1257,7 +1273,8 @@ impl AppState {
 
     /// Focus the Diff pane on the selected file, on the side its diff
     /// shows; a conflicted file opens the conflict view instead. Not while
-    /// a commit's or a stash's file is shown: it has no hunks to stage.
+    /// a commit's or a stash's file is shown, nor on an untracked folder:
+    /// they have no hunks to stage.
     fn focus_diff(&mut self) -> Vec<Effect> {
         if self.focus == Focus::Commits && self.commits.open.is_some() {
             return self.focus_commit_diff();
@@ -1268,6 +1285,9 @@ impl AppState {
         let Some(entry) = self.files.selected_row() else {
             return vec![];
         };
+        if entry.is_untracked_dir() {
+            return vec![];
+        }
         if entry.kind == EntryKind::Conflicted {
             return self.open_conflict();
         }
@@ -1603,6 +1623,7 @@ impl AppState {
                 if self.watch.start_fetch(self.remote.is_some()) {
                     effects.push(Effect::Fetch {
                         tag: self.background_tag(),
+                        no_write_fetch_head: self.git_has(version::NO_WRITE_FETCH_HEAD),
                     });
                 }
             }
@@ -3308,6 +3329,86 @@ mod tests {
         assert_eq!(state.focus, Focus::Status);
         state.update(AppIntent::CycleFocus { back: true });
         assert_eq!(state.focus, Focus::Stash);
+    }
+
+    /// `a.rs` changed and an untracked folder holding a repository.
+    fn with_a_repo_folder() -> AppState {
+        let (state, _) = with_files(
+            vec![changed("a.rs", '.', 'M'), untracked("vendor/lib/")],
+            24,
+        );
+        state
+    }
+
+    #[test]
+    fn selecting_an_untracked_folder_shows_a_notice_and_loads_nothing() {
+        use crate::features::diff::renderers::{ExternalRenderer, RendererKind};
+        let mut state = with_a_repo_folder();
+        state.renderers = vec![ExternalRenderer {
+            label: "difft".into(),
+            argv: vec!["difft".into()],
+            kind: RendererKind::Tool,
+        }];
+        state.renderer = Some(0);
+        assert_eq!(state.select(1), [Effect::CancelDiff]);
+        assert_eq!(state.diff.notice, Some(UNTRACKED_REPO_FOLDER));
+        assert_eq!(state.diff.path, Some("vendor/lib/".into()));
+        assert!(state.diff.done);
+        assert_eq!(state.diff.error, None);
+        assert_eq!(state.diff.seq, None, "no stream is accepted");
+        assert_eq!(state.shown_request(), None, "nothing to render");
+    }
+
+    #[test]
+    fn moving_off_an_untracked_folder_loads_the_file_and_drops_the_notice() {
+        let mut state = with_a_repo_folder();
+        state.select(1);
+        let request = diff_request(&state.select(0));
+        assert_eq!(request.path, "a.rs".into());
+        assert_eq!(state.diff.notice, None);
+    }
+
+    #[test]
+    fn the_diff_does_not_take_focus_on_an_untracked_folder() {
+        let mut state = with_a_repo_folder();
+        state.select(1);
+        assert_eq!(
+            state.update(AppIntent::FocusPanel(crate::layout::Panel::Diff)),
+            vec![]
+        );
+        assert_eq!(state.focus, Focus::Files);
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.focus, Focus::Files);
+    }
+
+    #[test]
+    fn tab_skips_the_diff_on_an_untracked_folder() {
+        let mut state = with_a_repo_folder();
+        state.select(1);
+        let order = SidePanel::ALL;
+        let at = order.iter().position(|&p| p == SidePanel::Files).unwrap();
+        let mut seen = vec![];
+        for _ in 0..order.len() {
+            state.update(AppIntent::CycleFocus { back: false });
+            seen.push(state.focus.panel());
+        }
+        let expected: Vec<_> = (1..=order.len())
+            .map(|i| crate::layout::Panel::Side(order[(at + i) % order.len()]))
+            .collect();
+        assert_eq!(seen, expected);
+    }
+
+    #[test]
+    fn moving_onto_an_untracked_folder_from_the_hunk_view_gives_files_the_keys() {
+        let mut state = focused(
+            vec![changed("a.rs", '.', 'M'), untracked("vendor/lib/")],
+            TWO_HUNKS,
+        );
+        assert_eq!(state.focus, Focus::Diff);
+        assert_eq!(state.select(1), [Effect::CancelDiff]);
+        assert_eq!(state.focus, Focus::Files);
+        assert_eq!(state.hunk_view(), None);
+        assert_eq!(state.diff.notice, Some(UNTRACKED_REPO_FOLDER));
     }
 
     #[test]

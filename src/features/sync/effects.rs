@@ -15,10 +15,16 @@ use kika_git::remote::{RemoteFailure, RemoteOp, run_remote};
 use kika_git::safe_text::terminal_safe;
 
 /// Fetch every remote quietly and send the result back as `SyncIntent::FetchFinished`.
-pub(crate) fn fetch(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
+/// `no_write_fetch_head` is whether git is new enough for `--no-write-fetch-head`.
+pub(crate) fn fetch(
+    runner: Arc<dyn GitRunner>,
+    tx: UnboundedSender<AppIntent>,
+    tag: Tag,
+    no_write_fetch_head: bool,
+) {
     background::run(
         tx,
-        move || run_fetch(runner.as_ref()),
+        move || run_fetch(runner.as_ref(), no_write_fetch_head),
         // A panic still reports back, or auto-fetch would stop for good.
         background::crashed("git fetch"),
         move |result| AppIntent::Sync(SyncIntent::FetchFinished { tag, result }),
