@@ -3198,6 +3198,135 @@ async fn a_gitlab_merge_request_is_squash_merged_from_review_mode() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn review_mode_on_a_nested_gitlab_project_lists_opens_and_submits() {
+    use std::sync::Arc;
+
+    use crate::features::review::ReviewScreen;
+    use kika_forge::github::answer;
+    use kika_forge::gitlab::{FakeGlab, GlabCall};
+    use kika_forge::gitlab_discussion::fixtures::DISCUSSION;
+    use kika_forge::gitlab_review::fixtures::{DETAIL, QUEUES};
+    use kika_forge::gitlab_submit::fixtures::{APPROVED, DRAFTS_EMPTY, NO_CONTENT, REFS, created};
+
+    let repo = TestRepo::new()
+        .write("src/cache.rs", "one\n")
+        .commit("base")
+        .write("src/cache.rs", "two\n")
+        .commit("head");
+    let head = repo.head().trim().to_string();
+    let base = String::from_utf8(repo.git(["rev-parse", "HEAD~1"]))
+        .unwrap()
+        .trim()
+        .to_string();
+    repo.git([
+        "remote",
+        "add",
+        "origin",
+        "https://gitlab.example.com/acme/sub/widgets",
+    ]);
+    let ours = |text: &str| {
+        text.replace(&"1".repeat(40), &head)
+            .replace(&"2".repeat(40), &base)
+    };
+    let glab = Arc::new(
+        FakeGlab::new()
+            .reply(answer(QUEUES))
+            .reply(answer(&ours(DETAIL)))
+            .reply(answer(&ours(DISCUSSION)))
+            .reply(answer(&ours(REFS)))
+            .reply(answer(DRAFTS_EMPTY))
+            .reply(answer(&created(101)))
+            .reply(answer(NO_CONTENT))
+            .reply(answer(APPROVED))
+            .reply(answer(&ours(DISCUSSION))),
+    );
+    let store = TempDir::new("e2e-nested-pending");
+    let mut app = Harness::start_with_glab_storing(
+        &repo,
+        Arc::clone(&glab),
+        "gitlab.example.com",
+        Some(store.path().to_path_buf()),
+    )
+    .await;
+
+    // The queues and the merge request, asked by the project's full path.
+    app.type_text("G").await;
+    app.assert_screen_contains("Review · acme/sub/widgets");
+    app.assert_screen_contains("!12  Cache widget lookups");
+    app.press(KeyCode::Enter).await;
+    assert_eq!(app.state().review.screen, ReviewScreen::Detail(12));
+    app.assert_screen_contains("Add widget caching");
+    app.assert_screen_contains("Threads: 3 unresolved of 6");
+    let calls = glab.calls();
+    assert_eq!(calls.len(), 3);
+    let variables = |i: usize| {
+        let sent: serde_json::Value = serde_json::from_slice(&calls[i].stdin()).unwrap();
+        sent["variables"].clone()
+    };
+    assert_eq!(
+        variables(0),
+        serde_json::json!({ "path": "acme/sub/widgets", "userPath": "acme/sub/widgets" })
+    );
+    for i in [1, 2] {
+        assert_eq!(
+            variables(i),
+            serde_json::json!({ "path": "acme/sub/widgets", "iid": "12" })
+        );
+    }
+
+    // One comment, then an Approve with no summary.
+    app.press(KeyCode::Char('f')).await;
+    assert_eq!(app.state().review.screen, ReviewScreen::Files(12));
+    app.assert_screen_contains("+two");
+    app.type_text("a").await;
+    app.press(KeyCode::Enter).await;
+    app.type_text("Needs a test").await;
+    app.press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        .await;
+    assert_eq!(glab.calls().len(), 3, "a pending comment reached GitLab");
+    app.type_text("S").await;
+    app.assert_screen_contains("Approve");
+    app.press(KeyCode::Enter).await;
+    app.press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        .await;
+    app.assert_screen_contains("Submit review (Approve) on !12 with 1 comment to GitLab? (y/n)");
+    app.type_text("y").await;
+    app.assert_screen_contains("Review submitted (Approve)");
+
+    // Submitting goes by the numeric project id, never the path.
+    let calls = glab.calls();
+    let shape: Vec<String> = calls[3..]
+        .iter()
+        .map(|cmd| match &cmd.kind {
+            GlabCall::Rest { method, path, .. } => format!("{method:?} {}", path.render()),
+            other => format!("{other:?}").chars().take(7).collect(),
+        })
+        .collect();
+    let mr = "projects/17/merge_requests/7";
+    assert_eq!(
+        shape,
+        [
+            "Graphql".to_string(),
+            format!("Get {mr}/draft_notes"),
+            format!("Post {mr}/draft_notes"),
+            format!("Post {mr}/draft_notes/bulk_publish"),
+            format!("Post {mr}/approve"),
+            "Graphql".to_string(),
+        ]
+    );
+    // The diff refs are asked by the merge request's global id.
+    let refs: serde_json::Value = serde_json::from_slice(&calls[3].stdin()).unwrap();
+    assert_eq!(
+        refs["variables"],
+        serde_json::json!({ "id": "gid://gitlab/MergeRequest/4242" })
+    );
+    for cmd in &calls {
+        let line = cmd.display_line();
+        assert!(!line.contains("Needs") && !line.contains("acme"), "{line}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn shift_b_in_branches_asks_github_once_and_only_for_an_opted_in_host() {
     use std::sync::Arc;
 
