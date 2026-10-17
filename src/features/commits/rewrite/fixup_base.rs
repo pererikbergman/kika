@@ -442,10 +442,15 @@ Binary files a/bin and b/bin differ\n";
                 "--dst-prefix=b/",
             ]
         );
-        let path = RepoPath::from_bytes(b"-n\xff:(top)*");
+        // Windows file names are UTF-16, so a name that is not UTF-8 cannot exist there.
+        #[cfg(unix)]
+        let name: &[u8] = b"-n\xff:(top)*";
+        #[cfg(not(unix))]
+        let name: &[u8] = b"-n:(top)*";
+        let path = RepoPath::from_bytes(name);
         let blame = head_blame_command(&path);
         assert_eq!(blame.args()[..4], ["blame", "--porcelain", "HEAD", "--"]);
-        assert_eq!(blame.args()[4].as_encoded_bytes(), b"-n\xff:(top)*");
+        assert_eq!(blame.args()[4].as_encoded_bytes(), name);
         for cmd in [&diff, &blame] {
             assert!(!cmd.args().iter().any(|a| a == "--end-of-options"));
             assert_eq!(
@@ -522,7 +527,13 @@ Binary files a/bin and b/bin differ\n";
         ] {
             git(dir, &["config", key, value]);
         }
-        let name = "a \"b\".txt";
+        // Both names make git C-quote them in its output; Windows forbids `"` in a
+        // file name, so there the quoting comes from a non-ASCII letter instead.
+        let name = if cfg!(windows) {
+            "a \u{e9}.txt"
+        } else {
+            "a \"b\".txt"
+        };
         std::fs::write(dir.join(name), "one\ntwo\nthree\n").unwrap();
         git(dir, &["add", "-A"]);
         git(dir, &["commit", "-q", "-m", "first"]);

@@ -1474,13 +1474,27 @@ output = "none"
         assert_eq!(loaded.errors.len(), 1);
     }
 
+    /// An absolute program path on the platform the tests run on: a Unix path
+    /// is not absolute on Windows, so the accepted case picks one by `cfg`.
+    const ABSOLUTE_OPEN: &str = if cfg!(windows) {
+        r"C:\Windows\System32\open.exe"
+    } else {
+        "/usr/bin/open"
+    };
+    const ABSOLUTE_COPY: &str = if cfg!(windows) {
+        r"C:\Windows\System32\clip.exe"
+    } else {
+        "/usr/bin/pbcopy"
+    };
+
     #[test]
     fn the_global_file_names_the_gitlab_hosts_and_the_browser() {
         let global = |text: &str| apply_global(text, &Keymap::default(), DEFAULT_WATCH);
-        let settings = global(
+        // A TOML literal string ('...') keeps a Windows path's backslashes as they are.
+        let settings = global(&format!(
             "[forge]\ngitlab = [\"gitlab.com\", \"git.example.org\"]\n\
-             browser = [\"/usr/bin/open\", \"-a\", \"Safari Browser\"]\n",
-        )
+             browser = ['{ABSOLUTE_OPEN}', \"-a\", \"Safari Browser\"]\n",
+        ))
         .unwrap();
         assert_eq!(
             settings.forge_gitlab_hosts,
@@ -1494,7 +1508,7 @@ output = "none"
         assert_eq!(
             settings.browser,
             Some(vec![
-                OsString::from("/usr/bin/open"),
+                OsString::from(ABSOLUTE_OPEN),
                 "-a".into(),
                 "Safari Browser".into()
             ])
@@ -2033,10 +2047,10 @@ output = "none"
     fn the_global_file_names_a_clipboard_command() {
         let global = |text: &str| apply_global(text, &Keymap::default(), DEFAULT_WATCH);
         assert_eq!(global("").unwrap().clipboard_command, None);
-        let settings = global("[clipboard]\ncommand = [\"/usr/bin/pbcopy\"]\n").unwrap();
+        let settings = global(&format!("[clipboard]\ncommand = ['{ABSOLUTE_COPY}']\n")).unwrap();
         assert_eq!(
             settings.clipboard_command,
-            Some(vec![OsString::from("/usr/bin/pbcopy")])
+            Some(vec![OsString::from(ABSOLUTE_COPY)])
         );
         let xclip =
             global("[clipboard]\ncommand = [\"xclip\", \"-selection\", \"clipboard\"]\n").unwrap();
@@ -2096,12 +2110,12 @@ output = "none"
         assert_eq!(loaded.errors.len(), 1);
         assert!(loaded.errors[0].message.starts_with("clipboard.command: "));
 
-        files.global("[clipboard]\ncommand = [\"/usr/bin/pbcopy\"]\n");
+        files.global(&format!("[clipboard]\ncommand = ['{ABSOLUTE_COPY}']\n"));
         let loaded = files.load();
         assert_eq!(loaded.errors, []);
         assert_eq!(
             loaded.clipboard_command,
-            Some(vec![OsString::from("/usr/bin/pbcopy")])
+            Some(vec![OsString::from(ABSOLUTE_COPY)])
         );
     }
 

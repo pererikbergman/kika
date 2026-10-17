@@ -543,8 +543,12 @@ mod tests {
         };
         assert_eq!(reason(&ready()), None);
 
-        let mut state = ready_with(vec![row(b"caf\xe9.rs")]);
-        refused(&mut state, NOT_UTF8);
+        // Windows file names are UTF-16, so a name that is not UTF-8 cannot exist there.
+        #[cfg(unix)]
+        {
+            let mut state = ready_with(vec![row(b"caf\xe9.rs")]);
+            refused(&mut state, NOT_UTF8);
+        }
 
         let mut state = ready();
         state.review.detail.as_mut().unwrap().node_id = None;

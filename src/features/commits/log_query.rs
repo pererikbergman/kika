@@ -148,13 +148,13 @@ mod tests {
         assert_eq!(*query, author("ann"));
     }
 
-    #[test]
-    fn the_log_of_a_file_takes_its_exact_name_and_keeps_the_author() {
+    /// Presses `L` on the one changed file `name`, from the Reflog tab of a log
+    /// that has an author set.
+    fn log_of_file(name: &[u8]) -> (AppState, Vec<Effect>) {
         let mut state = with_log(3);
         state.commits.query = author("ann");
-        let raw = RepoPath::from_bytes(b"x\xff.rs");
         state.files.rows = vec![FileEntry {
-            path: raw.clone(),
+            path: RepoPath::from_bytes(name),
             orig_path: None,
             index: '.',
             worktree: 'M',
@@ -163,14 +163,31 @@ mod tests {
         state.files.selected = 0;
         state.focus = Focus::Files;
         state.commits.tab = CommitsTab::Reflog;
-
         let effects = press(&mut state, KeyCode::Char('L'));
+        (state, effects)
+    }
+
+    #[test]
+    fn the_log_of_a_file_takes_its_name_and_keeps_the_author() {
+        let (state, effects) = log_of_file(b"x.rs");
+
+        let query = &state.commits.query;
+        assert_eq!(query.path.as_ref().unwrap().as_bytes(), b"x.rs");
+        assert_eq!(query.author.as_deref(), Some("ann"));
+        assert_eq!(state.focus, Focus::Commits);
+        assert_eq!(state.commits.tab, CommitsTab::Log);
+        assert_eq!(loads(&effects).len(), 1);
+    }
+
+    // Windows file names are UTF-16, so a name that is not UTF-8 cannot exist there.
+    #[cfg(unix)]
+    #[test]
+    fn the_log_of_a_file_takes_its_exact_name_even_when_it_is_not_text() {
+        let (mut state, effects) = log_of_file(b"x\xff.rs");
 
         let query = &state.commits.query;
         assert_eq!(query.path.as_ref().unwrap().as_bytes(), b"x\xff.rs");
         assert_eq!(query.author.as_deref(), Some("ann"));
-        assert_eq!(state.focus, Focus::Commits);
-        assert_eq!(state.commits.tab, CommitsTab::Log);
         assert_eq!(loads(&effects).len(), 1);
 
         // The bar cannot hold a name that is not text: it starts empty.

@@ -1066,10 +1066,14 @@ pub(crate) mod tests {
         let (mut state, _) = loading();
         assert_eq!(notice(&mut state).as_deref(), Some(LOADING));
         // A name that is not UTF-8.
-        let mut state = commenting();
-        state.review.files.as_mut().unwrap().rows[0].file.path =
-            kika_git::path::RepoPath::from_bytes(b"bad\xff.rs");
-        assert_eq!(notice(&mut state).as_deref(), Some(NOT_UTF8));
+        // Windows file names are UTF-16, so a name that is not UTF-8 cannot exist there.
+        #[cfg(unix)]
+        {
+            let mut state = commenting();
+            state.review.files.as_mut().unwrap().rows[0].file.path =
+                kika_git::path::RepoPath::from_bytes(b"bad\xff.rs");
+            assert_eq!(notice(&mut state).as_deref(), Some(NOT_UTF8));
+        }
         // No numbered row in view.
         let mut state = commenting();
         state.diff.lines.truncate(4);
