@@ -6,7 +6,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
@@ -637,15 +637,15 @@ pub fn detail_lines(
         (_, true) => ("draft", palette.pr_draft),
         _ => ("open", palette.pr_open),
     };
-    let (word, color) = match detail.mergeable {
-        Mergeability::Mergeable => ("mergeable", palette.success),
-        Mergeability::Conflicting => ("conflicts", palette.error),
-        Mergeability::Unknown => ("unknown", palette.neutral),
+    let (word, look) = match detail.mergeable {
+        Mergeability::Mergeable => ("mergeable", Style::new().fg(palette.success)),
+        Mergeability::Conflicting => ("conflicts", Style::new().fg(palette.error)),
+        Mergeability::Unknown => ("unknown", palette.neutral_style()),
     };
     lines.push(Line::from(vec![
         Span::styled(state.0, Style::new().fg(state.1)),
         Span::styled(" · ", dim()),
-        Span::styled(word, Style::new().fg(color)),
+        Span::styled(word, look),
     ]));
     lines.extend(merge_line(palette, detail, words, width));
     let branches = format!("{} ← {}", detail.base, detail.head);
@@ -653,15 +653,15 @@ pub fn detail_lines(
     if !detail.checks.is_empty() {
         lines.push(Line::styled("Checks", bold()));
         for check in &detail.checks {
-            let (glyph, word, color) = check_look(palette, check.status);
+            let (glyph, word, look) = check_look(palette, check.status);
             let glyph = format!("{glyph} ");
             let word = format!("  {word}");
             // The status word always shows; the name gives way.
             let room = width.saturating_sub(width_of(&glyph) + width_of(&word));
             lines.push(Line::from(vec![
-                Span::styled(glyph, Style::new().fg(color)),
+                Span::styled(glyph, look),
                 Span::raw(elide_right(&check.name, room)),
-                Span::styled(word, Style::new().fg(color)),
+                Span::styled(word, look),
             ]));
         }
     }
@@ -760,13 +760,13 @@ fn verdict_word(verdict: ReviewVerdict) -> &'static str {
     }
 }
 
-fn check_look(palette: &Palette, status: CheckStatus) -> (&'static str, &'static str, Color) {
+fn check_look(palette: &Palette, status: CheckStatus) -> (&'static str, &'static str, Style) {
     match status {
-        CheckStatus::Success => ("✓", "passed", palette.success),
-        CheckStatus::Failure => ("✗", "failed", palette.error),
-        CheckStatus::Pending => ("●", "pending", palette.pending),
-        CheckStatus::Neutral => ("○", "neutral", palette.neutral),
-        CheckStatus::Skipped => ("–", "skipped", palette.neutral),
+        CheckStatus::Success => ("✓", "passed", Style::new().fg(palette.success)),
+        CheckStatus::Failure => ("✗", "failed", Style::new().fg(palette.error)),
+        CheckStatus::Pending => ("●", "pending", Style::new().fg(palette.pending)),
+        CheckStatus::Neutral => ("○", "neutral", palette.neutral_style()),
+        CheckStatus::Skipped => ("–", "skipped", palette.neutral_style()),
     }
 }
 
@@ -775,6 +775,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
+    use ratatui::style::Color;
 
     const GITHUB: &Words = &kika_forge::forge::GitHubForge::WORDS;
 
@@ -1458,6 +1459,87 @@ mod tests {
         crate::test_support::assert_no_colour(&draw_detail_buffer(&state));
         let merged = style_at(&state, "Cannot merge: already merged");
         assert!(merged.add_modifier.contains(Modifier::DIM), "{merged:?}");
+    }
+
+    /// The fixture's detail with a neutral and a skipped check added and
+    /// mergeability not yet known, drawn under `palette`.
+    fn neutral_detail_buffer(palette: Palette) -> Buffer {
+        use kika_forge::review::Check;
+        let mut state = reviewing(ReviewScreen::Detail(42));
+        let mut detail = fixture_detail();
+        detail.mergeable = Mergeability::Unknown;
+        for (name, status) in [
+            ("docs", CheckStatus::Neutral),
+            ("fmt", CheckStatus::Skipped),
+        ] {
+            detail.checks.push(Check {
+                name: name.into(),
+                status,
+                details_url: None,
+            });
+        }
+        state.review.detail = Some(detail);
+        state.palette = palette;
+        draw_detail_buffer(&state)
+    }
+
+    /// The style of the cell where `needle` starts inside the first row
+    /// holding `row`.
+    fn style_in_row(buffer: &Buffer, row: &str, needle: &str) -> Style {
+        let rows = buffer_rows(buffer);
+        let y = rows.iter().position(|r| r.contains(row)).unwrap();
+        let at = rows[y].find(row).unwrap() + row.find(needle).unwrap();
+        let col = rows[y][..at].chars().count();
+        buffer[(col as u16, y as u16)].style()
+    }
+
+    /// Each neutral cell as (row text, cell text).
+    const NEUTRAL_CELLS: [(&str, &str); 5] = [
+        ("○ docs  neutral", "○"),
+        ("○ docs  neutral", "neutral"),
+        ("– fmt  skipped", "–"),
+        ("– fmt  skipped", "skipped"),
+        (" · unknown", "unknown"),
+    ];
+
+    #[test]
+    fn under_no_color_neutral_checks_and_unknown_mergeability_are_dim() {
+        let buffer = neutral_detail_buffer(Palette::NO_COLOR);
+        crate::test_support::assert_no_colour(&buffer);
+        for (row, cell) in NEUTRAL_CELLS {
+            let style = style_in_row(&buffer, row, cell);
+            assert!(
+                style.add_modifier.contains(Modifier::DIM),
+                "{cell}: {style:?}"
+            );
+        }
+        for (row, cell) in [
+            ("✗ build  failed", "failed"),
+            ("✓ ci/lint  passed", "passed"),
+        ] {
+            let style = style_in_row(&buffer, row, cell);
+            assert!(
+                !style.add_modifier.contains(Modifier::DIM),
+                "{cell}: {style:?}"
+            );
+        }
+        // The check name between glyph and word stays plain.
+        let name = style_in_row(&buffer, "○ docs  neutral", "docs");
+        assert!(!name.add_modifier.contains(Modifier::DIM), "{name:?}");
+    }
+
+    #[test]
+    fn with_colours_on_neutral_cells_keep_their_colour_and_no_dim() {
+        let palette = Palette::DEFAULT;
+        let buffer = neutral_detail_buffer(palette);
+        for (row, cell) in NEUTRAL_CELLS {
+            let style = style_in_row(&buffer, row, cell);
+            assert_eq!(style.fg, Some(palette.neutral), "{cell}");
+            assert!(
+                !style.add_modifier.contains(Modifier::DIM),
+                "{cell}: {style:?}"
+            );
+        }
     }
 
     #[test]
