@@ -101,7 +101,7 @@ pub(crate) static REMOTES_KEYS: &[Binding] = &[
         keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
         scope: KeyScope::Remotes,
         intent: AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Track)),
-        description: "Check out the selected remote branch as a new branch tracking it",
+        description: "Check out the selected remote branch: its local branch if one exists, else a new branch tracking it",
         label: "checkout",
         bar: true,
         disabled: track_disabled,
