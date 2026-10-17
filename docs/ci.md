@@ -53,17 +53,30 @@ without it, if `runs-on` is a bare label list, or if `pull_request_target` appea
 A fork PR runs `check (macos-latest)` (and Linux and Windows when hosted runners are
 on), never `check (macos-self-hosted)`. That is on purpose: the required check means
 "passed on the owner's Mac", and a fork's code never gets there. So a fork PR cannot be
-merged directly.
+merged directly. Its merge box keeps showing `check (macos-self-hosted)` as "Expected,
+waiting for status". That is normal. Do not wait for it or re-run CI.
 
-After reviewing the fork PR:
+To merge it, push the exact commit you reviewed to a branch in this repository.
+**Pushing that branch is what starts the code on the Mac**, so read the whole diff
+first, with extra care for `.github/`, `build.rs`, `tests/` and anything else that runs
+at build or test time. Do not use `gh pr checkout` and push `HEAD`: that takes whatever
+the PR head is now. The contributor can push a new commit between your review and your
+push, and that commit would then run on the Mac with no further gate.
 
-1. Fetch the contributor's commits and push them to a branch in this repository, for
-   example `gh pr checkout <n>` and then `git push origin HEAD:contrib/<n>`.
-2. Open a PR from that branch (or update an existing one). Keep the contributor's
-   commits and authorship.
-3. CI runs there as an own PR, so `check (macos-self-hosted)` runs on the Mac and the
+1. Record the head commit you are reviewing:
+   `sha=$(gh pr view <n> --json headRefOid --jq .headRefOid)`.
+2. Review the PR at that commit.
+3. Fetch it: `git fetch origin pull/<n>/head`. Check that `git rev-parse FETCH_HEAD`
+   prints `$sha`. If it does not, the contributor pushed again: stop and review the new
+   commits.
+4. Diff it against `main` once more, `git diff origin/main...$sha`, and confirm it is
+   what you reviewed.
+5. Push that exact commit: `git push origin "$sha:refs/heads/contrib/<n>"`.
+6. Open a PR from `contrib/<n>` (or update an existing one). The contributor's commits
+   and authorship stay as they are.
+7. CI runs there as an own PR, so `check (macos-self-hosted)` runs on the Mac and the
    required check is satisfied.
-4. Merge that PR normally and close the fork PR with a link to it. Never merge with
+8. Merge that PR normally and close the fork PR with a link to it. Never merge with
    `--admin` to skip the check.
 
 ## What the guard does not protect against
@@ -92,7 +105,13 @@ These are set by hand in the GitHub web UI. CI cannot set them.
   it. Runner groups and their "selected workflows" limit exist only for organisations.
   On a personal account, the repository-level registration is the limit.
 
-### After going public
+### When going public, in the same session
+
+The fork approval setting below and the owner's review are the only things that stop a
+fork that edits the workflow. Set it right after changing the visibility, in the same
+session, before the repository is announced anywhere. Until it is set, GitHub's default
+for public repositories applies, which only asks for approval from first-time
+contributors.
 
 - Settings → Actions → General → "Fork pull request workflows from outside
   collaborators": choose "Require approval for all outside collaborators". No fork PR
@@ -101,16 +120,27 @@ These are set by hand in the GitHub web UI. CI cannot set them.
   minutes are free on public repositories, so ready PRs and pushes can add the Linux
   and Windows legs again.
 
-### Optional: a guard on the runner itself
+### Strongly recommended: a guard on the runner itself
 
-A fork can edit the workflow but not the runner's own configuration. The runner can
-run a script before every job: set `ACTIONS_RUNNER_HOOK_JOB_STARTED` in the runner's
-`.env` file to the script's path and restart the runner. A script that refuses fork PRs
-(it needs `jq`):
+A fork can edit the workflow but not the runner's own configuration, so this is the
+only guard a fork cannot change and a reviewer cannot miss. The runner can run a script
+before every job:
+
+1. Save the script below on the Mac as a `.sh` file outside the runner's work folder,
+   for example `~/actions-runner/refuse-forks.sh`. The runner starts `.sh` hooks with
+   bash, so `chmod +x` is not needed (it does no harm).
+2. Add `ACTIONS_RUNNER_HOOK_JOB_STARTED=/full/path/to/refuse-forks.sh` to the `.env`
+   file in the runner folder.
+3. Restart the runner service.
+
+The script needs `jq` (`brew install jq`). If `jq` is missing it refuses every job,
+own PRs and pushes included, so a sudden failure in the hook step on every run means
+`jq` is not on the runner's `PATH`.
 
 ```sh
 #!/bin/sh
 # Refuse any job whose pull request head is not in this repository.
+command -v jq >/dev/null || { echo "jq not found: refusing the job." >&2; exit 1; }
 head=$(jq -r '.pull_request.head.repo.full_name // empty' "$GITHUB_EVENT_PATH")
 if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ "$head" != "$GITHUB_REPOSITORY" ]; then
   echo "Refusing a fork pull request on the self-hosted runner." >&2
@@ -118,4 +148,4 @@ if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ "$head" != "$GITHUB_REPOSITORY
 fi
 ```
 
-This is not checked into the repository. Install it on the runner by hand if wanted.
+This is not checked into the repository. Install it on the runner by hand.
