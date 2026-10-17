@@ -17,6 +17,7 @@ use crate::model::AppState;
 use crate::theme::Palette;
 use kika_forge::anchor::Placement;
 use kika_forge::discussion::PrDiscussion;
+use kika_forge::forge::Words;
 use kika_git::safe_text::sanitize;
 
 const NO_FILE_THREADS: &str = "No review threads on this file";
@@ -76,20 +77,25 @@ fn where_label(scope: &ThreadScope, t: usize) -> String {
     };
     match scope.placement(t) {
         Some(Placement::Line { .. }) => span_label(thread).unwrap_or_else(|| "line".into()),
-        Some(Placement::OtherView) => "on the whole pull request".into(),
-        Some(placement) => top_label(thread, placement),
+        Some(Placement::OtherView) => format!("on the whole {}", scope.words.request),
+        Some(placement) => top_label(thread, placement, scope.words),
         None => String::new(),
     }
 }
 
 /// The shown thread's file and place, as its header names them, made
 /// safe to draw: what a reply's composer says it answers.
-pub(super) fn thread_label(files: &PrFiles, discussion: &PrDiscussion, t: usize) -> String {
+pub(super) fn thread_label(
+    files: &PrFiles,
+    discussion: &PrDiscussion,
+    t: usize,
+    words: &'static Words,
+) -> String {
     let path = files
         .selected()
         .map(|row| sanitize(row.file.path.as_bytes()))
         .unwrap_or_default();
-    let scope = ThreadScope::of(files, discussion);
+    let scope = ThreadScope::of(files, discussion).in_words(words);
     let place = sanitize(where_label(&scope, t).as_bytes());
     format!("{path} · {place}")
 }
@@ -144,7 +150,8 @@ pub fn reader_lines(
     let more = total.saturating_sub(thread.comments.len() as u64);
     if more > 0 {
         let what = if more == 1 { "comment" } else { "comments" };
-        lines.push(Line::styled(format!("{more} more {what} on GitHub"), dim()));
+        let name = scope.words.name;
+        lines.push(Line::styled(format!("{more} more {what} on {name}"), dim()));
     }
     lines
 }
@@ -206,7 +213,7 @@ impl AppState {
         let lines = match reader.shown() {
             Some(t) => reader_lines(
                 &self.palette,
-                &ThreadScope::of(files, discussion),
+                &ThreadScope::of(files, discussion).in_words(self.review_words()),
                 t,
                 path,
                 width,

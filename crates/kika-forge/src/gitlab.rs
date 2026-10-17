@@ -294,6 +294,32 @@ impl Glab<'_> {
         )
     }
 
+    /// One GraphQL mutation, shown in the Command log under its own id:
+    /// the body of a 2xx answer, which the caller reads for GraphQL's own
+    /// errors, or why not. Logins, limits and the network are judged as
+    /// for any call.
+    pub(crate) fn mutate(&self, body: Vec<u8>) -> Result<Vec<u8>, CreateError> {
+        let cmd = GlabCommand {
+            host: self.host.as_str().to_string(),
+            kind: GlabCall::Graphql { body },
+            cwd: self.cwd.clone(),
+            timeout: TIMEOUT,
+        };
+        let now = self.now;
+        logged(
+            self.sink,
+            cmd.display_line(),
+            || classify_mutation(self.runner.run(&cmd), now),
+            |result| match result {
+                Ok(_) => CommandOutcome::Ok,
+                Err(CreateError::Status(ForgeStatus::Cli(CliStatus::NotInstalled))) => {
+                    CommandOutcome::NotStarted
+                }
+                Err(_) => CommandOutcome::Failed(None),
+            },
+        )
+    }
+
     /// Run one call, shown in the Command log under its own id, and read
     /// its answer with `read`.
     pub(crate) fn call<T>(
@@ -481,6 +507,26 @@ pub fn classify_rest(output: io::Result<GhOutput>, now: i64) -> Result<Vec<u8>, 
         // No status line: nothing says what was done.
         None if exit == Some(0) && body.is_empty() => Ok(body),
         None => Err(CreateError::Status(ForgeStatus::Failed)),
+    }
+}
+
+/// What a GraphQL mutation came to: judged as [`classify`] judges any
+/// call, then a 2xx body is the caller's to read, as only it knows the
+/// payload's shape and errors. Any other status is a failure.
+pub fn classify_mutation(output: io::Result<GhOutput>, now: i64) -> Result<Vec<u8>, CreateError> {
+    let Screened { status, exit, body } = match screen(output, now) {
+        Ok(read) => read,
+        Err(Answer::Limited { until }) => return Err(CreateError::RateLimited { until }),
+        Err(Answer::Failed(status)) => return Err(CreateError::Status(status)),
+        Err(_) => return Err(CreateError::Status(ForgeStatus::Failed)),
+    };
+    let success = match status {
+        Some(code) => (200..300).contains(&code),
+        None => exit == Some(0),
+    };
+    match success {
+        true => Ok(body),
+        false => Err(CreateError::Status(ForgeStatus::Failed)),
     }
 }
 

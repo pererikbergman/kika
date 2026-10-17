@@ -1,6 +1,6 @@
 //! The conversation screen: the lines `conversation.rs` rendered, from
-//! the scroll, each cut to the panel. Reads state only; GitHub's text was
-//! made terminal-safe when its answer was parsed.
+//! the scroll, each cut to the panel. Reads state only; the forge's text
+//! was made terminal-safe when its answer was parsed.
 
 use ratatui::layout::Rect;
 use ratatui::text::Line;
@@ -8,16 +8,17 @@ use ratatui::text::Line;
 use super::conversation::conversation_lines;
 use super::state::ReviewState;
 use super::threads_view::clip_line;
+use kika_forge::forge::Words;
 
 /// The conversation's rows for `inner`.
-pub fn conversation_view(review: &ReviewState, inner: Rect) -> Vec<Line<'static>> {
+pub fn conversation_view(review: &ReviewState, words: &Words, inner: Rect) -> Vec<Line<'static>> {
     let (width, rows) = (usize::from(inner.width), usize::from(inner.height));
     let fresh;
     let lines = match (&review.conversation, &review.discussion) {
         (Some(drawn), _) if drawn.width == width => &drawn.lines,
         // Not rendered for this width yet: drawn here this once.
         (_, Some(discussion)) => {
-            fresh = conversation_lines(discussion, width);
+            fresh = conversation_lines(discussion, words, width);
             &fresh
         }
         (_, None) => return Vec::new(),
@@ -35,7 +36,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use crate::features::review::conversation::NO_COMMENTS;
+    use crate::features::review::conversation::tests::NO_COMMENTS;
     use crate::features::review::conversation::tests::{detail_with, long_discussion};
     use crate::features::review::state::tests::type_char;
     use crate::features::review::threads::tests::{discussion_from, fixture_discussion};
@@ -92,6 +93,19 @@ mod tests {
         let rows = draw(&shown(capped), 100, 30);
         let more = row_with(&rows, "More on GitHub (showing the first 3)");
         assert!(more > row_with(&rows, "Ping"), "{rows:#?}");
+
+        // On GitLab, rendered for the screen again: GitLab has the rest.
+        let mut capped = fixture_discussion();
+        capped.conversation_capped = true;
+        let mut state = crate::features::review::state::tests::on_gitlab(shown(capped));
+        state.review.conversation = None;
+        let rows = draw(&state, 100, 30);
+        row_with(&rows, "More on GitLab (showing the first 3)");
+        let mut empty = fixture_discussion();
+        empty.conversation.clear();
+        let mut state = crate::features::review::state::tests::on_gitlab(shown(empty));
+        state.review.conversation = None;
+        row_with(&draw(&state, 100, 30), "No comments on this merge request");
 
         let mut empty = fixture_discussion();
         empty.conversation.clear();

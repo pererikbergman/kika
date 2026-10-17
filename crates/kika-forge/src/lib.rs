@@ -22,6 +22,7 @@ pub mod github;
 mod github_forge;
 pub mod gitlab;
 pub mod gitlab_discussion;
+pub mod gitlab_discussion_write;
 mod gitlab_forge;
 pub mod gitlab_review;
 pub mod gitlab_submit;

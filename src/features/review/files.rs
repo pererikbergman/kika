@@ -16,21 +16,51 @@ use crate::effect::{Effect, Tag};
 use crate::intent::Scroll;
 use crate::keymap::{OP_RUNNING, Reason};
 use crate::model::{AppState, Context};
+use kika_forge::forge::Words;
 use kika_forge::review::ViewedState;
 use kika_git::commit_files::{CommitFile, CommitId, CommitRange};
 use kika_git::diff::DiffRequest;
 use kika_git::path::RepoPath;
 
-pub const STILL_MISSING: &str = "PR head is not available locally after fetch";
-pub const FETCHED_BEFORE: &str =
-    "PR head was fetched once this session and is still not here; fetch it with git, then press f";
-pub const NO_FETCH_REMOTE: &str =
-    "PR head is not here, and no remote names this repository on a [forge] github host";
-const NO_DETAIL: &str = "Open a pull request first";
-const DETAIL_LOADING: &str = "The pull request is still loading";
-const NO_OIDS: &str = "GitHub gave no commit ids for this pull request";
 const NOTHING_SEARCHED: &str = "Nothing searched yet (/)";
-const IN_FILES: &str = "Go back to the pull request first (esc)";
+
+pub(super) fn still_missing(words: &Words) -> String {
+    format!("{} head is not available locally after fetch", words.short)
+}
+
+fn fetched_before(words: &Words) -> String {
+    format!(
+        "{} head was fetched once this session and is still not here; \
+         fetch it with git, then press f",
+        words.short
+    )
+}
+
+pub(super) fn no_fetch_remote(words: &Words) -> String {
+    format!(
+        "{} head is not here, and no remote names this repository on a [forge] {} host",
+        words.short, words.host_key
+    )
+}
+
+fn no_detail(words: &Words) -> String {
+    format!("Open a {} first", words.request)
+}
+
+fn detail_loading(words: &Words) -> String {
+    format!("The {} is still loading", words.request)
+}
+
+fn no_oids(words: &Words) -> String {
+    format!(
+        "{} gave no commit ids for this {}",
+        words.name, words.request
+    )
+}
+
+fn in_files(words: &Words) -> String {
+    format!("Go back to the {} first (esc)", words.request)
+}
 
 /// Which half of the files screen has the keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,17 +235,17 @@ pub(crate) fn review_diff_focused(state: &AppState) -> bool {
 }
 
 /// The open detail's number, head and base, when `f` may open its files.
-fn detail_oids(review: &ReviewState) -> Result<(u64, CommitId, CommitId), Reason> {
+fn detail_oids(review: &ReviewState, words: &Words) -> Result<(u64, CommitId, CommitId), Reason> {
     let ReviewScreen::Detail(number) = review.screen else {
-        return Err(NO_DETAIL.into());
+        return Err(no_detail(words).into());
     };
     let detail = match &review.detail {
         Some(detail) if !review.detail_fetch.loading => detail,
-        _ => return Err(DETAIL_LOADING.into()),
+        _ => return Err(detail_loading(words).into()),
     };
     match (&detail.head_oid, &detail.base_oid) {
         (Some(head), Some(base)) => Ok((number, head.clone(), base.clone())),
-        _ => Err(NO_OIDS.into()),
+        _ => Err(no_oids(words).into()),
     }
 }
 
@@ -225,7 +255,7 @@ pub(crate) fn review_files_disabled(state: &AppState) -> Option<Reason> {
     if let Some(reason) = super::conversation::on_conversation(state) {
         return Some(reason);
     }
-    if let Err(reason) = detail_oids(&state.review) {
+    if let Err(reason) = detail_oids(&state.review, state.review_words()) {
         return Some(reason);
     }
     if state.review_repo().is_none() {
@@ -236,7 +266,8 @@ pub(crate) fn review_files_disabled(state: &AppState) -> Option<Reason> {
 
 /// `r` asks GitHub about the pull request, which the files screen hides.
 pub(crate) fn refresh_in_files(state: &AppState) -> Option<Reason> {
-    matches!(state.review.screen, ReviewScreen::Files(_)).then_some(IN_FILES.into())
+    matches!(state.review.screen, ReviewScreen::Files(_))
+        .then(|| in_files(state.review_words()).into())
 }
 
 /// `n` and `N` step through a search there is.
@@ -296,7 +327,7 @@ impl AppState {
             self.notice = Some(reason);
             return vec![];
         }
-        let Ok((number, head, base)) = detail_oids(&self.review) else {
+        let Ok((number, head, base)) = detail_oids(&self.review, self.review_words()) else {
             return vec![];
         };
         let tag = self.files_tag();
@@ -326,6 +357,7 @@ impl AppState {
         result: Result<CommitsHere, String>,
     ) -> Vec<Effect> {
         let fetched_heads = self.review.fetched_heads.clone();
+        let words = self.review_words();
         let Some(files) = self.files_for(tag) else {
             return vec![];
         };
@@ -345,16 +377,16 @@ impl AppState {
         };
         files.seq = None;
         let failed = if files.fetched {
-            Some(STILL_MISSING)
+            Some(still_missing(words))
         } else if fetched_heads.contains(&key) {
-            Some(FETCHED_BEFORE)
+            Some(fetched_before(words))
         } else if missing.1.is_none() {
-            Some(NO_FETCH_REMOTE)
+            Some(no_fetch_remote(words))
         } else {
             None
         };
         if let Some(message) = failed {
-            files.stage = FilesStage::Failed(message.into());
+            files.stage = FilesStage::Failed(message);
             return vec![];
         }
         let (oids, Some(remote)) = missing else {
@@ -555,6 +587,17 @@ pub(crate) mod tests {
     use crate::test_support::diff_chunk;
     use kika_git::diff::{DiffChunk, DiffLine, LineKind};
     use kika_git::remotes::RemoteName;
+
+    /// The texts as GitHub words them.
+    pub(crate) const STILL_MISSING: &str = "PR head is not available locally after fetch";
+    const FETCHED_BEFORE: &str = "PR head was fetched once this session and is still not here; \
+         fetch it with git, then press f";
+    pub(crate) const NO_FETCH_REMOTE: &str =
+        "PR head is not here, and no remote names this repository on a [forge] github host";
+    const NO_DETAIL: &str = "Open a pull request first";
+    const DETAIL_LOADING: &str = "The pull request is still loading";
+    const NO_OIDS: &str = "GitHub gave no commit ids for this pull request";
+    const IN_FILES: &str = "Go back to the pull request first (esc)";
 
     fn id(c: char) -> CommitId {
         CommitId::parse(&c.to_string().repeat(40)).unwrap()
@@ -1107,6 +1150,47 @@ pub(crate) mod tests {
         press(&mut state, KeyCode::Esc);
         assert_eq!(type_char(&mut state, 'f'), []);
         assert_eq!(state.notice.as_deref(), Some(NO_DETAIL));
+    }
+
+    #[test]
+    fn on_gitlab_the_files_screen_says_merge_request_mr_head_and_gitlab_ask() {
+        use crate::features::review::state::tests::on_gitlab;
+        let (state, tag) = opened();
+        let mut state = on_gitlab(state);
+        state.update(AppIntent::Review(ReviewIntent::ObjectsChecked {
+            tag,
+            result: missing(None),
+        }));
+        assert_eq!(
+            stage(&state),
+            FilesStage::Failed(
+                "MR head is not here, and no remote names this repository \
+                 on a [forge] gitlab_ask host"
+                    .into()
+            )
+        );
+        // `r` there names the merge request.
+        assert_eq!(type_char(&mut state, 'r'), []);
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("Go back to the merge request first (esc)")
+        );
+
+        let mut state = on_gitlab(in_detail(Vec::new()));
+        state.review.detail.as_mut().unwrap().head_oid = None;
+        assert_eq!(type_char(&mut state, 'f'), []);
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("GitLab gave no commit ids for this merge request")
+        );
+
+        let mut state = on_gitlab(in_detail(Vec::new()));
+        state.review.detail_fetch.loading = true;
+        assert_eq!(type_char(&mut state, 'f'), []);
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("The merge request is still loading")
+        );
     }
 
     #[test]

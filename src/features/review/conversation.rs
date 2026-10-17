@@ -12,20 +12,33 @@ use super::threads_view::short_time;
 use crate::keymap::Reason;
 use crate::model::AppState;
 use kika_forge::discussion::{ConversationKind, PrDiscussion};
+use kika_forge::forge::Words;
 use kika_forge::review::ReviewVerdict;
 
 /// What a key that acts on the detail says on the conversation.
-pub const BACK_FIRST: &str = "Go back to the pull request first";
-pub const BACK_TO_REFRESH: &str = "Go back to the pull request to refresh";
-const NO_PR_OPEN: &str = "Open a pull request first";
+fn back_first(words: &Words) -> String {
+    format!("Go back to the {} first", words.request)
+}
+
+pub(super) fn back_to_refresh(words: &Words) -> String {
+    format!("Go back to the {} to refresh", words.request)
+}
+
+fn no_pr_open(words: &Words) -> String {
+    format!("Open a {} first", words.request)
+}
+
 const COMMENTS_LOADING: &str = "Comments are still loading";
 const COMMENTS_FAILED: &str = "Comments could not be read (r to try again)";
 const NOTHING_TO_PAGE: &str = "Nothing to page here";
-pub const NO_COMMENTS: &str = "No comments on this pull request";
+fn no_comments(words: &Words) -> String {
+    format!("No comments on this {}", words.request)
+}
 
 /// Refuses a key meant for the detail while the conversation shows.
 pub(crate) fn on_conversation(state: &AppState) -> Option<Reason> {
-    matches!(state.review.screen, ReviewScreen::Conversation(_)).then_some(BACK_FIRST.into())
+    matches!(state.review.screen, ReviewScreen::Conversation(_))
+        .then(|| back_first(state.review_words()).into())
 }
 
 /// Why `C` cannot show the conversation: no pull request's detail is
@@ -34,8 +47,10 @@ pub(crate) fn conversation_disabled(state: &AppState) -> Option<Reason> {
     let review = &state.review;
     match review.screen {
         ReviewScreen::Detail(_) => {}
-        ReviewScreen::Queue => return Some(NO_PR_OPEN.into()),
-        ReviewScreen::Files(_) | ReviewScreen::Conversation(_) => return Some(BACK_FIRST.into()),
+        ReviewScreen::Queue => return Some(no_pr_open(state.review_words()).into()),
+        ReviewScreen::Files(_) | ReviewScreen::Conversation(_) => {
+            return Some(back_first(state.review_words()).into());
+        }
     }
     if review.discussion_fetch.error.is_some() {
         return Some(COMMENTS_FAILED.into());
@@ -70,11 +85,15 @@ fn verb(kind: ConversationKind) -> &'static str {
 }
 
 /// Every line of the conversation at `width`: each item's header, its
-/// body as markdown and a blank row, then a note when GitHub has more.
-pub fn conversation_lines(discussion: &PrDiscussion, width: usize) -> Vec<Line<'static>> {
+/// body as markdown and a blank row, then a note when the forge has more.
+pub fn conversation_lines(
+    discussion: &PrDiscussion,
+    words: &Words,
+    width: usize,
+) -> Vec<Line<'static>> {
     let items = &discussion.conversation;
     if items.is_empty() {
-        return vec![Line::raw(NO_COMMENTS)];
+        return vec![Line::raw(no_comments(words))];
     }
     let dim = Style::new().add_modifier(Modifier::DIM);
     let mut lines = Vec::new();
@@ -94,7 +113,7 @@ pub fn conversation_lines(discussion: &PrDiscussion, width: usize) -> Vec<Line<'
     }
     if discussion.conversation_capped {
         lines.push(Line::styled(
-            format!("More on GitHub (showing the first {})", items.len()),
+            format!("More on {} (showing the first {})", words.name, items.len()),
             dim,
         ));
     }
@@ -133,9 +152,10 @@ impl AppState {
         let width = usize::from(self.review_area().width);
         let drawn = self.review.conversation.as_ref();
         if !drawn.is_some_and(|c| c.width == width) {
+            let words = self.review_words();
             self.review.conversation = self.review.discussion.as_ref().map(|d| RenderedBody {
                 width,
-                lines: conversation_lines(d, width),
+                lines: conversation_lines(d, words, width),
             });
         }
         // A taller screen may have room for lines scrolled past.
@@ -200,6 +220,13 @@ pub(crate) mod tests {
     use crate::intent::AppIntent;
     use kika_forge::ForgeStatus;
     use kika_forge::discussion::ConversationItem;
+    use kika_forge::forge::words_or_default;
+
+    /// The texts as GitHub words them.
+    pub(crate) const BACK_FIRST: &str = "Go back to the pull request first";
+    pub(crate) const BACK_TO_REFRESH: &str = "Go back to the pull request to refresh";
+    const NO_PR_OPEN: &str = "Open a pull request first";
+    pub(crate) const NO_COMMENTS: &str = "No comments on this pull request";
 
     /// Pull request 12's detail with `discussion` read.
     pub(crate) fn detail_with(discussion: PrDiscussion) -> AppState {
@@ -421,13 +448,13 @@ pub(crate) mod tests {
             ),
         ] {
             discussion.conversation[0].kind = kind;
-            let first = conversation_lines(&discussion, 60)[0].to_string();
+            let first = conversation_lines(&discussion, words_or_default(None), 60)[0].to_string();
             assert_eq!(first, format!("frank · 2023-11-14 20:00 · {word}"));
         }
         let mut empty = fixture_discussion();
         empty.conversation.clear();
         empty.conversation_capped = true;
-        let lines = conversation_lines(&empty, 60);
+        let lines = conversation_lines(&empty, words_or_default(None), 60);
         assert_eq!(lines, [Line::raw(NO_COMMENTS)]);
     }
 
