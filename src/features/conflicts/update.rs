@@ -493,6 +493,11 @@ mod tests {
                 .any(|e| matches!(e, Effect::LoadStatus { .. })),
             "{effects:?}"
         );
+        land_status(
+            &mut state,
+            &effects,
+            vec![conflicted("c.txt"), changed("a.rs", '.', 'M')],
+        );
 
         press_char(&mut state, 'j');
         assert_eq!(press_char(&mut state, 'M'), vec![]);
