@@ -4760,7 +4760,8 @@ mod tests {
         );
         assert_eq!(state.remote.as_ref().map(|r| &r.op), Some(&op));
         let effects = state.update(remote_finished(tag, op, Ok(())));
-        tags_tag(&effects);
+        // Keys on the Tags tab wait for the tags the push reloads.
+        state.update(tags_loaded(tags_tag(&effects), two_tags()));
 
         // Two remotes and no upstream: nothing to choose from.
         state.branches.list.rows[0].upstream = None;

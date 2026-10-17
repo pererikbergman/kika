@@ -1,13 +1,16 @@
-//! Keys held while a user status reload is in flight. A key that acts on
-//! the selected file, pressed before the reload lands, would act on a row
-//! the reloaded list may no longer have. So keys pressed in the Files
-//! panel or the Diff pane wait for the load and replay in order on what
-//! it shows.
+//! Keys held while a user reload is in flight. A key that acts on the
+//! selected row, pressed before the reload lands, would act on a row the
+//! reloaded list may no longer have. So keys pressed in a panel whose list
+//! is reloading wait for the load and replay in order on what it shows.
 //!
-//! Only reloads the user waits on hold keys (`refresh_status`). A
-//! background load does not, or every file-system event would add lag to
-//! every key. Keys typed into an input, prompt, popup, help or the commit
-//! editor are never held: `key_focus` names another scope for them.
+//! Files (with the Diff pane) waits on the user's status load. Branches,
+//! Remotes, Tags, the log, the reflog and Stash each wait on their own
+//! list once a user reload (`apply_plan`) has armed it.
+//!
+//! Only reloads the user waits on hold keys. A background load does not
+//! arm anything, or every file-system event would add lag to every key.
+//! Keys typed into an input, prompt, popup, help or the commit editor are
+//! never held: `key_focus` names another scope for them.
 //!
 //! [`KeyHold`]'s fields are private to this file, so the hold is started,
 //! released and dropped only through the methods here.
@@ -29,11 +32,30 @@ const KEY_DROPPED: &str = "Still reloading; key dropped";
 /// Said when a failed reload or a repository change drops held keys.
 const KEYS_DROPPED: &str = "Keys pressed while reloading were dropped; press them again";
 
-/// The keys waiting on a status reload, held by `AppState`.
+/// A list keys may wait on: the one the focused panel acts on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeldList {
+    /// The working-tree files, for Files and the Diff pane.
+    Files,
+    Branches,
+    Remotes,
+    Tags,
+    /// The log's first page.
+    Log,
+    Reflog,
+    Stash,
+}
+
+/// The keys waiting on a reload, held by `AppState`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct KeyHold {
-    /// The status load keys wait on; `None` when none does.
+    /// The status load Files keys wait on; `None` when none does.
     seq: Option<u64>,
+    /// The other lists a user reload is loading. Each holds keys until
+    /// its list lands, whichever load (user or a newer watch one) that is.
+    armed: Vec<HeldList>,
+    /// The list the queued keys wait on, so its failure drops them.
+    waiting_on: Option<HeldList>,
     /// Keys pressed while it was in flight, oldest first.
     keys: VecDeque<KeyPress>,
 }
@@ -48,25 +70,77 @@ impl KeyHold {
     pub(crate) fn has_keys(&self) -> bool {
         !self.keys.is_empty()
     }
+
+    fn is_armed(&self, list: HeldList) -> bool {
+        self.armed.contains(&list)
+    }
 }
 
 impl AppState {
-    /// Whether a key pressed now waits for the status reload: one the user
-    /// started is still in flight, and the key would go to Files or the
-    /// Diff pane.
-    pub(crate) fn holds_keys(&self) -> bool {
-        self.key_hold.seq.is_some()
-            && self.files.seq == self.key_hold.seq
-            && self.keys_go_to_panels()
+    /// The list a key pressed now would act on, if it is one that holds
+    /// keys while it reloads.
+    pub(crate) fn held_list(&self) -> Option<HeldList> {
+        match self.key_focus() {
+            KeyScope::Files | KeyScope::Diff | KeyScope::Lines => Some(HeldList::Files),
+            KeyScope::Branches => Some(HeldList::Branches),
+            KeyScope::Remotes => Some(HeldList::Remotes),
+            KeyScope::Tags => Some(HeldList::Tags),
+            KeyScope::Commits => Some(HeldList::Log),
+            KeyScope::Reflog => Some(HeldList::Reflog),
+            KeyScope::Stash => Some(HeldList::Stash),
+            _ => None,
+        }
     }
 
-    /// Whether a key goes to Files or the Diff pane, the scopes held keys
-    /// were pressed in.
-    fn keys_go_to_panels(&self) -> bool {
-        matches!(
-            self.key_focus(),
-            KeyScope::Files | KeyScope::Diff | KeyScope::Lines
-        )
+    /// Whether `list` has a load in flight.
+    fn list_loading(&self, list: HeldList) -> bool {
+        match list {
+            HeldList::Files => self.files.seq.is_some(),
+            HeldList::Branches => self.branches.list.seq.is_some(),
+            HeldList::Remotes => self.branches.remotes.list.seq.is_some(),
+            HeldList::Tags => self.branches.tags.seq.is_some(),
+            HeldList::Log => self.commits.list.seq.is_some(),
+            HeldList::Reflog => self.commits.reflog.list.seq.is_some(),
+            HeldList::Stash => self.stash.list.seq.is_some(),
+        }
+    }
+
+    /// Whether a key pressed now waits for a reload: one the user started
+    /// is still loading the list the key would act on.
+    pub(crate) fn holds_keys(&self) -> bool {
+        match self.held_list() {
+            None => false,
+            Some(HeldList::Files) => {
+                self.key_hold.seq.is_some() && self.files.seq == self.key_hold.seq
+            }
+            Some(list) => self.key_hold.is_armed(list) && self.list_loading(list),
+        }
+    }
+
+    /// A user reload started loading `list`: keys for it wait until it
+    /// lands. Nothing to arm when no load is in flight.
+    pub(crate) fn arm_hold(&mut self, list: HeldList) {
+        if list != HeldList::Files && self.list_loading(list) && !self.key_hold.is_armed(list) {
+            self.key_hold.armed.push(list);
+        }
+    }
+
+    /// `list`'s load was applied (`ok` when it read the list): stop
+    /// holding for it, and replay the keys that waited on it. A failed
+    /// load drops them: the error is on top of what they were typed for.
+    pub(crate) fn list_landed(&mut self, list: HeldList, ok: bool) -> Vec<Effect> {
+        self.key_hold.armed.retain(|armed| *armed != list);
+        if !self.key_hold.has_keys() {
+            return vec![];
+        }
+        if !ok && self.key_hold.waiting_on == Some(list) {
+            self.drop_held_keys();
+            return vec![];
+        }
+        if self.holds_keys() {
+            return vec![];
+        }
+        self.replay_held()
     }
 
     /// Queue `key` for the reload; past [`MAX_HELD`] it is dropped.
@@ -75,23 +149,36 @@ impl AppState {
             self.notice = Some(KEY_DROPPED.into());
             return;
         }
+        if self.key_hold.keys.is_empty() {
+            self.key_hold.waiting_on = self.held_list();
+        }
         self.key_hold.keys.push_back(key);
     }
 
-    /// The reload landed: replay the held keys in order on what it shows.
-    /// A replayed key that starts another reload holds the rest for it.
+    /// The status reload landed: replay the held keys in order on what it
+    /// shows.
+    pub(crate) fn release_keys(&mut self) -> Vec<Effect> {
+        self.key_hold.seq = None;
+        self.replay_held()
+    }
+
+    /// Replay the held keys in order. A replayed key that starts another
+    /// reload, or moves to a list still loading, holds the rest for it.
     ///
-    /// Each key replays only while keys still go to the panels. Anything
+    /// Each key replays only while keys still go to a list panel. Anything
     /// else on top (a question or prompt a replayed key opened, or one
     /// that arrived while the keys waited, such as git asking for a
     /// password) drops the rest: they were typed for the panels, and must
     /// never answer something the user has not seen.
-    pub(crate) fn release_keys(&mut self) -> Vec<Effect> {
-        self.key_hold.seq = None;
+    fn replay_held(&mut self) -> Vec<Effect> {
         let mut effects = Vec::new();
-        while self.key_hold.seq.is_none() && self.key_hold.has_keys() {
-            if !self.keys_go_to_panels() {
+        while self.key_hold.has_keys() {
+            if self.held_list().is_none() {
                 self.drop_held_keys();
+                break;
+            }
+            if self.holds_keys() {
+                self.key_hold.waiting_on = self.held_list();
                 break;
             }
             let Some(key) = self.key_hold.keys.pop_front() else {
@@ -109,9 +196,9 @@ impl AppState {
 
     /// Forget the hold and its keys, saying so if any were waiting.
     pub(crate) fn drop_held_keys(&mut self) {
-        self.key_hold.seq = None;
-        if !self.key_hold.keys.is_empty() {
-            self.key_hold.keys.clear();
+        let had_keys = self.key_hold.has_keys();
+        self.key_hold = KeyHold::default();
+        if had_keys {
             self.notice = Some(KEYS_DROPPED.into());
         }
     }
@@ -457,3 +544,6 @@ mod tests {
         assert_eq!(state.notice, None, "cleared quietly");
     }
 }
+
+#[cfg(test)]
+mod list_tests;

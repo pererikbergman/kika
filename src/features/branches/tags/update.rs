@@ -7,6 +7,7 @@ use super::{PendingTag, TagsIntent};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
 use crate::features::branches::BranchesTab;
+use crate::key_hold::HeldList;
 use crate::keymap::{self, KeyScope};
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
@@ -58,14 +59,17 @@ impl AppState {
         result: Result<Vec<TagRef>, String>,
     ) -> Vec<Effect> {
         self.user_done(tag);
+        let listed = result.is_ok();
         if !self.branches.tags.loaded(tag, self.generation, result) {
             return vec![];
         }
-        if self.branches.tab == BranchesTab::Tags {
+        let mut effects = if self.branches.tab == BranchesTab::Tags {
             self.load_branch_log(tag.user)
         } else {
             vec![]
-        }
+        };
+        effects.extend(self.list_landed(HeldList::Tags, listed));
+        effects
     }
 
     /// Ask for the new tag's name, keeping the selected commit as its

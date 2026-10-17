@@ -7,6 +7,7 @@ use super::keys::undo_disabled;
 use super::{ReflogIntent, undo};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
+use crate::key_hold::HeldList;
 use crate::keymap::KeyScope;
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
@@ -74,18 +75,24 @@ impl AppState {
         if !self.commits.reflog.read(tag, self.generation, result) {
             return vec![];
         }
+        self.plan_after_read(failed);
+        // After the plan: held keys must never answer its question.
+        self.list_landed(HeldList::Reflog, !failed)
+    }
+
+    /// Plan the undo or redo waiting for the read, if one is.
+    fn plan_after_read(&mut self, failed: bool) {
         let Some(direction) = self.commits.reflog.planning.take() else {
-            return vec![];
+            return;
         };
         if failed {
             match self.commits.reflog.list.error.clone() {
                 Some(message) => self.set_op_error(message),
                 None => self.clear_op_error(),
             }
-            return vec![];
+            return;
         }
         self.plan_travel(direction);
-        vec![]
     }
 
     /// Undo or redo: read the reflog afresh, then plan from it. Nothing

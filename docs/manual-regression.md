@@ -385,6 +385,7 @@ Run `scripts/make-sandbox.sh <dir> conflict` first.
 - [ ] BRANCH-27 `esc` order: range, then filter, then quit `[sandbox]`
 - [ ] BRANCH-28 `B` with no `[forge]` `[sandbox]`: says no host is listed; nothing is asked
 - [ ] BRANCH-29 `o` with no `[forge]` `[sandbox]`: the Pull request menu shows its items off, each saying why
+- [ ] BRANCH-30 Select `to-rename`, run `git branch -D to-rename` in another terminal, then `r` and at once `space` `[sandbox]`: `to-rename` is never checked out; `space` acts on the row the reloaded list shows
 
 ## Remotes
 
@@ -402,6 +403,7 @@ Run `scripts/make-sandbox.sh <dir> conflict` first.
 - [ ] REMOTE-12 A remote added with git as `-odd` `[sandbox]`: cannot be renamed or removed from Kika
 - [ ] REMOTE-13 A remote URL with a user and password (`https://u:p@example.com/x.git`) `[sandbox]`: the URL shows without the user and password
 - [ ] REMOTE-14 None of the Remotes keys reach the network (check the Command log) `[remote]`
+- [ ] REMOTE-15 Select `origin/remote-only`, run `git update-ref -d refs/remotes/origin/remote-only` in another terminal, then `r` and at once `space` `[remote]`: no `remote-only` branch is made; `space` acts on the row the reloaded list shows
 
 ## Tags
 
@@ -415,6 +417,7 @@ Run `scripts/make-sandbox.sh <dir> conflict` first.
 - [ ] TAG-08 `/v0` `[sandbox]`: filters the tags
 - [ ] TAG-09 `V` over two tags, `d`, `y` `[sandbox]`: both are deleted after one question
 - [ ] TAG-10 On the Tags tab, `P` pushes the tag, not the branch `[remote]`
+- [ ] TAG-11 Select `v0.1.0`, run `git tag -d v0.1.0` in another terminal, then `r` and at once `d` `[sandbox]`: the question names the tag the reloaded list shows, never `v0.1.0`
 
 ## Fetch, pull and push
 
@@ -537,6 +540,7 @@ Run `scripts/make-sandbox.sh <dir> conflict` first.
 - [ ] LOG-77 `M` on "Add notes", `enter` on HEAD `[sandbox]`: the files changed from the mark to HEAD show in place of the log; the marked row shows `◆`
 - [ ] LOG-78 `esc` order with a range, `/` filter, mark and `L` filter `[sandbox]`: clears the range, then the filter, then the mark, then the log filter, then quits
 - [ ] LOG-79 `y` on a commit `[sandbox]`: the Copy menu offers full hash, short hash, subject, full message and Forge URL (see CLIP)
+- [ ] LOG-80 Run `git commit --allow-empty -m gone` in another terminal, `r`, select "gone", run `git reset --soft HEAD~1` there, then `r` and at once `space` `[sandbox]`: nothing names the "gone" commit; `space` acts on the row the reloaded log shows
 
 ## Reflog
 
@@ -546,6 +550,7 @@ Run `scripts/make-sandbox.sh <dir> conflict` first.
 - [ ] REFLOG-04 `L` or `A` `[sandbox]`: does not filter; says path and author filters work on the log tab
 - [ ] REFLOG-05 `ctrl-z` from the Reflog tab with a filter set `[sandbox]`: undo works on the last action, whatever the filter hides
 - [ ] REFLOG-06 `]` again `[sandbox]`: back to the log
+- [ ] REFLOG-07 On the Reflog tab, cursor on the second row, run `git checkout -q - && git checkout -q -` in another terminal, then `r` and at once `j` `[sandbox]`: the cursor ends one row below the entry it was on, in the reloaded list
 
 ## Commit files and custom patches
 
@@ -595,6 +600,7 @@ Run `scripts/make-sandbox.sh <dir> conflict` first.
 - [ ] STASH-14 While a range is set: `enter`, `space`, `g`, `R` `[sandbox]`: wait until `esc` clears the range
 - [ ] STASH-15 Drop a stash in another terminal, then `d` in Kika on a stale row `[sandbox]`: refused; the list reloads
 - [ ] STASH-16 `ctrl-z` after a stash `[sandbox]`: a stash cannot be undone; says so or offers the previous action
+- [ ] STASH-17 Select `stash@{1}`, run `git stash drop stash@{1}` in another terminal, then `r` and at once `space` `[sandbox]`: "WIP with untracked file" is never applied; `space` acts on the row the reloaded list shows
 
 ## Submodules
 

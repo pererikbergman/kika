@@ -10,6 +10,7 @@ use super::push::{self, StashSet};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::diff_pane::DiffStart;
 use crate::effect::{Effect, Tag};
+use crate::key_hold::HeldList;
 use crate::keymap::{self, KeyScope};
 use crate::model::{AppState, Context, Focus};
 use crate::op::GitOp;
@@ -21,7 +22,10 @@ use kika_git::diff::DiffRequest;
 pub(crate) fn update(state: &mut AppState, intent: StashIntent) -> Vec<Effect> {
     match intent {
         StashIntent::Loaded { tag, result } => {
-            state.stash.list.loaded(tag, state.generation, result);
+            let listed = result.is_ok();
+            if state.stash.list.loaded(tag, state.generation, result) {
+                return state.list_landed(HeldList::Stash, listed);
+            }
         }
         StashIntent::Next => {
             state.stash.list.move_by(1);
@@ -654,7 +658,14 @@ mod tests {
         let mut state = on_stash_one();
         let (tag, op) = op_of(&press_char(&mut state, ' '));
         assert_eq!(op, GitOp::StashApply(stash_ref(1, "a1")));
-        state.update(finished(tag, op, Ok(())));
+        let effects = state.update(finished(tag, op, Ok(())));
+        // Keys wait for the stash list the apply reloads.
+        let reload = effects.iter().find_map(|e| match e {
+            Effect::LoadStashes { tag } => Some(*tag),
+            _ => None,
+        });
+        let reload = reload.expect("the stash list reloads");
+        state.update(stashes_loaded(reload, Ok(three_stashes())));
         let (_, op) = op_of(&press_char(&mut state, 'g'));
         assert_eq!(op, GitOp::StashPop(stash_ref(1, "a1")));
     }
