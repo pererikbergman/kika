@@ -1,7 +1,8 @@
-//! Merging the open pull request from review mode's detail. Which ways
-//! are offered, and why none is, come from the detail GitHub sent; the
-//! merge reaches GitHub only after a question that `y` alone answers, and
-//! only on a host the global config lists.
+//! Merging the open pull or merge request from review mode's detail.
+//! Which ways are offered, and why none is, come from the detail the forge
+//! sent; the merge reaches the forge only after a question that `y` alone
+//! answers, and only on a host the global config lists. Every text names
+//! the request and the forge in the reviewed forge's words.
 
 use super::state::{NO_FORGE, ReviewScreen};
 use crate::confirm_question::{Answer, Then};
@@ -11,15 +12,20 @@ use crate::model::{AppState, Context};
 use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::{ErrorPopup, MergePrConfirm, Popup};
 use crate::refresh::{RefreshPlan, Scope};
+use kika_forge::forge::{Words, merge_label};
 use kika_forge::merge::{MergeMethod, merge_options};
 use kika_forge::remote::allowed;
 use kika_forge::review::MergeState;
 use kika_forge::{CreateError, ForgeHost, ForgeRepo, PrBadge, PrState, same_repo};
 
-const NO_PR_SHOWN: &str = "Open a pull request first";
 const MERGING: &str = "A merge is already running";
 
-/// The merge GitHub is asked for, kept until it answers.
+/// Why `M` or `b` has nothing to act on, in the forge's `words`.
+fn no_pr_shown(words: &Words) -> String {
+    format!("Open a {} first", words.request)
+}
+
+/// The merge the forge is asked for, kept until it answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrMerging {
     pub seq: u64,
@@ -40,7 +46,7 @@ pub(crate) fn merge_disabled(state: &AppState) -> Option<Reason> {
             (state.review.screen, &state.review.detail),
             (ReviewScreen::Detail(n), Some(detail)) if detail.number == n
         );
-    (!shown).then_some(NO_PR_SHOWN.into())
+    (!shown).then(|| no_pr_shown(state.review_words()).into())
 }
 
 impl AppState {
@@ -61,7 +67,8 @@ impl AppState {
         let methods = match merge_options(&detail) {
             Ok(methods) => methods,
             Err(block) => {
-                self.notice = Some(format!("Cannot merge: {}", block.message()).into());
+                let words = self.review_words();
+                self.notice = Some(format!("Cannot merge: {}", block.message(words)).into());
                 return;
             }
         };
@@ -85,12 +92,17 @@ impl AppState {
             repo,
             host,
             unstable: detail.merge_state == MergeState::Unstable,
+            words: self.review_words(),
         };
         if methods.len() == 1 {
             self.popups.push(Popup::Question(confirm.into_question()));
             return;
         }
-        let rows = methods.iter().map(|m| m.label().to_string()).collect();
+        let kind = self.review_forge_kind();
+        let rows = methods
+            .iter()
+            .map(|&m| merge_label(kind, m).to_string())
+            .collect();
         self.review.merge_pick = Some((confirm, methods));
         self.popups.push(Popup::PickList(PickList::new(
             PickPurpose::MergeMethod,
@@ -110,8 +122,8 @@ impl AppState {
         }
     }
 
-    /// `y`: ask GitHub to merge what the question described, unless its
-    /// host has since left the config or become rate limited.
+    /// `y`: ask the forge to merge what the question described, unless
+    /// its host has since left the config or become rate limited.
     pub(crate) fn confirm_merge_pr(&mut self) -> Vec<Effect> {
         let Some(Then::MergePr(confirm)) = self
             .take_question(KeyScope::MergePullRequest, Answer::YOnly)
@@ -133,7 +145,8 @@ impl AppState {
         }
         let seq = self.take_seq();
         let tag = self.user_tag(seq);
-        self.notice = Some(format!("Merging #{}…", confirm.number).into());
+        let sign = self.review_words().sign;
+        self.notice = Some(format!("Merging {sign}{}…", confirm.number).into());
         self.pr_merge = Some(PrMerging {
             seq,
             number: confirm.number,
@@ -151,7 +164,7 @@ impl AppState {
         }]
     }
 
-    /// GitHub answered a merge. A merged pull request shows as merged at
+    /// The forge answered a merge. A merged request shows as merged at
     /// once, leaves the open queues, and its branch's badge turns merged;
     /// the badges are then asked for again.
     pub(crate) fn pull_request_merged(
@@ -170,9 +183,11 @@ impl AppState {
         if tag.generation != self.generation {
             return vec![];
         }
+        let words = self.review_words();
         match result {
             Ok(()) => {
-                self.notice = Some(format!("Merged #{number} ({})", merging.method.label()).into());
+                let label = merge_label(Some(merging.host.kind()), merging.method);
+                self.notice = Some(format!("Merged {}{number} ({label})", words.sign).into());
                 if let Some(detail) = self.review.detail.as_mut().filter(|d| d.number == number) {
                     detail.state = PrState::Merged;
                 }
@@ -184,13 +199,14 @@ impl AppState {
             }
             Err(CreateError::RateLimited { until }) => {
                 self.forge.record_rate_limit(&merging.host, until);
-                self.notice = Some("GitHub is rate limiting: nothing was merged".into());
+                self.notice =
+                    Some(format!("{} is rate limiting: nothing was merged", words.name).into());
                 vec![]
             }
             Err(error) => {
                 self.push_error(ErrorPopup::new(
-                    "Could not merge the pull request",
-                    &error.merge_message(),
+                    format!("Could not merge the {}", words.request),
+                    &error.merge_message_in(words),
                     "Press Esc to close",
                 ));
                 vec![]
@@ -421,7 +437,7 @@ mod tests {
         let mut state = in_queues();
         assert!(shift_m(&mut state).is_empty());
         assert!(state.popups.is_empty());
-        assert_eq!(state.notice.as_deref(), Some(NO_PR_SHOWN));
+        assert_eq!(state.notice.as_deref(), Some("Open a pull request first"));
         // Opened but not loaded yet.
         let mut state = in_queues();
         press(&mut state, KeyCode::Enter);
@@ -760,6 +776,118 @@ mod tests {
         shift_m(&mut state);
         assert!(state.popups.is_empty());
         assert_eq!(state.notice.as_deref(), Some(REFRESH_LIMITED));
+    }
+
+    #[test]
+    fn on_gitlab_the_merge_is_asked_and_answered_in_gitlabs_words() {
+        use crate::features::review::state::tests::on_gitlab;
+        let mut state = on_gitlab(on_detail(|pr| {
+            pr.merge_methods = vec![MergeMethod::Merge, MergeMethod::Squash];
+        }));
+        assert!(shift_m(&mut state).is_empty());
+        match state.popups.last() {
+            Some(Popup::PickList(list)) => assert_eq!(list.rows, ["merge", "squash"]),
+            other => panic!("expected a pick list, got {other:?}"),
+        }
+        press(&mut state, KeyCode::Char('j'));
+        assert!(merges(&press(&mut state, KeyCode::Enter)).is_empty());
+        let question = top_question(&state);
+        assert_eq!(question.title, "Merge merge request");
+        assert!(
+            question
+                .text
+                .starts_with("Press y to merge it on GitLab, n or Esc to cancel"),
+            "{}",
+            question.text
+        );
+        assert!(
+            question
+                .text
+                .contains("Merge !12 Add widget caching into main by squash?"),
+            "{}",
+            question.text
+        );
+        let effects = press(&mut state, KeyCode::Char('y'));
+        let (tag, number) = match effects.as_slice() {
+            [
+                Effect::MergePullRequest {
+                    tag,
+                    host,
+                    number,
+                    method,
+                    ..
+                },
+            ] => {
+                assert_eq!(host.as_str(), "gitlab.example.com");
+                assert_eq!(*method, MergeMethod::Squash);
+                (*tag, *number)
+            }
+            other => panic!("expected one merge, got {other:?}"),
+        };
+        assert_eq!(state.notice.as_deref(), Some("Merging !12…"));
+        state.update(AppIntent::Review(ReviewIntent::Merged {
+            tag,
+            number,
+            result: Ok(()),
+        }));
+        assert_eq!(state.notice.as_deref(), Some("Merged !12 (squash)"));
+        assert_eq!(state.review.detail.as_ref().unwrap().state, PrState::Merged);
+        assert!(state.review.rows().iter().all(|pr| pr.number != 12));
+    }
+
+    #[test]
+    fn on_gitlab_a_merge_that_cannot_happen_or_failed_says_gitlab() {
+        use crate::features::review::state::tests::on_gitlab;
+        let mut state = on_gitlab(on_detail(|pr| pr.merge_state = MergeState::Unknown));
+        shift_m(&mut state);
+        assert!(state.popups.is_empty());
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("Cannot merge: GitLab is still checking; refresh with r")
+        );
+        // Off the detail: the shared guard names a merge request.
+        let mut state = on_gitlab(in_queues());
+        shift_m(&mut state);
+        assert_eq!(state.notice.as_deref(), Some("Open a merge request first"));
+
+        let mut state = on_gitlab(on_detail(squash_only));
+        shift_m(&mut state);
+        let effects = press(&mut state, KeyCode::Char('y'));
+        let [Effect::MergePullRequest { tag, number, .. }] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        let (tag, number) = (*tag, *number);
+        state.update(AppIntent::Review(ReviewIntent::Merged {
+            tag,
+            number,
+            result: Err(CreateError::Status(kika_forge::ForgeStatus::Offline)),
+        }));
+        let [Popup::Error(error)] = state.popups.as_slice() else {
+            panic!("{:?}", state.popups);
+        };
+        let shown = format!("{error:?}");
+        assert!(
+            shown.contains("Could not merge the merge request"),
+            "{shown}"
+        );
+        assert!(shown.contains("GitLab could not be reached"), "{shown}");
+
+        let mut state = on_gitlab(on_detail(squash_only));
+        shift_m(&mut state);
+        let effects = press(&mut state, KeyCode::Char('y'));
+        let [Effect::MergePullRequest { tag, number, .. }] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        let (tag, number) = (*tag, *number);
+        state.update(AppIntent::Review(ReviewIntent::Merged {
+            tag,
+            number,
+            result: Err(CreateError::RateLimited { until: NOW + 600 }),
+        }));
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("GitLab is rate limiting: nothing was merged")
+        );
     }
 
     #[test]

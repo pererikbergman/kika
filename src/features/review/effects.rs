@@ -210,6 +210,7 @@ pub(crate) fn fetch_commits(
     tag: Tag,
     remote: RemoteName,
     oids: Vec<CommitId>,
+    fallback: Option<String>,
     slot: AnswerSlot,
 ) {
     let bridge_tx = tx.clone();
@@ -217,7 +218,13 @@ pub(crate) fn fetch_commits(
         tx,
         move || {
             let bridge = Bridge::open(tag, bridge_tx, slot);
-            pr_objects::fetch_commits(runner.as_ref(), &remote, &oids, bridge.env.as_ref())
+            pr_objects::fetch_commits(
+                runner.as_ref(),
+                &remote,
+                &oids,
+                fallback.as_deref(),
+                bridge.env.as_ref(),
+            )
         },
         // A panic still answers, or `op_seq` would block every later op.
         background::crashed("git"),
@@ -304,7 +311,7 @@ pub(crate) fn load_range_files(
     );
 }
 
-/// Merge pull request `number` through `gh`; always answered by one
+/// Merge request `number` through the host's forge CLI; always answered by one
 /// `ReviewIntent::Merged`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn merge(

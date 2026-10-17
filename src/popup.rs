@@ -27,6 +27,7 @@ use crate::keymap::{KeyPress, KeyScope};
 use crate::menu::MenuId;
 use crate::op::GitOp;
 use crate::pick_list::PickList;
+use kika_forge::forge::{Words, merge_label};
 use kika_forge::merge::MergeMethod;
 use kika_forge::{ForgeHost, ForgeRepo};
 use kika_git::askpass::Secret;
@@ -349,7 +350,7 @@ impl LeaveCommitsConfirm {
 
 /// "Merge this pull request?" Every value is taken when it is asked, so
 /// a refresh before the answer cannot change what is merged; the head
-/// commit guards the merge on GitHub's side too.
+/// commit guards the merge on the forge's side too.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergePrConfirm {
     pub number: u64,
@@ -363,14 +364,16 @@ pub struct MergePrConfirm {
     pub host: ForgeHost,
     /// A check that is not required has not passed.
     pub unstable: bool,
+    /// How the forge names the request, its number and itself.
+    pub words: &'static Words,
 }
 
 /// The most of a title the merge question shows, in characters.
 const MERGE_TITLE: usize = 72;
 
 impl MergePrConfirm {
-    pub fn title(&self) -> &'static str {
-        "Merge pull request"
+    pub fn title(&self) -> String {
+        format!("Merge {}", self.words.request)
     }
 
     /// What to press first, so a short screen cuts the details rather
@@ -381,12 +384,13 @@ impl MergePrConfirm {
             Some((cut, _)) => format!("{}…", &title[..cut]),
             None => title,
         };
+        let Words { name, sign, .. } = self.words;
         let mut text = format!(
-            "Press y to merge it on GitHub, n or Esc to cancel\n\
-             Merge #{} {title} into {} by {}?",
+            "Press y to merge it on {name}, n or Esc to cancel\n\
+             Merge {sign}{} {title} into {} by {}?",
             self.number,
             terminal_safe(self.base.as_bytes()),
-            self.method.label(),
+            merge_label(Some(self.host.kind()), self.method),
         );
         if self.unstable {
             text.push_str("\nSome checks have not passed");
@@ -394,7 +398,7 @@ impl MergePrConfirm {
         text
     }
 
-    /// The question `y` alone answers, since it reaches GitHub.
+    /// The question `y` alone answers, since it reaches the forge.
     pub fn into_question(self) -> ConfirmQuestion {
         ConfirmQuestion {
             scope: KeyScope::MergePullRequest,

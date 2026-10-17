@@ -647,7 +647,7 @@ pub fn detail_lines(
         Span::styled(" · ", dim()),
         Span::styled(word, Style::new().fg(color)),
     ]));
-    lines.extend(merge_line(palette, detail, width));
+    lines.extend(merge_line(palette, detail, words, width));
     let branches = format!("{} ← {}", detail.base, detail.head);
     lines.extend(markdown::wrap_text(&branches, Style::new(), width));
     if !detail.checks.is_empty() {
@@ -688,8 +688,14 @@ pub fn detail_lines(
     lines
 }
 
-/// How the pull request may be merged, or why it may not, in fixed words.
-fn merge_line(palette: &Palette, detail: &PrDetail, width: usize) -> Vec<Line<'static>> {
+/// How the request may be merged, or why it may not, in fixed words that
+/// name the forge in `words`.
+fn merge_line(
+    palette: &Palette,
+    detail: &PrDetail,
+    words: &Words,
+    width: usize,
+) -> Vec<Line<'static>> {
     let (text, style) = match merge_options(detail) {
         Ok(methods) => {
             let labels: Vec<&str> = methods.iter().map(|m| m.label()).collect();
@@ -697,11 +703,11 @@ fn merge_line(palette: &Palette, detail: &PrDetail, width: usize) -> Vec<Line<'s
         }
         // Already merged is done, not a problem: it is not drawn as one.
         Err(MergeBlock::Merged) => (
-            format!("Cannot merge: {}", MergeBlock::Merged.message()),
+            format!("Cannot merge: {}", MergeBlock::Merged.message(words)),
             dim(),
         ),
         Err(block) => (
-            format!("Cannot merge: {}", block.message()),
+            format!("Cannot merge: {}", block.message(words)),
             Style::new().fg(palette.error),
         ),
     };
@@ -888,6 +894,35 @@ mod tests {
         state.review.detail = Some(detail);
         let rows = draw(&state, 80, 30);
         assert!(contains(&rows, "Cannot merge: already merged"), "{rows:#?}");
+    }
+
+    #[test]
+    fn on_gitlab_the_detail_says_gitlab_is_still_checking() {
+        let mut state = on_gitlab(reviewing(ReviewScreen::Detail(42)));
+        let mut detail = fixture_detail();
+        detail.merge_state = kika_forge::review::MergeState::Unknown;
+        state.review.detail = Some(detail);
+        let rows = draw(&state, 80, 30);
+        assert!(
+            contains(
+                &rows,
+                "Cannot merge: GitLab is still checking; refresh with r"
+            ),
+            "{rows:#?}"
+        );
+        // GitHub keeps its own words.
+        let mut state = reviewing(ReviewScreen::Detail(42));
+        let mut detail = fixture_detail();
+        detail.merge_state = kika_forge::review::MergeState::Unknown;
+        state.review.detail = Some(detail);
+        let rows = draw(&state, 80, 30);
+        assert!(
+            contains(
+                &rows,
+                "Cannot merge: GitHub is still checking; refresh with r"
+            ),
+            "{rows:#?}"
+        );
     }
 
     /// The style of the first cell of the row holding `text`.

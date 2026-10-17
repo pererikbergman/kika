@@ -352,6 +352,53 @@ mod tests {
     }
 
     #[test]
+    fn on_gitlab_a_pick_of_102_lines_is_refused_before_any_read_and_stays() {
+        use crate::features::review::state::tests::on_gitlab;
+        use kika_git::diff::{Classifier, DiffLine, EmojiZwj};
+        // One hunk of 102 added lines.
+        let long = || -> Vec<DiffLine> {
+            let mut classifier = Classifier::new(EmojiZwj::Escape);
+            [
+                "diff --git a/src/cache.rs b/src/cache.rs".to_string(),
+                "--- a/src/cache.rs".into(),
+                "+++ b/src/cache.rs".into(),
+                "@@ -0,0 +1,102 @@".into(),
+            ]
+            .into_iter()
+            .chain((1..=102).map(|n| format!("+line {n}")))
+            .map(|t| classifier.classify(t.as_bytes()))
+            .collect()
+        };
+        let pick_all = |state: &mut AppState, rows: usize| {
+            type_char(state, 'a');
+            type_char(state, 'v');
+            for _ in 1..rows {
+                type_char(state, 'j');
+            }
+        };
+
+        let mut state = on_gitlab(commenting());
+        state.diff.lines = long();
+        pick_all(&mut state, 102);
+        assert_eq!(type_char(&mut state, 's'), []);
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("GitLab takes a suggestion of at most 101 lines")
+        );
+        assert_eq!(state.review.composer, None);
+        assert!(live_pick(&state).is_some());
+        assert_eq!(state.key_focus(), KeyScope::ReviewPick);
+        assert!(!state.review.suggestion_fetch.loading);
+
+        // 101 lines are read.
+        let mut state = on_gitlab(commenting());
+        state.diff.lines = long();
+        pick_all(&mut state, 101);
+        let (_, target) = read(&type_char(&mut state, 's'));
+        assert_eq!(span(&target), (Some(right(1)), right(101)));
+    }
+
+    #[test]
     fn a_pick_ending_on_a_removed_line_or_across_hunks_is_refused_and_stays() {
         // One removed row.
         let mut state = commenting();

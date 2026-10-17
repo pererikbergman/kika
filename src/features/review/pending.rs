@@ -1,10 +1,11 @@
 //! The pending review: line comments the reviewer has written on the open
-//! pull request and not submitted, which only they see. Read from the
-//! state directory when the files screen opens (`LoadPendingReview`) and
-//! written back after every change (`SavePendingReview`), one save at a
-//! time so the file on disk is never older than what is shown. A stored
-//! file Kika cannot vouch for is left alone: comments on that pull
-//! request are then off, and nothing is written. Nothing reaches GitHub.
+//! pull or merge request and not submitted, which only they see. Read from
+//! the state directory when the files screen opens (`LoadPendingReview`)
+//! and written back after every change (`SavePendingReview`), one save at
+//! a time so the file on disk is never older than what is shown. A stored
+//! file Kika cannot vouch for is left alone: comments on that request are
+//! then off, and nothing is written. Nothing reaches the forge until a
+//! submit.
 
 use super::comment_pick::numbered_in_view;
 use super::discussion_write::wait;

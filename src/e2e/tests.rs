@@ -3102,6 +3102,102 @@ async fn a_reply_and_a_resolve_go_to_a_gitlab_discussion() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_gitlab_merge_request_is_squash_merged_from_review_mode() {
+    use std::sync::Arc;
+
+    use crate::features::review::ReviewScreen;
+    use kika_forge::PrState;
+    use kika_forge::github::answer;
+    use kika_forge::gitlab::fixtures::STATES;
+    use kika_forge::gitlab::{FakeGlab, GlabCall, RestMethod, RestPath};
+    use kika_forge::gitlab_discussion::fixtures::DISCUSSION;
+    use kika_forge::gitlab_merge::fixtures::{MERGED, PROJECT_ID};
+    use kika_forge::gitlab_review::fixtures::{DETAIL, QUEUES};
+    use kika_forge::review::QueueKind;
+
+    let repo = TestRepo::new().write("a.txt", "one\n").commit("first");
+    repo.git([
+        "remote",
+        "add",
+        "origin",
+        "https://gitlab.example.com/acme/widgets",
+    ]);
+    let glab = Arc::new(
+        FakeGlab::new()
+            .reply(answer(QUEUES))
+            .reply(answer(DETAIL))
+            .reply(answer(DISCUSSION))
+            .reply(answer(PROJECT_ID))
+            .reply(answer(MERGED))
+            // The badges, asked again after the merge.
+            .reply(answer(STATES)),
+    );
+    let mut app = Harness::start_with_glab(&repo, Arc::clone(&glab), "gitlab.example.com").await;
+
+    app.type_text("G").await;
+    app.press(KeyCode::Enter).await;
+    assert_eq!(app.state().review.screen, ReviewScreen::Detail(12));
+    app.assert_screen_contains("Merge: ");
+    assert_eq!(glab.calls().len(), 3);
+
+    // `M`, squash, `y`.
+    app.type_text("M").await;
+    app.assert_screen_contains("squash");
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Enter).await;
+    app.assert_screen_contains("Press y to merge it on GitLab");
+    app.assert_screen_contains("Merge !12 Add widget caching into main by squash?");
+    assert_eq!(glab.calls().len(), 3, "asking reached GitLab");
+    app.type_text("y").await;
+
+    app.assert_screen_contains("Merged !12 (squash)");
+    let calls = glab.calls();
+    assert!(calls.len() >= 5, "{calls:?}");
+    let lookup: serde_json::Value = serde_json::from_slice(&calls[3].stdin()).unwrap();
+    assert!(
+        lookup["query"]
+            .as_str()
+            .unwrap()
+            .contains("project(fullPath:$path){id}"),
+        "{lookup}"
+    );
+    assert_eq!(lookup["variables"]["path"], "acme/widgets");
+    assert!(matches!(
+        calls[4].kind,
+        GlabCall::Rest {
+            method: RestMethod::Put,
+            path: RestPath::Merge {
+                project: 17,
+                iid: 12
+            },
+            ..
+        }
+    ));
+    let put: serde_json::Value = serde_json::from_slice(&calls[4].stdin()).unwrap();
+    assert_eq!(
+        put,
+        serde_json::json!({ "sha": "1".repeat(40), "squash": true })
+    );
+    assert_eq!(
+        calls[4].display_line(),
+        "glab api projects/17/merge_requests/12/merge --method PUT --include \
+         --hostname gitlab.example.com --header 'Content-Type: application/json' --input -"
+    );
+
+    // The detail shows it merged, and it has left the open queues.
+    let state = app.state();
+    assert_eq!(state.review.detail.as_ref().unwrap().state, PrState::Merged);
+    let queues = state.review.queues.as_ref().unwrap();
+    for kind in QueueKind::ALL {
+        assert!(
+            queues.get(kind).iter().all(|pr| pr.number != 12),
+            "{kind:?}"
+        );
+    }
+    app.assert_screen_contains("Cannot merge: already merged");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn shift_b_in_branches_asks_github_once_and_only_for_an_opted_in_host() {
     use std::sync::Arc;
 

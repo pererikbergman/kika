@@ -1,8 +1,9 @@
-//! `o` on the files screen: open the line in view on GitHub's page of the
-//! pull request, at its side and number. The review diff has no line
-//! cursor, so the line is the selected thread's when its row is in view,
-//! else the first numbered row at the top. Nothing is asked of GitHub:
-//! the URL is built locally and handed to the configured browser.
+//! `o` on the files screen: open the line in view on the forge's page of
+//! the pull or merge request: on GitHub at its side and number, on GitLab
+//! at the line code of its row. The review diff has no line cursor, so the
+//! line is the selected thread's when its row is in view, else the first
+//! numbered row at the top. Nothing is asked of the forge: the URL is
+//! built locally and handed to the configured browser.
 
 use super::files::{FilesStage, PrFiles, ReviewView, files_screen};
 use super::state::{NO_BROWSER, NO_FORGE, NOT_READY};
@@ -11,17 +12,26 @@ use crate::keymap::Reason;
 use crate::model::AppState;
 use crate::notice::Notice;
 use kika_forge::anchor::{self, GhLine, GhSide, Placement};
+use kika_forge::forge::Words;
+use kika_forge::pending::RowPos;
 use kika_forge::url::pr_line_url;
 use kika_git::patch::LineId;
 
-const NOT_UTF8: &str = "GitHub cannot be pointed at a file whose name is not UTF-8";
+fn not_utf8(words: &Words) -> String {
+    format!(
+        "{} cannot be pointed at a file whose name is not UTF-8",
+        words.name
+    )
+}
+
 const NO_LINE: &str = "No diff line in view";
 const NOT_LINKABLE: &str = "This repository's address cannot be linked";
 
-/// The line to point at in the selected file's diff: the selected line
-/// thread's end when its row is in view, else the first row in view with
-/// a number. `None` while the pane loads or shows another file.
-fn target_line(state: &AppState, files: &PrFiles) -> Option<LineId> {
+/// The line to point at in the selected file's diff, and its row: the
+/// selected line thread's end when its row is in view, else the first row
+/// in view with a number. `None` while the pane loads or shows another
+/// file.
+fn target_line(state: &AppState, files: &PrFiles) -> Option<(usize, LineId)> {
     let path = &files.selected()?.file.path;
     let diff = &state.diff;
     if diff.pending || diff.path.as_ref() != Some(path) {
@@ -40,15 +50,31 @@ fn target_line(state: &AppState, files: &PrFiles) -> Option<LineId> {
         let Some(Placement::Line { end, .. }) = scope.placement(t) else {
             return None;
         };
-        window
-            .contains(&anchor::row_in(&numbers, end)?)
-            .then_some(end)
+        let row = anchor::row_in(&numbers, end)?;
+        window.contains(&row).then_some((row, end))
     });
     thread_line.or_else(|| {
-        numbers
-            .get(window.start.min(numbers.len())..)?
+        let start = window.start.min(numbers.len());
+        numbers[start..]
             .iter()
-            .find_map(|&(old, new)| new.map(LineId::added).or(old.map(LineId::removed)))
+            .enumerate()
+            .find_map(|(i, &(old, new))| {
+                let line = new.map(LineId::added).or(old.map(LineId::removed))?;
+                Some((start + i, line))
+            })
+    })
+}
+
+/// The two counters at `row` of the shown diff, as a forge that names a
+/// line by both sides needs them.
+fn row_pos(state: &AppState, row: usize) -> Option<RowPos> {
+    let lines = state.diff.lines.get(..=row)?;
+    let (old, new) = anchor::row_positions(lines)[row]?;
+    let (o, n) = anchor::row_numbers(lines)[row];
+    Some(RowPos {
+        old,
+        new,
+        both: o.is_some() && n.is_some(),
     })
 }
 
@@ -57,6 +83,8 @@ struct LineLink<'a> {
     url: String,
     path: &'a str,
     line: GhLine,
+    /// The forge's name, as the bar says where the page is.
+    forge: &'static str,
 }
 
 impl LineLink<'_> {
@@ -67,7 +95,7 @@ impl LineLink<'_> {
             GhSide::Left => 'L',
             GhSide::Right => 'R',
         };
-        let lead = format!("Opening {side}{} on GitHub: ", self.line.line);
+        let lead = format!("Opening {side}{} on {}: ", self.line.line, self.forge);
         Notice::with_path(&lead, self.path)
     }
 }
@@ -81,13 +109,17 @@ fn line_link(state: &AppState) -> Result<LineLink<'_>, Reason> {
         return Err(NO_BROWSER.into());
     }
     let repo = state.review_repo().ok_or(NO_FORGE)?;
+    let words = state.review_words();
     let path = match files.selected() {
-        Some(row) => Some(std::str::from_utf8(row.file.path.as_bytes()).map_err(|_| NOT_UTF8)?),
+        Some(row) => {
+            Some(std::str::from_utf8(row.file.path.as_bytes()).map_err(|_| not_utf8(words))?)
+        }
         None => None,
     };
-    let (Some(path), Some(line)) = (path, target_line(state, files)) else {
+    let (Some(path), Some((row, line))) = (path, target_line(state, files)) else {
         return Err(NO_LINE.into());
     };
+    let pos = row_pos(state, row).ok_or(NO_LINE)?;
     let commit = match files.view {
         ReviewView::Whole => None,
         ReviewView::Commit(i) => Some(
@@ -101,11 +133,18 @@ fn line_link(state: &AppState) -> Result<LineLink<'_>, Reason> {
         ),
     };
     let line = anchor::from_line_id(line);
-    let url = pr_line_url(&repo, files.number, commit, path, line).ok_or(NOT_LINKABLE)?;
-    Ok(LineLink { url, path, line })
+    let kind = state.review_forge_kind();
+    let url =
+        pr_line_url(kind, &repo, files.number, commit, path, line, pos).ok_or(NOT_LINKABLE)?;
+    Ok(LineLink {
+        url,
+        path,
+        line,
+        forge: words.name,
+    })
 }
 
-/// Why `o` cannot open the line on GitHub: the files are not shown, no
+/// Why `o` cannot open the line on the forge: the files are not shown, no
 /// browser is configured, no forge repository is known, the file's name
 /// is not UTF-8, no numbered line is in view, or the address will not
 /// make a URL.
@@ -289,6 +328,50 @@ mod tests {
     }
 
     #[test]
+    fn on_gitlab_o_opens_the_merge_requests_diffs_at_the_rows_line_code() {
+        use crate::features::review::state::tests::on_gitlab;
+        // `sha1("src/main.rs")` in hex.
+        let code = "4b569f42a6967dec04275af54f4ca9ab6a4eee64";
+        let page = "https://gitlab.example.com/acme/widgets/-/merge_requests/12/diffs";
+        let mut state = on_gitlab(shown(&["src/main.rs"], fixture_discussion(), main_diff()));
+        // An added row: new line 12, the old counter at 10.
+        assert_eq!(opened(&mut state), format!("{page}#{code}_10_12"));
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("Opening R12 on GitLab: src/main.rs")
+        );
+        // A removed row, then a context row.
+        state.diff.scroll = 5;
+        assert_eq!(opened(&mut state), format!("{page}#{code}_10_13"));
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("Opening L10 on GitLab: src/main.rs")
+        );
+        state.diff.scroll = 6;
+        assert_eq!(opened(&mut state), format!("{page}#{code}_11_13"));
+
+        // A commit's view names the commit.
+        let id = "ab".repeat(20);
+        let files = state.review.files.as_mut().unwrap();
+        files.commits = Some((
+            vec![PrCommit {
+                range: CommitRange {
+                    oid: CommitId::parse(&id).unwrap(),
+                    parent: None,
+                },
+                subject: "s".into(),
+            }],
+            false,
+        ));
+        files.view = ReviewView::Commit(0);
+        state.diff.scroll = 0;
+        assert_eq!(
+            opened(&mut state),
+            format!("{page}?commit_id={id}#{code}_10_12")
+        );
+    }
+
+    #[test]
     fn each_reason_it_is_off_is_said_and_nothing_runs() {
         // Back on the detail, the files are not shown.
         let mut state = shown(&["src/main.rs"], fixture_discussion(), main_diff());
@@ -357,6 +440,9 @@ mod tests {
         let odd = kika_git::path::RepoPath::from_bytes(b"src/\xff.rs");
         state.review.files.as_mut().unwrap().rows[0].file.path = odd.clone();
         state.diff.path = Some(odd);
-        refused(&mut state, NOT_UTF8);
+        refused(
+            &mut state,
+            "GitHub cannot be pointed at a file whose name is not UTF-8",
+        );
     }
 }

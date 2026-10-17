@@ -12,9 +12,9 @@ use super::github::Refusal;
 use super::gitlab::{Glab, GlabCall};
 use super::gitlab_discussion::merge_request_id_ok;
 use super::review::{
-    Check, CheckStatus, MAX_BODY, MAX_CHECKS, MAX_LABELS, MAX_REVIEWERS, MergeState, Mergeability,
-    Nodes, PrDetail, PrSummary, QUEUE_SIZE, Queues, ReviewVerdict, capped_body, data_of, full_oid,
-    line, read_with, safe_url,
+    Check, CheckStatus, MAX_BODY, MAX_CHECKS, MAX_LABELS, MAX_REVIEWERS, MergeMethod, MergeState,
+    Mergeability, Nodes, PrDetail, PrSummary, QUEUE_SIZE, Queues, ReviewVerdict, capped_body,
+    data_of, full_oid, line, read_with, safe_url,
 };
 use super::{ForgeRepo, ForgeStatus, PrState};
 
@@ -43,7 +43,7 @@ impl Glab<'_> {
 }
 
 /// The project's full path, as GitLab names it.
-fn project_path(repo: &ForgeRepo) -> String {
+pub(crate) fn project_path(repo: &ForgeRepo) -> String {
     format!("{}/{}", repo.owner, repo.name)
 }
 
@@ -71,8 +71,8 @@ project(fullPath:$path){mergeRequests(state:opened,sort:UPDATED_DESC,first:50)\
 
 /// The detail query: fixed text; the project path and iid are variables.
 const DETAIL_QUERY: &str = "query($path:ID!,$iid:String!){project(fullPath:$path)\
-{mergeRequest(iid:$iid){id title description state draft sourceBranch targetBranch \
-conflicts detailedMergeStatus author{username} \
+{squashReadOnly mergeRequest(iid:$iid){id title description state draft sourceBranch \
+targetBranch conflicts detailedMergeStatus squashOnMerge author{username} \
 labels(first:20){nodes{title}} reviewers(first:20){nodes{username}} \
 approvedBy(first:20){nodes{username}} diffRefs{headSha startSha baseSha} \
 diffStatsSummary{fileCount} headPipeline{jobs(first:100){nodes{name status webPath}}}}}}";
@@ -173,6 +173,9 @@ struct DetailData {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DetailProject {
+    /// The project fixes whether a merge squashes: always, or never.
+    #[serde(default)]
+    squash_read_only: Option<bool>,
     merge_request: Option<MrNode>,
 }
 
@@ -190,6 +193,10 @@ struct MrNode {
     target_branch: Option<String>,
     conflicts: Option<bool>,
     detailed_merge_status: Option<String>,
+    /// Whether a merge squashes, by the project's setting or the merge
+    /// request's own choice.
+    #[serde(default)]
+    squash_on_merge: Option<bool>,
     author: Option<User>,
     labels: Option<Nodes<Label>>,
     reviewers: Option<Nodes<User>>,
@@ -242,6 +249,10 @@ fn read_detail(body: &[u8], number: u64, host: &str) -> Result<Option<PrDetail>,
     let Some(mr) = project.merge_request else {
         return Ok(None);
     };
+    let merge_methods = merge_methods_of(
+        project.squash_read_only.unwrap_or(false),
+        mr.squash_on_merge.unwrap_or(false),
+    );
     let state = match mr.state.as_deref() {
         Some("merged") => PrState::Merged,
         Some("closed") => PrState::Closed,
@@ -298,7 +309,7 @@ fn read_detail(body: &[u8], number: u64, host: &str) -> Result<Option<PrDetail>,
         head: line(mr.source_branch.as_deref().unwrap_or_default()),
         mergeable,
         merge_state: merge_state_of(mr.detailed_merge_status.as_deref()),
-        merge_methods: Vec::new(),
+        merge_methods,
         checks,
         head_oid,
         base_oid,
@@ -311,10 +322,25 @@ fn read_detail(body: &[u8], number: u64, host: &str) -> Result<Option<PrDetail>,
     }))
 }
 
+/// The ways a merge request may be merged from here. The project fixes
+/// how a merge lands (a merge commit, semi-linear or fast-forward), so
+/// only squashing is a choice, and none when the project fixes that too.
+/// Rebasing is never offered.
+fn merge_methods_of(squash_read_only: bool, squash_on_merge: bool) -> Vec<MergeMethod> {
+    match (squash_read_only, squash_on_merge) {
+        (true, true) => vec![MergeMethod::Squash],
+        (true, false) => vec![MergeMethod::Merge],
+        (false, _) => vec![MergeMethod::Merge, MergeMethod::Squash],
+    }
+}
+
 /// What stands between the merge request and a merge, from GitLab's
-/// `detailedMergeStatus`. Any value Kika does not know is `Unknown`.
+/// `detailedMergeStatus`. Any value Kika does not know is `Unknown`, as
+/// are the ones that say GitLab is still working it out; a merge request
+/// that is not open is blocked by its state already.
 fn merge_state_of(status: Option<&str>) -> MergeState {
     match status {
+        Some("CHECKING" | "UNCHECKED" | "PREPARING" | "NOT_OPEN") => MergeState::Unknown,
         Some("MERGEABLE") => MergeState::Clean,
         Some("CONFLICT" | "BROKEN_STATUS") => MergeState::Dirty,
         Some("NEED_REBASE") => MergeState::Behind,
@@ -581,7 +607,7 @@ mod tests {
         assert_eq!(pr.files_total, 3);
         assert_eq!(pr.mergeable, Mergeability::Mergeable);
         assert_eq!(pr.merge_state, MergeState::Clean);
-        assert_eq!(pr.merge_methods, []);
+        assert_eq!(pr.merge_methods, [MergeMethod::Merge, MergeMethod::Squash]);
         assert_eq!((pr.viewed.len(), pr.viewed_gap), (0, None));
         assert!(pr.body.starts_with("## Summary\n\n"), "{:?}", pr.body);
         assert!(!pr.body.contains('\r'));
@@ -654,6 +680,59 @@ mod tests {
         assert_eq!(pr.mergeable, Mergeability::Unknown);
         assert_eq!(pr.checks, []);
         assert_eq!(pr.head_oid, None);
+    }
+
+    #[test]
+    fn the_squash_settings_decide_the_merge_methods() {
+        use MergeMethod::{Merge, Squash};
+        for (read_only, on_merge, want) in [
+            ("false", "false", vec![Merge, Squash]),
+            ("false", "true", vec![Merge, Squash]),
+            ("true", "true", vec![Squash]),
+            ("true", "false", vec![Merge]),
+        ] {
+            let other = DETAIL
+                .replace(
+                    "\"squashReadOnly\":false",
+                    &format!("\"squashReadOnly\":{read_only}"),
+                )
+                .replace(
+                    "\"squashOnMerge\":false",
+                    &format!("\"squashOnMerge\":{on_merge}"),
+                );
+            let pr = detail(&FakeGlab::new().reply(answer(&other)), 42)
+                .unwrap()
+                .unwrap();
+            assert_eq!(pr.merge_methods, want, "{read_only} {on_merge}");
+        }
+        // Missing fields read as false.
+        let bare = DETAIL
+            .replace("\"squashReadOnly\":false,", "")
+            .replace("\"squashOnMerge\":false,", "");
+        let pr = detail(&FakeGlab::new().reply(answer(&bare)), 42)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pr.merge_methods, [Merge, Squash]);
+    }
+
+    #[test]
+    fn the_parsed_fixture_can_be_merged_and_a_checking_status_cannot_yet() {
+        use crate::merge::{MergeBlock, merge_options};
+        let pr = detail(&FakeGlab::new().reply(answer(DETAIL)), 42)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            merge_options(&pr),
+            Ok(vec![MergeMethod::Merge, MergeMethod::Squash])
+        );
+        for status in ["CHECKING", "UNCHECKED", "PREPARING", "NOT_OPEN"] {
+            let other = DETAIL.replace("\"MERGEABLE\"", &format!("\"{status}\""));
+            let pr = detail(&FakeGlab::new().reply(answer(&other)), 42)
+                .unwrap()
+                .unwrap();
+            assert_eq!(pr.merge_state, MergeState::Unknown, "{status}");
+            assert_eq!(merge_options(&pr), Err(MergeBlock::Unknown), "{status}");
+        }
     }
 
     #[test]

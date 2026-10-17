@@ -1,6 +1,7 @@
 //! The GitLab forge adapter: badges, the review (queues, detail and
-//! discussion), submitting a pending review, and replying, resolving and
-//! commenting, through `glab`, and nothing else yet.
+//! discussion), submitting a pending review, replying, resolving and
+//! commenting, and merging, through `glab`. Creating a merge request is
+//! not on it yet, and viewed marks never are: GitLab has no API for them.
 
 use crate::cache::Cached;
 use crate::cli::{CliStatus, CliVersion, judge};
@@ -20,12 +21,13 @@ use kika_git::commit_files::CommitId;
 pub struct GitLabForge<'a>(pub(crate) Glab<'a>);
 
 impl GitLabForge<'_> {
-    /// What GitLab can be asked so far: merging, creating and viewed
-    /// marks are not on it.
+    /// What GitLab can be asked so far: creating and viewed marks are not
+    /// on it.
     pub const SUPPORTS: &'static [Capability] = &[
         Capability::Badges,
         Capability::Review,
         Capability::DiscussionWrite,
+        Capability::Merge,
     ];
 
     /// How GitLab is named to the user: merge requests, numbered `!N`.
@@ -85,14 +87,16 @@ impl Forge for GitLabForge<'_> {
         )))
     }
 
+    /// One REST merge, guarded by the head, after a lookup of the
+    /// project's numeric id.
     fn merge_pull(
         &self,
-        _repo: &ForgeRepo,
-        _number: u64,
-        _method: MergeMethod,
-        _head_oid: &CommitId,
+        repo: &ForgeRepo,
+        number: u64,
+        method: MergeMethod,
+        head_oid: &CommitId,
     ) -> Result<(), CreateError> {
-        Err(CreateError::Unsupported(Self::lacks(Capability::Merge)))
+        self.0.merge_request(repo, number, method, head_oid)
     }
 
     fn set_file_viewed(
@@ -155,7 +159,7 @@ mod tests {
     }
 
     #[test]
-    fn merging_creating_and_viewed_marks_are_unsupported_without_a_call() {
+    fn creating_and_viewed_marks_are_unsupported_without_a_call() {
         let runner = FakeGlab::new();
         let sink = CommandSink::new();
         let host = ForgeHost::parse("gitlab.example.com")
@@ -173,7 +177,6 @@ mod tests {
             capability,
         };
         let created = |capability| CreateError::Unsupported(lacks(capability));
-        let head = CommitId::parse(&"a".repeat(40)).unwrap();
 
         assert_eq!(forge.kind(), ForgeKind::GitLab);
         assert_eq!(
@@ -181,12 +184,6 @@ mod tests {
                 .create_pull(&repo(), "topic", "main", "Add login")
                 .unwrap_err(),
             created(Capability::CreatePull)
-        );
-        assert_eq!(
-            forge
-                .merge_pull(&repo(), 7, MergeMethod::Merge, &head)
-                .unwrap_err(),
-            created(Capability::Merge)
         );
         assert_eq!(
             forge.set_file_viewed("MR_1", "src/a.rs", true).unwrap_err(),
@@ -199,7 +196,10 @@ mod tests {
                 GitLabForge::SUPPORTS.contains(&capability),
                 matches!(
                     capability,
-                    Capability::Badges | Capability::Review | Capability::DiscussionWrite
+                    Capability::Badges
+                        | Capability::Review
+                        | Capability::DiscussionWrite
+                        | Capability::Merge
                 )
             );
         }
@@ -258,6 +258,42 @@ mod tests {
                 .iter()
                 .all(|c| matches!(c.kind, crate::gitlab::GlabCall::Graphql { .. }))
         );
+    }
+
+    #[test]
+    fn a_merge_goes_through_glab() {
+        use crate::github::answer;
+        use crate::gitlab_merge::fixtures::{MERGED, PROJECT_ID};
+        let runner = FakeGlab::new()
+            .reply(answer(PROJECT_ID))
+            .reply(answer(MERGED));
+        let sink = CommandSink::new();
+        let host = ForgeHost::parse_gitlab("gitlab.example.com").unwrap();
+        let forge = GitLabForge(Glab {
+            runner: &runner,
+            sink: &sink,
+            host: &host,
+            cwd: "/cache".into(),
+            now: 0,
+        });
+        let head = CommitId::parse(&"1".repeat(40)).unwrap();
+        assert_eq!(
+            forge.merge_pull(&repo(), 12, MergeMethod::Squash, &head),
+            Ok(())
+        );
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 2);
+        assert!(matches!(
+            calls[1].kind,
+            crate::gitlab::GlabCall::Rest {
+                method: crate::gitlab::RestMethod::Put,
+                path: crate::gitlab::RestPath::Merge {
+                    project: 17,
+                    iid: 12
+                },
+                ..
+            }
+        ));
     }
 
     #[test]
