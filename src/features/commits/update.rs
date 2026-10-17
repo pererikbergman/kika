@@ -12,6 +12,7 @@ use crate::confirm_question::Answer;
 use crate::diff_mark::{DiffEnd, DiffMark};
 use crate::diff_pane::DiffStart;
 use crate::effect::{Effect, Tag};
+use crate::key_hold::HeldList;
 use crate::keymap::KeyScope;
 use crate::model::{AppState, Context, Focus};
 use kika_git::commit_files::{CommitFile, CommitId, CommitRange};
@@ -126,8 +127,17 @@ impl AppState {
         skip: usize,
         result: Result<(LogPage, i64), String>,
     ) -> Vec<Effect> {
-        self.commits.page_loaded(tag, self.generation, skip, result);
-        self.more_commits()
+        let listed = result.is_ok();
+        let applied = self.commits.page_loaded(tag, self.generation, skip, result);
+        // Keys held for the log replay first, so the next page follows
+        // where they leave the cursor.
+        let mut effects = if applied && skip == 0 {
+            self.list_landed(HeldList::Log, listed)
+        } else {
+            vec![]
+        };
+        effects.extend(self.more_commits());
+        effects
     }
 
     /// The merged/pushed markers landed.

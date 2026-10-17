@@ -7,6 +7,7 @@ use super::keys;
 use super::{BranchesIntent, BranchesTab, remotes, tags};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
+use crate::key_hold::HeldList;
 use crate::keymap::{self, KeyScope};
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
@@ -130,6 +131,7 @@ impl AppState {
         if listed {
             effects.extend(self.apply_plan(RefreshPlan::of(&[Scope::PullRequests])));
         }
+        effects.extend(self.list_landed(HeldList::Branches, listed));
         effects
     }
 

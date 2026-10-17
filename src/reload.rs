@@ -4,6 +4,7 @@
 //! another's.
 
 use crate::effect::Effect;
+use crate::key_hold::HeldList;
 use crate::model::AppState;
 use crate::refresh::{RefreshPlan, Scope};
 
@@ -11,6 +12,9 @@ impl AppState {
     /// Reload what the plan says is stale. One status load serves both the
     /// files and the branch; reloading files reselects, which reloads the
     /// diff too. The submodule list reloads only while it is shown.
+    ///
+    /// Each list it reloads holds the keys pressed in its panel until it
+    /// lands. Only here: the watch reloads the same lists, and holds none.
     pub(crate) fn apply_plan(&mut self, plan: RefreshPlan) -> Vec<Effect> {
         let mut effects =
             if plan.scopes.contains(&Scope::Files) || plan.scopes.contains(&Scope::Branch) {
@@ -28,12 +32,19 @@ impl AppState {
         }
         if plan.scopes.contains(&Scope::Branches) {
             effects.extend(self.reload_branches());
+            self.arm_hold(HeldList::Branches);
+            self.arm_hold(HeldList::Remotes);
+            self.arm_hold(HeldList::Tags);
         }
         if plan.scopes.contains(&Scope::Commits) {
             effects.extend(self.reload_commits());
+            self.arm_hold(HeldList::Log);
+            // The reflog reloads only once it has been read.
+            self.arm_hold(HeldList::Reflog);
         }
         if plan.scopes.contains(&Scope::Stash) {
             effects.extend(self.reload_stashes());
+            self.arm_hold(HeldList::Stash);
         }
         if plan.scopes.contains(&Scope::PullRequests) {
             effects.extend(self.load_pull_requests());

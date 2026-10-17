@@ -8,6 +8,7 @@ use super::{RemotePending, RemotesIntent};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
 use crate::features::branches::BranchesTab;
+use crate::key_hold::HeldList;
 use crate::keymap::{self, KeyScope, Reason};
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
@@ -49,15 +50,18 @@ impl AppState {
         result: Result<Vec<Remote>, String>,
     ) -> Vec<Effect> {
         self.user_done(tag);
+        let listed = result.is_ok();
         let list = &mut self.branches.remotes.list;
         if !list.loaded(tag, self.generation, result.map(lines)) {
             return vec![];
         }
-        if self.branches.tab == BranchesTab::Remotes {
+        let mut effects = if self.branches.tab == BranchesTab::Remotes {
             self.load_branch_log(tag.user)
         } else {
             vec![]
-        }
+        };
+        effects.extend(self.list_landed(HeldList::Remotes, listed));
+        effects
     }
 
     pub(crate) fn move_remote(&mut self, delta: isize) -> Vec<Effect> {
@@ -438,7 +442,7 @@ mod tests {
     /// `on_remote_row`, with the local list reloaded as `branches`.
     fn on_remote_row_with(row: usize, branches: Vec<Branch>) -> AppState {
         let mut state = on_remote_row(row);
-        let tag = branches_tag(&state.update(AppIntent::RefreshStatus));
+        let tag = branches_tag(&state.reload_branches());
         state.update(branches_loaded(tag, branches));
         state
     }

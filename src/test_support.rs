@@ -114,8 +114,9 @@ pub(crate) fn loaded(tag: Tag, paths: &[&str]) -> AppIntent {
 }
 
 /// Refresh, as `r` does, and return the status load's tag. The
-/// branch list it also reloads is answered at once with nothing, so
-/// tests about the status see only that.
+/// branch list it also reloads is answered at once with nothing, and the
+/// log and stash list with what they showed, so tests about the status
+/// see only that, and no key waits on those lists.
 pub(crate) fn refresh_tag(state: &mut AppState) -> Tag {
     match state.update(AppIntent::RefreshStatus).as_slice() {
         [
@@ -123,28 +124,27 @@ pub(crate) fn refresh_tag(state: &mut AppState) -> Tag {
             Effect::LoadBranches { tag: list },
             Effect::LoadRemotes { tag: remotes },
             Effect::LoadTags { tag: tags },
-            Effect::LoadCommits { skip: 0, .. },
+            Effect::LoadCommits {
+                tag: commits,
+                skip: 0,
+                ..
+            },
             Effect::LoadMarkers { .. },
             Effect::LoadBranchTips { .. },
-            Effect::LoadStashes { .. },
+            Effect::LoadStashes { tag: stashes },
         ] => {
             let (tag, list, remotes, tags) = (*tag, *list, *remotes, *tags);
-            state.update(AppIntent::Branches(BranchesIntent::Loaded {
-                tag: list,
-                result: Ok(vec![]),
-            }));
-            state.update(AppIntent::Branches(BranchesIntent::Remotes(
-                RemotesIntent::Loaded {
-                    tag: remotes,
-                    result: Ok(vec![]),
-                },
-            )));
-            state.update(AppIntent::Branches(BranchesIntent::Tags(
-                TagsIntent::Loaded {
-                    tag: tags,
-                    result: Ok(vec![]),
-                },
-            )));
+            let (commits, stashes) = (*commits, *stashes);
+            let shown = LogPage {
+                rows: state.commits.list.rows.clone(),
+                done: state.commits.done,
+            };
+            state.update(commits_loaded(commits, 0, shown));
+            let entries = state.stash.list.rows.clone();
+            state.update(stashes_loaded(stashes, Ok(entries)));
+            state.update(branches_loaded(list, vec![]));
+            state.update(remotes_loaded(remotes, vec![]));
+            state.update(tags_loaded(tags, vec![]));
             tag
         }
         other => {
@@ -762,15 +762,45 @@ pub(crate) fn branches_loaded(tag: Tag, branches: Vec<Branch>) -> AppIntent {
     })
 }
 
+/// The Remotes tab's load under `tag` answering with `remotes`.
+pub(crate) fn remotes_loaded(tag: Tag, remotes: Vec<Remote>) -> AppIntent {
+    AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Loaded {
+        tag,
+        result: Ok(remotes),
+    }))
+}
+
+/// The Tags tab's load under `tag` answering with `tags`.
+pub(crate) fn tags_loaded(tag: Tag, tags: Vec<TagRef>) -> AppIntent {
+    AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Loaded {
+        tag,
+        result: Ok(tags),
+    }))
+}
+
+/// The stash list's load under `tag` answering with `result`.
+pub(crate) fn stashes_loaded(tag: Tag, result: Result<Vec<StashEntry>, String>) -> AppIntent {
+    AppIntent::Stash(StashIntent::Loaded { tag, result })
+}
+
+/// The reflog read under `tag` answering with `reflog`.
+pub(crate) fn reflog_loaded(tag: Tag, reflog: Reflog) -> AppIntent {
+    AppIntent::Commits(CommitsIntent::Reflog(ReflogIntent::Loaded {
+        tag,
+        result: Ok(reflog),
+    }))
+}
+
 /// A workspace with `three_branches` loaded and the Branches panel
-/// focused, its first log load answered.
+/// focused, its first log load answered. The lists load without `r`,
+/// so no key waits on the remotes and tags left in flight.
 pub(crate) fn with_branches() -> AppState {
     let mut state = AppState::new(Context::Workspace);
     state.update(AppIntent::Resize {
         width: 80,
         height: 24,
     });
-    let tag = branches_tag(&state.update(AppIntent::RefreshStatus));
+    let tag = branches_tag(&state.reload_branches());
     let effects = state.update(branches_loaded(tag, three_branches()));
     let (tag, refname) = log_load(&effects).expect("the selection's log loads");
     state.update(AppIntent::Branches(BranchesIntent::LogLoaded {
@@ -819,9 +849,11 @@ pub(crate) fn remotes_tag(effects: &[Effect]) -> Tag {
     found.unwrap_or_else(|| panic!("expected LoadRemotes in {effects:?}"))
 }
 
-/// Reload both lists, answering with `remotes`.
+/// Reload the branch lists, answering the remotes with `remotes`. They
+/// load without `r`, so no key waits on the branch and tag loads left
+/// in flight.
 pub(crate) fn reload_remotes(state: &mut AppState, remotes: Vec<Remote>) -> Vec<Effect> {
-    let tag = remotes_tag(&state.update(AppIntent::RefreshStatus));
+    let tag = remotes_tag(&state.reload_branches());
     state.update(AppIntent::Branches(BranchesIntent::Remotes(
         RemotesIntent::Loaded {
             tag,
@@ -1734,9 +1766,10 @@ pub(crate) fn tags_tag(effects: &[Effect]) -> Tag {
     found.unwrap_or_else(|| panic!("expected LoadTags in {effects:?}"))
 }
 
-/// Reload the lists, answering the tags with `tags`.
+/// Reload the branch lists, answering the tags with `tags`. As for
+/// [`reload_remotes`], no key waits on the loads left in flight.
 pub(crate) fn reload_tags(state: &mut AppState, tags: Vec<TagRef>) -> Vec<Effect> {
-    let tag = tags_tag(&state.update(AppIntent::RefreshStatus));
+    let tag = tags_tag(&state.reload_branches());
     state.update(AppIntent::Branches(BranchesIntent::Tags(
         TagsIntent::Loaded {
             tag,
