@@ -1921,7 +1921,7 @@ picked yet keep their markers. Once every block is picked, Kika offers to stage 
 | `commit_editor.skip_hooks` | `ctrl-n` | Skip the pre-commit and commit-msg hooks for this commit | |
 | `commit_editor.edit_externally` | `ctrl-e` | Write the message in your editor, then commit when it closes | locked |
 | `commit_editor.cancel` | `esc` | Close without committing | |
-| `commit_editor.quit` | `ctrl-c` | Quit Kika, stopping a commit that is running | locked |
+| `commit_editor.quit` | `ctrl-c` | Close, asking before a typed message is lost; quit Kika while a commit runs | locked |
 
 ### Discard the typed message?
 
