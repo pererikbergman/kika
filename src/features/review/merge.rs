@@ -207,7 +207,7 @@ impl AppState {
                 self.push_error(ErrorPopup::new(
                     format!("Could not merge the {}", words.request),
                     &error.merge_message_in(words),
-                    "Press Esc to close",
+                    "",
                 ));
                 vec![]
             }

@@ -475,9 +475,10 @@ fn render_credential(
     render_input_line(&shown, line.col, top, frame, answer);
 }
 
-/// What failed in the red border's title, git's words below it, then what
-/// to do next and how to close. Long output shows its tail. On a short
-/// screen the next step gives way first, so git's words always get a row.
+/// What failed in the border's title (red for a failure, plain for a
+/// command's output), git's words below it, then what to do next and how
+/// to close. Long output shows its tail. On a short screen the next step
+/// gives way first, so git's words always get a row.
 fn render_error(palette: &Palette, error: &ErrorPopup, frame: &mut Frame, area: Rect) {
     let width = COMMIT_WIDTH.min(area.width);
     let text_width = usize::from(width.saturating_sub(2)).max(1);
@@ -486,9 +487,10 @@ fn render_error(palette: &Palette, error: &ErrorPopup, frame: &mut Frame, area: 
     let height = u16::try_from(rows.len() + next.len() + 3).unwrap_or(u16::MAX);
     let popup = centered(area, width, height);
     frame.render_widget(Clear, popup);
-    let block = Block::bordered()
-        .title(format!(" {} ", error.title))
-        .border_style(Style::new().fg(palette.error));
+    let mut block = Block::bordered().title(format!(" {} ", error.title));
+    if error.failed {
+        block = block.border_style(Style::new().fg(palette.error));
+    }
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     // The hint takes one row and the message keeps at least one.
@@ -872,6 +874,21 @@ mod tests {
         let (x, y) = find(&rows, " Could not stage ");
         assert_eq!(buffer[(x - 1, y)].style().fg, Some(Color::Red));
         assert!(rows[23].starts_with(" esc close  ctrl-c quit"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_command_output_popup_has_a_plain_border_and_one_close_hint() {
+        let mut state = workspace(&["a.rs"]);
+        state.popups = vec![Popup::Error(ErrorPopup::output("Show it", "all good"))];
+        let (buffer, rows) = draw(&state, 80, 24);
+        assert!(contains(&rows, "all good"), "{rows:#?}");
+        let (x, y) = find(&rows, " Show it ");
+        assert_ne!(buffer[(x - 1, y)].style().fg, Some(Color::Red));
+        // One close hint: no other line in the popup names Esc.
+        let count =
+            |needle: &str| -> usize { rows.iter().map(|row| row.matches(needle).count()).sum() };
+        assert_eq!(count("Esc: close"), 1, "{rows:#?}");
+        assert_eq!(count("Esc"), 1, "{rows:#?}");
     }
 
     #[test]
