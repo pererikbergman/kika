@@ -27,7 +27,7 @@ const MAX_HELD: usize = 16;
 const KEY_DROPPED: &str = "Still reloading; key dropped";
 
 /// Said when a failed reload or a repository change drops held keys.
-const KEYS_DROPPED: &str = "Keys pressed while reloading were dropped";
+const KEYS_DROPPED: &str = "Keys pressed while reloading were dropped; press them again";
 
 /// The keys waiting on a status reload, held by `AppState`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -57,10 +57,16 @@ impl AppState {
     pub(crate) fn holds_keys(&self) -> bool {
         self.key_hold.seq.is_some()
             && self.files.seq == self.key_hold.seq
-            && matches!(
-                self.key_focus(),
-                KeyScope::Files | KeyScope::Diff | KeyScope::Lines
-            )
+            && self.keys_go_to_panels()
+    }
+
+    /// Whether a key goes to Files or the Diff pane, the scopes held keys
+    /// were pressed in.
+    fn keys_go_to_panels(&self) -> bool {
+        matches!(
+            self.key_focus(),
+            KeyScope::Files | KeyScope::Diff | KeyScope::Lines
+        )
     }
 
     /// Queue `key` for the reload; past [`MAX_HELD`] it is dropped.
@@ -74,6 +80,9 @@ impl AppState {
 
     /// The reload landed: replay the held keys in order on what it shows.
     /// A replayed key that starts another reload holds the rest for it.
+    /// One that opens a question, prompt or input drops the rest: they
+    /// were typed for the panels, and must never answer something the
+    /// user has not seen, such as a discard of another file.
     pub(crate) fn release_keys(&mut self) -> Vec<Effect> {
         self.key_hold.seq = None;
         let mut effects = Vec::new();
@@ -85,6 +94,9 @@ impl AppState {
             effects.extend(self.update(AppIntent::Key(key)));
             if self.notice.is_none() {
                 self.notice = before;
+            }
+            if self.key_hold.seq.is_none() && !self.keys_go_to_panels() {
+                self.drop_held_keys();
             }
         }
         effects
@@ -107,6 +119,7 @@ mod tests {
     use crate::features::custom_commands::{OutputMode, Panel, test_table};
     use crate::handoff::HandOff;
     use crate::keymap::Keymap;
+    use crate::list_input::RANGE_FILES_CHANGED;
     use crate::op::GitOp;
     use crate::popup::{ErrorPopup, Popup};
     use crate::test_support::*;
@@ -249,6 +262,58 @@ mod tests {
 
         assert_eq!(state.files.selected, 1);
         assert_eq!(stages(&effects), [GitOp::Stage(vec!["b.rs".into()])]);
+    }
+
+    #[test]
+    fn held_keys_never_answer_a_question_a_replayed_key_opened() {
+        // `d` then `y` on c.rs; the reload drops it and the cursor clamps
+        // onto b.rs, which the user never selected.
+        let (mut state, _) = with_files(unstaged(), 24);
+        select_path(&mut state, "c.rs");
+        let tag = refresh_tag(&mut state);
+        press_char(&mut state, 'd');
+        press_char(&mut state, 'y');
+
+        let effects = landed(&mut state, tag, unstaged()[..2].to_vec());
+
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::RunOp { .. })),
+            "{effects:?}"
+        );
+        assert_eq!(state.key_focus(), KeyScope::DiscardConfirm);
+        assert_eq!(state.notice, Some(KEYS_DROPPED.into()));
+        assert!(!state.key_hold.has_keys());
+    }
+
+    #[test]
+    fn a_question_opened_by_the_last_held_key_stays_quiet() {
+        let (mut state, _) = with_files(unstaged(), 24);
+        let tag = refresh_tag(&mut state);
+        press_char(&mut state, 'd');
+
+        landed(&mut state, tag, unstaged());
+
+        assert_eq!(state.key_focus(), KeyScope::DiscardConfirm);
+        assert_eq!(state.notice, None, "nothing was dropped");
+    }
+
+    #[test]
+    fn a_notice_the_reload_set_outlives_a_replayed_key() {
+        let (mut state, _) = with_files(unstaged(), 24);
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        let tag = refresh_tag(&mut state);
+        press_char(&mut state, 'k');
+
+        // b.rs went, so the range is no longer the one marked.
+        landed(
+            &mut state,
+            tag,
+            vec![unstaged()[0].clone(), unstaged()[2].clone()],
+        );
+
+        assert_eq!(state.files.selected, 0, "the held k moved the cursor");
+        assert_eq!(state.notice, Some(RANGE_FILES_CHANGED.into()));
     }
 
     #[test]
