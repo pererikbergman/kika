@@ -1,12 +1,8 @@
 /target
 
-# Factory runtime state (the factory definition itself is committed)
-/factory/board.json
-/factory/runner.json
-/factory/jobs/
-
-# Personal Claude Code settings
-/.claude/settings.local.json
+# Local agent tooling, kept out of the repository
+/factory/
+/.claude/
 
 # macOS
 .DS_Store
