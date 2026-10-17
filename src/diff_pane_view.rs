@@ -84,14 +84,19 @@ pub(crate) fn render_hunk_view(
     // A commit's change gives a second column to what the patch holds.
     let picked_ids = pane.picks;
     let gutters = if picked_ids.is_some() { 2 } else { 1 };
+    // A commit's change cannot send the user to the Files panel.
+    let refusal = |error: PatchError| match view.commit {
+        Some(_) => error.in_commit_message(),
+        None => error.message(),
+    };
     let pane = match &view.patch {
         None if view.loading() => Paragraph::new("Loading…"),
         None => Paragraph::new("Could not read the diff"),
         Some(patch) if patch.kind == FileKind::Binary => {
-            Paragraph::new(PatchError::Binary.message())
+            Paragraph::new(refusal(PatchError::Binary))
         }
         Some(patch) if patch.kind == FileKind::Unsupported => {
-            Paragraph::new(PatchError::Unsupported.message())
+            Paragraph::new(refusal(PatchError::Unsupported))
         }
         Some(patch) if patch.hunks.is_empty() => Paragraph::new(NO_CHANGES),
         Some(_) => {

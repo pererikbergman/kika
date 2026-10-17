@@ -44,8 +44,8 @@ pub(crate) fn patch_file_disabled(state: &AppState) -> Option<Reason> {
     }
     match open.selected_file().map(|f| f.status) {
         None => Some("No file selected".into()),
-        Some('R') => Some(PatchError::Renamed.message().into()),
-        Some('C') => Some(PatchError::Copied.message().into()),
+        Some('R') => Some(PatchError::Renamed.in_commit_message().into()),
+        Some('C') => Some(PatchError::Copied.in_commit_message().into()),
         Some(_) => None,
     }
 }

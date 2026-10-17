@@ -232,6 +232,10 @@ pub(crate) static BRANCHES_TABS: &[Binding] = &[
 ];
 
 // Chunk 54: branches
+/// Bar hints left out, rather than dimmed, while their key is refused: the
+/// delete question takes only one of the two, so the other is no answer.
+pub(crate) const HIDDEN_WHEN_OFF: &[&str] = &["delete_branch.yes", "delete_branch.force"];
+
 pub(crate) static BRANCHES_DELETE_CONFIRM: &[Binding] = &[
     // As with discarding, Enter is left unbound: a delete cannot be undone.
     Binding {
