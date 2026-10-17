@@ -440,6 +440,7 @@ mod tests {
     use crate::features::files::FilesIntent;
     use crate::intent::AppIntent;
     use crate::test_support::*;
+    use crossterm::event::{KeyCode, KeyModifiers};
 
     fn workspace() -> AppState {
         AppState::new(Context::Workspace)
@@ -655,6 +656,48 @@ mod tests {
                 .iter()
                 .any(|popup| matches!(popup, Popup::Credential(_)))
         );
+    }
+
+    #[test]
+    fn only_y_answers_ssh_yes_or_no_and_enter_does_nothing() {
+        let asked = || {
+            let mut state = workspace();
+            state.take_op().unwrap();
+            state.popups.push(Popup::Credential(CredentialPrompt::new(
+                "Are you sure you want to continue connecting?".into(),
+                true,
+            )));
+            state
+        };
+
+        let mut state = asked();
+        let open = state.popups.clone();
+        assert_eq!(press(&mut state, KeyCode::Enter), []);
+        assert_eq!(state.popups, open, "Enter leaves the question open");
+
+        for no in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut state = asked();
+            assert_eq!(
+                press(&mut state, no),
+                [Effect::AnswerCredential(None)],
+                "{no:?}"
+            );
+            assert_eq!(state.popups, [], "{no:?}");
+        }
+
+        let mut state = asked();
+        assert_eq!(
+            press_char(&mut state, 'y'),
+            [Effect::AnswerCredential(Some(Secret::new("yes")))]
+        );
+        assert_eq!(state.popups, []);
+
+        let mut state = asked();
+        assert_eq!(
+            press_with(&mut state, 'c', KeyModifiers::CONTROL),
+            [Effect::AnswerCredential(None), Effect::InterruptGit]
+        );
+        assert!(state.should_quit);
     }
 
     #[test]

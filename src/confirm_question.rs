@@ -190,7 +190,7 @@ mod tests {
 
     /// Each question's yes binding, with the answer its question is asked
     /// with.
-    const YES_BINDINGS: [(&str, KeyScope, Answer); 21] = [
+    const YES_BINDINGS: [(&str, KeyScope, Answer); 22] = [
         (
             "discard_confirm.yes",
             KeyScope::DiscardConfirm,
@@ -224,6 +224,7 @@ mod tests {
             KeyScope::ForcePushConfirm,
             Answer::YOnly,
         ),
+        ("ssh_confirm.yes", KeyScope::SshConfirm, Answer::YOnly),
         (
             "autosquash_confirm.yes",
             KeyScope::AutosquashConfirm,
@@ -516,6 +517,21 @@ mod tests {
             }
             assert_eq!(state.held_seq(), None, "{name}");
         }
+    }
+
+    /// Ssh's yes/no question is a credential popup, not a
+    /// `ConfirmQuestion`, so the walk above cannot reach it.
+    #[test]
+    fn enter_never_answers_ssh_yes_or_no() {
+        let mut state = on_commit();
+        state.popups = vec![Popup::Credential(crate::popup::CredentialPrompt::new(
+            "Are you sure you want to continue connecting?".into(),
+            true,
+        ))];
+        let asked = state.popups.clone();
+        assert_eq!(state.key_focus(), KeyScope::SshConfirm);
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.popups, asked);
     }
 
     fn asked_scope(popups: &[Popup]) -> KeyScope {

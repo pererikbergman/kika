@@ -1999,7 +1999,17 @@ follows each key as you type.
 | `credential.cancel` | `esc` | Cancel the question, which fails the operation | locked |
 | `credential.quit` | `ctrl-c` | Cancel the question and quit Kika | locked |
 
-A yes/no question from ssh uses the yes/no keys above instead.
+#### Ssh asks yes or no
+
+Ssh sometimes asks a yes/no question instead, for example whether to trust
+an unknown host key or to allow use of an agent key. Saying yes to a host
+key is how that key gets trusted, so `enter` does not answer it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `ssh_confirm.yes` | `y` | Yes, accept | locked |
+| `ssh_confirm.no` | `n`, `esc` | No, refuse | locked |
+| `ssh_confirm.quit` | `ctrl-c` | Answer no and quit Kika | locked |
 
 ### Error messages
 
