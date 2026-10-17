@@ -23,11 +23,12 @@ use crate::rows::{clock, drawn_path, status_colour};
 use crate::theme::Palette;
 use crate::view::{self, elide_right};
 use kika_forge::anchor::row_numbers;
-use kika_forge::forge::Words;
+use kika_forge::forge::{Words, merge_label};
 use kika_forge::merge::{MergeBlock, merge_options};
 use kika_forge::review::{
     CheckStatus, Mergeability, PrDetail, PrSummary, QueueKind, ReviewVerdict, ViewedState,
 };
+use kika_forge::url::ForgeKind;
 use kika_forge::{ForgeStatus, PrState};
 
 pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
@@ -50,7 +51,14 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
     frame.render_widget(block, area);
     let lines = match review.screen {
         ReviewScreen::Queue => queue_lines(&state.palette, review, words, inner),
-        ReviewScreen::Detail(number) => detail_screen(&state.palette, review, words, number, inner),
+        ReviewScreen::Detail(number) => detail_screen(
+            &state.palette,
+            review,
+            words,
+            state.review_forge_kind(),
+            number,
+            inner,
+        ),
         ReviewScreen::Files(_) => match &review.files {
             Some(files) => return files_screen(state, files, frame, inner),
             None => Vec::new(),
@@ -320,6 +328,7 @@ fn detail_screen(
     palette: &Palette,
     review: &ReviewState,
     words: &Words,
+    kind: Option<ForgeKind>,
     number: u64,
     inner: Rect,
 ) -> Vec<Line<'static>> {
@@ -340,7 +349,15 @@ fn detail_screen(
                 }
             };
             let threads = super::threads_view::thread_summary(review, words);
-            let lines = detail_lines(palette, detail, words, body, threads.as_deref(), width);
+            let lines = detail_lines(
+                palette,
+                detail,
+                words,
+                kind,
+                body,
+                threads.as_deref(),
+                width,
+            );
             let max = lines.len().saturating_sub(usize::from(inner.height));
             lines
                 .into_iter()
@@ -650,10 +667,12 @@ pub fn detail_area(main: Rect) -> Rect {
 }
 
 /// How far the detail scrolls in `inner`, with `body` its rendered
-/// description.
+/// description. `kind` is the one the detail is drawn with, so the
+/// limit counts the same lines.
 pub fn detail_max_scroll(
     detail: &PrDetail,
     words: &Words,
+    kind: Option<ForgeKind>,
     body: &[Line<'static>],
     threads: Option<&str>,
     inner: Rect,
@@ -663,6 +682,7 @@ pub fn detail_max_scroll(
         &Palette::DEFAULT,
         detail,
         words,
+        kind,
         body,
         threads,
         usize::from(inner.width),
@@ -686,6 +706,7 @@ pub fn detail_lines(
     palette: &Palette,
     detail: &PrDetail,
     words: &Words,
+    kind: Option<ForgeKind>,
     body: &[Line<'static>],
     threads: Option<&str>,
     width: usize,
@@ -715,7 +736,7 @@ pub fn detail_lines(
         Span::styled(" · ", dim()),
         Span::styled(word, look),
     ]));
-    lines.extend(merge_line(palette, detail, words, width));
+    lines.extend(merge_line(palette, detail, words, kind, width));
     let branches = format!("{} ← {}", detail.base, detail.head);
     lines.extend(markdown::wrap_text(&branches, Style::new(), width));
     if !detail.checks.is_empty() {
@@ -756,17 +777,19 @@ pub fn detail_lines(
     lines
 }
 
-/// How the request may be merged, or why it may not, in fixed words that
-/// name the forge in `words`.
+/// How the request may be merged, with each method named as the `kind`
+/// forge names it (as the merge pick list does), or why it may not, in
+/// fixed words that name the forge in `words`.
 fn merge_line(
     palette: &Palette,
     detail: &PrDetail,
     words: &Words,
+    kind: Option<ForgeKind>,
     width: usize,
 ) -> Vec<Line<'static>> {
     let (text, style) = match merge_options(detail) {
         Ok(methods) => {
-            let labels: Vec<&str> = methods.iter().map(|m| m.label()).collect();
+            let labels: Vec<&str> = methods.iter().map(|&m| merge_label(kind, m)).collect();
             (format!("Merge: {}", labels.join(" · ")), Style::new())
         }
         // Already merged is done, not a problem: it is not drawn as one.
@@ -991,6 +1014,78 @@ mod tests {
                 "Cannot merge: GitHub is still checking; refresh with r"
             ),
             "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn on_gitlab_the_detail_names_the_merge_methods_like_the_pick_list() {
+        let mut state = on_gitlab(reviewing(ReviewScreen::Detail(42)));
+        assert_eq!(state.review_forge_kind(), Some(ForgeKind::GitLab));
+        state.review.detail = Some(fixture_detail());
+        let rows = draw(&state, 80, 30);
+        assert!(contains(&rows, "Merge: merge · squash"), "{rows:#?}");
+        assert!(!contains(&rows, "merge commit"), "{rows:#?}");
+    }
+
+    #[test]
+    fn on_github_the_detail_keeps_merge_commit() {
+        let mut state = reviewing(ReviewScreen::Detail(42));
+        state.forge.hosts = vec![ForgeHost::parse("github.com").unwrap()];
+        state.forge.repo = Some(repo());
+        assert_eq!(state.review_forge_kind(), Some(ForgeKind::GitHub));
+        state.review.detail = Some(fixture_detail());
+        let rows = draw(&state, 80, 30);
+        assert!(contains(&rows, "Merge: merge commit · squash"), "{rows:#?}");
+    }
+
+    /// The text of each of `lines`.
+    fn texts(lines: &[Line<'_>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn the_merge_line_uses_the_forge_kinds_words_and_falls_back_without_one() {
+        let detail = fixture_detail();
+        let line = |kind| {
+            let lines = detail_lines(&Palette::DEFAULT, &detail, GITHUB, kind, &[], None, 80);
+            texts(&lines)
+                .into_iter()
+                .find(|t| t.starts_with("Merge: "))
+                .unwrap()
+        };
+        assert_eq!(line(Some(ForgeKind::GitLab)), "Merge: merge · squash");
+        assert_eq!(
+            line(Some(ForgeKind::GitHub)),
+            "Merge: merge commit · squash"
+        );
+        assert_eq!(line(None), "Merge: merge commit · squash");
+    }
+
+    #[test]
+    fn the_scroll_limit_counts_the_merge_line_in_the_forge_kinds_words() {
+        use kika_forge::merge::MergeMethod;
+        let mut detail = fixture_detail();
+        detail.merge_methods = vec![MergeMethod::Merge, MergeMethod::Squash, MergeMethod::Rebase];
+        // "Merge: merge · squash · rebase" fits in 30; "Merge: merge
+        // commit · squash · rebase" wraps.
+        let inner = Rect::new(0, 0, 30, 3);
+        let gitlab = Some(ForgeKind::GitLab);
+        let drawn = |kind| detail_lines(&Palette::DEFAULT, &detail, GITHUB, kind, &[], None, 30);
+        let gitlab_lines = drawn(gitlab);
+        assert!(
+            texts(&gitlab_lines).contains(&"Merge: merge · squash · rebase".to_string()),
+            "{:#?}",
+            texts(&gitlab_lines)
+        );
+        let max = detail_max_scroll(&detail, GITHUB, gitlab, &[], None, inner);
+        assert_eq!(max, gitlab_lines.len() - 3);
+        assert_eq!(drawn(None).len(), gitlab_lines.len() + 1);
+        assert_ne!(
+            max,
+            detail_max_scroll(&detail, GITHUB, None, &[], None, inner)
         );
     }
 
@@ -1241,11 +1336,8 @@ mod tests {
         let mut detail = fixture_detail();
         detail.title = "A title that is far too long for a narrow screen".into();
         detail.head = "feature/a-branch-name-that-goes-on".into();
-        let lines = detail_lines(&Palette::DEFAULT, &detail, GITHUB, &[], None, 28);
-        let text: Vec<String> = lines
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect();
+        let lines = detail_lines(&Palette::DEFAULT, &detail, GITHUB, None, &[], None, 28);
+        let text = texts(&lines);
         assert_eq!(text[0], "A title that is far too long");
         assert_eq!(text[1], "for a narrow screen");
         assert!(text.iter().any(|t| t == "main ←"), "{text:#?}");

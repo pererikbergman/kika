@@ -670,6 +670,7 @@ impl AppState {
                 super::view::detail_max_scroll(
                     detail,
                     words,
+                    self.review_forge_kind(),
                     &body.lines,
                     threads.as_deref(),
                     self.review_area(),
