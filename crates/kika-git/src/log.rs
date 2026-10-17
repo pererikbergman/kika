@@ -797,14 +797,19 @@ mod tests {
 
     #[test]
     fn a_path_reaches_argv_as_its_raw_bytes() {
+        // Windows file names are UTF-16, so a name that is not UTF-8 cannot exist there.
+        #[cfg(unix)]
+        let name: &[u8] = b"x\xff.rs";
+        #[cfg(not(unix))]
+        let name: &[u8] = "x\u{e9}.rs".as_bytes();
         let query = LogQuery {
-            path: Some(RepoPath::from_bytes(b"x\xff.rs")),
+            path: Some(RepoPath::from_bytes(name)),
             author: Some("ann".into()),
         };
         let cmd = log_command(Some("abc"), 200, 200, &query);
         let args = cmd.args();
         let sep = args.iter().position(|a| a == "--").unwrap();
-        assert_eq!(args[sep + 1].as_encoded_bytes(), b"x\xff.rs");
+        assert_eq!(args[sep + 1].as_encoded_bytes(), name);
         assert_eq!(args.len(), sep + 2);
         let follow = args.iter().position(|a| a == "--follow").unwrap();
         let tip = args.iter().position(|a| a == "abc").unwrap();
