@@ -235,6 +235,49 @@ fn a_reflog_read_ended_by_an_unborn_head_releases_its_held_keys() {
 }
 
 #[test]
+fn an_unborn_head_ending_the_reflog_read_leaves_keys_for_another_list_held() {
+    let mut state = undoable();
+    let tag = reflog_load(&press_char(&mut state, ']'));
+    state.update(reflog_loaded(tag, commit_reflog('c')));
+    let loads = refresh(&mut state);
+    state.focus = Focus::Stash;
+    press_char(&mut state, 'j');
+    assert!(state.key_hold.has_keys(), "held for the stash list");
+
+    // HEAD went unborn outside Kika; the watch's reload ends the reflog
+    // read in flight while the stash list still loads.
+    if let Some(branch) = &mut state.branch {
+        branch.head = Head::Unborn("main".into());
+    }
+    state.reload_commits();
+
+    assert!(state.key_hold.has_keys(), "nothing replayed early");
+    state.focus = Focus::Commits;
+    assert_eq!(state.key_focus(), KeyScope::Reflog);
+    assert!(!state.holds_keys(), "the Reflog is disarmed");
+    state.focus = Focus::Stash;
+    state.update(stashes_loaded(stashes_tag(&loads), Ok(three_stashes())));
+    assert!(!state.key_hold.has_keys());
+    assert_eq!(state.stash.list.selected, 1, "the held j replayed");
+}
+
+#[test]
+fn in_the_log_esc_waits_for_the_reload_and_q_quits_at_once() {
+    let mut state = with_log(5);
+    refresh(&mut state);
+    assert_eq!(state.key_focus(), KeyScope::Commits);
+
+    // `esc` acts on the list first (range, filter, mark), so it waits.
+    press(&mut state, crossterm::event::KeyCode::Esc);
+    assert!(state.key_hold.has_keys(), "held");
+    assert!(!state.should_quit);
+
+    press_char(&mut state, 'q');
+    assert!(state.should_quit);
+    assert!(!state.key_hold.has_keys(), "the held esc never replays");
+}
+
+#[test]
 fn stash_a_held_apply_never_applies_a_stash_the_reload_dropped() {
     let mut state = on_stash_one();
     let loads = refresh(&mut state);

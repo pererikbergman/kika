@@ -436,8 +436,11 @@ impl AppState {
             AppIntent::Key(key) => {
                 // The selection may be about to change under the key.
                 if self.holds_keys() {
-                    self.hold_key(key);
-                    return vec![];
+                    if !self.quits_now(key) {
+                        self.hold_key(key);
+                        return vec![];
+                    }
+                    self.forget_held_keys();
                 }
                 self.notice = None;
                 let focus = self.key_focus();
@@ -2295,10 +2298,12 @@ mod tests {
             4,
             "the status, the branch list, the remotes and the tags"
         );
-        // Keys wait for the status, then act.
-        press(&mut state, KeyCode::Char('q'));
-        assert!(!state.should_quit);
+        // Keys wait for the status, then act; quit never waits.
+        press(&mut state, KeyCode::Char('?'));
+        assert!(!state.help_open);
         land_status(&mut state, &effects, vec![]);
+        assert!(state.help_open);
+        press(&mut state, KeyCode::Char('q'));
         assert!(state.should_quit);
     }
 

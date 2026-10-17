@@ -19,7 +19,7 @@ use std::collections::VecDeque;
 
 use crate::effect::Effect;
 use crate::intent::AppIntent;
-use crate::keymap::{KeyPress, KeyScope};
+use crate::keymap::{self, KeyPress, KeyScope, Resolution};
 use crate::model::AppState;
 
 /// How many keys wait for one reload. A reload that takes long enough to
@@ -141,6 +141,36 @@ impl AppState {
             return vec![];
         }
         self.replay_held()
+    }
+
+    /// A held list's load ended without landing (an unborn HEAD leaves
+    /// the reflog nothing to read): stop holding for it. Keys replay only
+    /// when they were waiting on that list; keys for another list still
+    /// loading keep waiting for it.
+    pub(crate) fn list_ended(&mut self, list: HeldList) -> Vec<Effect> {
+        if self.key_hold.waiting_on == Some(list) {
+            return self.list_landed(list, true);
+        }
+        self.key_hold.armed.retain(|armed| *armed != list);
+        vec![]
+    }
+
+    /// Whether `key` quits Kika from where it is pressed now. Quitting
+    /// never acts on the selection, so such a key skips the hold. It uses
+    /// the same lookup as any key, so a user's rebinds count, and a key
+    /// that does something else here first (`esc` clears a list's range
+    /// or filter) still waits.
+    pub(crate) fn quits_now(&self, key: KeyPress) -> bool {
+        matches!(
+            keymap::resolve(keymap::registry(), &self.keymap, self.key_focus(), self, key),
+            Resolution::Run(binding) if binding.intent == AppIntent::Quit
+        )
+    }
+
+    /// Forget the hold and its keys without a notice: Kika is quitting,
+    /// and none of them may replay after that.
+    pub(crate) fn forget_held_keys(&mut self) {
+        self.key_hold = KeyHold::default();
     }
 
     /// Queue `key` for the reload; past [`MAX_HELD`] it is dropped.
@@ -530,6 +560,85 @@ mod tests {
 
         assert_eq!(state.files.selected, MAX_HELD);
         assert!(!state.key_hold.has_keys());
+    }
+
+    #[test]
+    fn q_quits_at_once_during_a_reload() {
+        let (mut state, _) = with_files(unstaged(), 24);
+        refresh_tag(&mut state);
+        assert!(state.holds_keys(), "the status is still loading");
+
+        press_char(&mut state, 'q');
+
+        assert!(state.should_quit);
+        assert!(!state.key_hold.has_keys());
+    }
+
+    #[test]
+    fn a_key_rebound_to_quit_quits_at_once_during_a_reload() {
+        let (mut state, _) = with_files(unstaged(), 24);
+        let repo = state.repo.clone();
+        state.update(AppIntent::ConfigLoaded {
+            repo,
+            keymap: crate::keymap::remap(&[("global.quit", &["x"])]),
+            errors: vec![],
+        });
+        refresh_tag(&mut state);
+
+        press_char(&mut state, 'x');
+
+        assert!(state.should_quit);
+    }
+
+    #[test]
+    fn q_after_held_keys_quits_at_once_and_drops_them() {
+        let (mut state, _) = with_files(unstaged(), 24);
+        let tag = refresh_tag(&mut state);
+        press_char(&mut state, 'j');
+        space(&mut state);
+        assert!(state.key_hold.has_keys(), "held");
+
+        press_char(&mut state, 'q');
+        assert!(state.should_quit);
+        assert!(!state.key_hold.has_keys());
+        assert_eq!(state.notice, None, "dropped quietly");
+
+        let effects = landed(&mut state, tag, unstaged());
+        assert!(stages(&effects).is_empty(), "{effects:?}");
+        assert_eq!(state.files.selected, 0, "nothing replayed");
+    }
+
+    #[test]
+    fn esc_in_files_waits_for_the_reload_and_clears_the_filter() {
+        let (mut state, _) = with_files(unstaged(), 24);
+        press_char(&mut state, '/');
+        type_text(&mut state, "b");
+        press(&mut state, KeyCode::Enter);
+        let tag = refresh_tag(&mut state);
+
+        press(&mut state, KeyCode::Esc);
+        assert!(state.key_hold.has_keys(), "held");
+        assert!(!state.should_quit);
+
+        landed(&mut state, tag, unstaged());
+        assert_eq!(state.files.filter, "");
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn esc_in_files_waits_for_the_reload_and_clears_the_range() {
+        let (mut state, _) = with_files(unstaged(), 24);
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        let tag = refresh_tag(&mut state);
+
+        press(&mut state, KeyCode::Esc);
+        assert!(state.key_hold.has_keys(), "held");
+        assert!(!state.should_quit);
+
+        landed(&mut state, tag, unstaged());
+        assert_eq!(state.files.range_anchor, None);
+        assert!(!state.should_quit);
     }
 
     #[test]

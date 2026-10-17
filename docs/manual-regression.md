@@ -141,6 +141,7 @@ sandbox when an item leaves it in a state you do not want.
 - [ ] NAV-08 `q` in the workspace `[sandbox]`: Kika quits and the terminal is restored
 - [ ] NAV-09 `ctrl-c` in the workspace `[sandbox]`: Kika quits
 - [ ] NAV-10 `esc` in Files with no range, filter or search `[sandbox]`: Kika quits
+- [ ] NAV-48 Make `git status` slow (a slow fsmonitor hook, or a huge untracked tree), then `r` and `q` at once in Files `[sandbox]`: Kika quits straight away, without waiting for the reload; `esc` instead waits for it
 - [ ] NAV-11 `r` `[sandbox]`: the file list and branches reload (change a file outside Kika first)
 - [ ] NAV-12 `J` / `K` / `pgdn` / `pgup` with Files focused on `multi.txt` `[sandbox]`: the diff scrolls a line / a page, focus stays on Files
 - [ ] NAV-13 `+` (or `=`) then `-` on `multi.txt` `[sandbox]`: more context lines, then fewer
