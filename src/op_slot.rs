@@ -245,6 +245,23 @@ impl AppState {
         effects.extend(self.apply_plan(refresh::plan(&op)));
         effects
     }
+
+    /// An op refused before git ran: the slot is freed as for a finished
+    /// op, and the popup says nothing changed. Nothing can be stale, so
+    /// nothing reloads.
+    pub(crate) fn op_refused(&mut self, tag: Tag, op: GitOp, reason: &str) -> Vec<Effect> {
+        self.release_op(tag);
+        if tag.generation != self.generation {
+            return vec![];
+        }
+        self.clear_op_error();
+        self.push_error(ErrorPopup::new(
+            failure_title(&op),
+            reason,
+            "Nothing was changed. Fix the cause above, then try again.",
+        ));
+        vec![]
+    }
 }
 
 /// The questions git and ssh ask while a fetch, pull, push or review
@@ -337,15 +354,17 @@ pub(crate) fn failure_next(op: &GitOp) -> &'static str {
         | GitOp::DeleteBranch { .. }
         | GitOp::DeleteBranches(_)
         | GitOp::SetUpstream { .. }
-        | GitOp::UnsetUpstream(_)
-        | GitOp::AddRemote { .. }
+        | GitOp::UnsetUpstream(_) => {
+            "The branch list was reloaded. Fix the cause above, then try again."
+        }
+        GitOp::AddRemote { .. }
         | GitOp::RenameRemote { .. }
         | GitOp::RemoveRemote(_)
-        | GitOp::RemoveRemotes(_)
-        | GitOp::CreateTag { .. }
-        | GitOp::DeleteTag { .. }
-        | GitOp::DeleteTags(_) => {
-            "The branch list was reloaded. Fix the cause above, then try again."
+        | GitOp::RemoveRemotes(_) => {
+            "The remote list was reloaded. Fix the cause above, then try again."
+        }
+        GitOp::CreateTag { .. } | GitOp::DeleteTag { .. } | GitOp::DeleteTags(_) => {
+            "The tag list was reloaded. Fix the cause above, then try again."
         }
         GitOp::MergeTool(_) => {
             "The file list was reloaded. Check merge.tool, or resolve the file in your editor."

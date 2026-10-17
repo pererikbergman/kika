@@ -14,7 +14,9 @@ use crate::features::files;
 use crate::features::operation;
 use crate::features::review;
 use crate::features::stash;
-use crate::keymap::{Binding, KeyPattern, KeyScope, available, available_commands, registry};
+use crate::keymap::{
+    Binding, KeyPattern, KeyScope, NOT_IN_COMMIT, available, available_commands, registry,
+};
 use crate::layout::{Panel, SidePanel, help_rows, workspace_layout};
 use crate::model::{AppState, Context, Focus};
 use crate::popup_view;
@@ -769,7 +771,13 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
         leading.extend(more_leading);
         let mut available = available(registry(), &state.keymap, focus, state);
         available.retain(|(binding, disabled)| {
-            let hidden = disabled.is_some() && review::keys::HIDDEN_WHEN_OFF.contains(&binding.id);
+            // A key that does nothing here gets no hint: a one-screen key
+            // while refused, and a working-tree key in a commit's change.
+            let hidden = disabled.as_ref().is_some_and(|reason| {
+                review::keys::HIDDEN_WHEN_OFF.contains(&binding.id)
+                    || branches::keys::HIDDEN_WHEN_OFF.contains(&binding.id)
+                    || &**reason == NOT_IN_COMMIT
+            });
             !hidden
                 && (binding.bar || leading.contains(&binding.id) || trailing.contains(&binding.id))
         });
@@ -2605,6 +2613,47 @@ mod tests {
             ),
             "{rows:#?}"
         );
+    }
+
+    /// Make the Diff pane show a commit's change rather than the worktree's.
+    fn in_a_commit(state: &mut AppState) {
+        if let Some(view) = state.hunk_view_mut() {
+            view.commit = Some(kika_git::commit_files::CommitRange {
+                oid: kika_git::commit_files::CommitId::parse(OID).unwrap(),
+                parent: None,
+            });
+        }
+    }
+
+    #[test]
+    fn a_commits_change_offers_no_working_tree_keys_on_the_bar() {
+        let mut state = hunks(DiffSide::Worktree, TWO_HUNKS);
+        in_a_commit(&mut state);
+        let rows = draw(&state, 160, 20);
+        assert!(rows[19].starts_with(" space hunk  v lines"), "{rows:#?}");
+        assert!(!rows[19].contains("staged/unstaged"), "{rows:#?}");
+        assert!(!rows[19].contains("discard"), "{rows:#?}");
+
+        if let Some(view) = state.hunk_view_mut() {
+            view.enter_lines();
+        }
+        let rows = draw(&state, 160, 20);
+        assert!(rows[19].starts_with(" space lines"), "{rows:#?}");
+        assert!(!rows[19].contains("staged/unstaged"), "{rows:#?}");
+        assert!(!rows[19].contains("discard"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_binary_file_in_a_commits_change_names_the_custom_patch() {
+        let binary = b"diff --git a/a.rs b/a.rs\nBinary files a/a.rs and b/a.rs differ\n";
+        let mut state = hunks(DiffSide::Worktree, binary);
+        in_a_commit(&mut state);
+        let rows = draw(&state, 100, 20);
+        assert!(
+            contains(&rows, "Binary file: it cannot go into the custom patch"),
+            "{rows:#?}"
+        );
+        assert!(!contains(&rows, "Files panel"), "{rows:#?}");
     }
 
     #[test]

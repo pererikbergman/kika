@@ -632,6 +632,13 @@ impl LineInput {
 
     /// Apply one key. Keys that mean nothing on one line are ignored.
     pub fn edit(&mut self, key: KeyPress) {
+        // As in a shell: ctrl-u clears up to the cursor, so a prefilled
+        // line goes in one key.
+        if key.code == KeyCode::Char('u') && key.modifiers == KeyModifiers::CONTROL {
+            self.text.drain(..byte_at(&self.text, self.col));
+            self.col = 0;
+            return;
+        }
         if key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
@@ -1007,7 +1014,7 @@ mod tests {
     fn control_alt_chords_and_control_chars_are_not_typed() {
         let mut input = LineInput::default();
         input.edit(KeyPress::new(KeyCode::Char('A'), KeyModifiers::SHIFT));
-        input.edit(KeyPress::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        input.edit(KeyPress::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         input.edit(KeyPress::new(KeyCode::Char('x'), KeyModifiers::ALT));
         press(&mut input, KeyCode::Char('\x1b'));
         press(&mut input, KeyCode::Char('\u{9b}'));
@@ -1015,6 +1022,23 @@ mod tests {
         press(&mut input, KeyCode::Tab);
         assert_eq!(input.text, "A");
         assert_eq!(input.col, 1);
+    }
+
+    #[test]
+    fn ctrl_u_clears_up_to_the_cursor_and_keeps_the_rest() {
+        let mut input = LineInput::with_text("héllo world");
+        for _ in 0..5 {
+            press(&mut input, KeyCode::Left);
+        }
+        input.edit(KeyPress::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!((input.text.as_str(), input.col), ("world", 0));
+        // Ctrl-alt-u or ctrl-shift-U is not ctrl-u.
+        let mut other = LineInput::with_text("ab");
+        other.edit(KeyPress::new(
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ));
+        assert_eq!(other.text, "ab");
     }
 
     #[test]

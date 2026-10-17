@@ -931,6 +931,20 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_u_clears_the_prefilled_rename_prompt() {
+        let mut state = on_stash_one();
+        press(&mut state, KeyCode::Char('R'));
+        ctrl(&mut state, 'u');
+        match state.popups.as_slice() {
+            [Popup::Prompt { kind, input }] => {
+                assert_eq!(*kind, PromptKind::RenameStash);
+                assert_eq!((input.text.as_str(), input.col), ("", 0));
+            }
+            other => panic!("expected the rename prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn an_empty_rename_is_refused_and_a_cancelled_one_forgets_the_stash() {
         let mut state = on_stash_one();
         press(&mut state, KeyCode::Char('R'));

@@ -101,7 +101,11 @@ fn hunk_disabled(state: &AppState) -> Option<Reason> {
         _ => {}
     }
     match &view.patch {
-        Some(patch) if patch.kind == FileKind::Binary => Some(PatchError::Binary.message().into()),
+        Some(patch) if patch.kind == FileKind::Binary => Some(if view.commit.is_some() {
+            PatchError::Binary.in_commit_message().into()
+        } else {
+            PatchError::Binary.message().into()
+        }),
         Some(patch) if !patch.hunks.is_empty() => None,
         _ => Some(NO_CHANGES.into()),
     }

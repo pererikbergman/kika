@@ -114,11 +114,11 @@ pub fn execute_as(
             let op = match op {
                 GitOp::CherryPick(picks) => match ordered(runner, &picks) {
                     Ok(ordered) => GitOp::CherryPick(ordered),
-                    Err(error) => {
-                        return AppIntent::OpFinished {
+                    Err(reason) => {
+                        return AppIntent::OpRefused {
                             tag,
                             op: GitOp::CherryPick(picks),
-                            result: Err(error),
+                            reason,
                         };
                     }
                 },
@@ -1058,8 +1058,17 @@ mod tests {
             branch: "feature".into(),
             strategy: MergeStrategy::NoFastForward,
         };
-        let runner =
-            FakeRunner::new().expect_attached(&["merge", "--no-ff", "refs/heads/feature"], true);
+        let runner = FakeRunner::new().expect_attached(
+            &[
+                "merge",
+                "--no-ff",
+                "--edit",
+                "-m",
+                "Merge branch 'feature'",
+                "refs/heads/feature",
+            ],
+            true,
+        );
         assert_eq!(attached_with(&runner, &op), (finished(&op, Ok(())), 0));
         runner.assert_done();
         // Stdin is the terminal's, so git's editor and prompts reach the user.
@@ -1136,7 +1145,11 @@ mod tests {
         assert_eq!(
             attached_with(&runner, &op),
             (
-                finished(&op, Err("aaaaaaa is already on the current branch".into())),
+                AppIntent::OpRefused {
+                    tag: TAG,
+                    op: op.clone(),
+                    reason: "aaaaaaa is already on the current branch".into(),
+                },
                 0
             )
         );

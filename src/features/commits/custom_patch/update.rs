@@ -133,7 +133,7 @@ impl AppState {
             FileKind::Modified | FileKind::Added | FileKind::Deleted => None,
         };
         if let Some(error) = refused {
-            self.notice = Some(error.message().into());
+            self.notice = Some(error.in_commit_message().into());
             return;
         }
         if lines.is_empty() {
@@ -477,6 +477,59 @@ mod tests {
             assert!(state.popups.is_empty(), "{intent:?}");
             assert_eq!(state.notice.as_deref(), Some(keymap::NOT_IN_COMMIT));
         }
+    }
+
+    #[test]
+    fn a_renamed_or_binary_file_in_a_commits_change_names_the_custom_patch() {
+        for (bytes, kind, text) in [
+            (
+                TWO_HUNKS,
+                Some(FileKind::Renamed),
+                "Renamed file: it cannot go into the custom patch",
+            ),
+            (
+                BINARY,
+                None,
+                "Binary file: it cannot go into the custom patch",
+            ),
+        ] {
+            let mut state = history(0);
+            open_files(&mut state, 2);
+            let (tag, _) = patch_load(&press(&mut state, KeyCode::Char('l')));
+            let mut patch = patch_of(bytes);
+            if let Some(kind) = kind {
+                patch.kind = kind;
+            }
+            state.update(patch_loaded(tag, patch));
+
+            state.patch_toggle_lines([LineId::added(1)].into());
+
+            assert_eq!(state.notice.as_deref(), Some(text));
+            assert_eq!(state.custom_patch, None);
+        }
+    }
+
+    #[test]
+    fn a_renamed_commit_file_cannot_be_picked_whole_and_says_custom_patch() {
+        let mut state = history(0);
+        state.commits.list.selected = 2;
+        let tag = match press(&mut state, KeyCode::Enter).as_slice() {
+            [Effect::LoadCommitFiles { tag, .. }] => *tag,
+            other => panic!("{other:?}"),
+        };
+        state.update(AppIntent::Commits(CommitsIntent::FilesLoaded {
+            tag,
+            result: Ok(vec![CommitFile {
+                status: 'R',
+                path: "new.rs".into(),
+                orig_path: Some("old.rs".into()),
+            }]),
+        }));
+
+        assert_eq!(
+            keys::patch_file_disabled(&state).as_deref(),
+            Some("Renamed file: it cannot go into the custom patch")
+        );
     }
 
     #[test]
