@@ -491,10 +491,14 @@ gitlab_ask = ["gitlab.example.com"]
   replying to a discussion (`a`), resolving or unresolving it (`R`), a
   comment on the merge request (`a` on the conversation) and code
   suggestions, written in GitLab's `suggestion:-N+0` form (at most 101
-  lines). Viewed marks are not available on GitLab. Merging, checking out
-  and creating are GitHub only so far. On a GitLab host
-  **Create pull request…** is off and says so, and the page `o` opens stays
-  the filtered list of merge requests.
+  lines). Merging (`M`, by "merge" or, when the project allows the
+  choice, "squash", guarded by the head Kika showed) and checking out
+  (`b`) work on GitLab too; when GitLab will not serve a head by id, Kika
+  fetches `refs/merge-requests/<n>/head` instead. `o` on the files screen
+  opens the line on the merge request's diff page. Viewed marks are not
+  available on GitLab. Creating is GitHub only so far: on a GitLab host
+  **Create pull request…** is off and says so, and the page `o` opens from
+  the Branches panel stays the filtered list of merge requests.
 
 ### Opening, copying and creating pull requests
 

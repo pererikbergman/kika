@@ -340,7 +340,12 @@ mod tests {
     #[test]
     fn each_cli_is_only_asked_about_its_own_kind_of_host() {
         let gh = Arc::new(FakeGh::new());
-        let glab = Arc::new(FakeGlab::new());
+        use crate::gitlab_merge::fixtures::{MERGED, PROJECT_ID};
+        let glab = Arc::new(
+            FakeGlab::new()
+                .reply(crate::github::answer(PROJECT_ID))
+                .reply(crate::github::answer(MERGED)),
+        );
         let ctx = ForgeContext {
             gh: gh.clone(),
             glab: glab.clone(),
@@ -355,7 +360,7 @@ mod tests {
             |host: &ForgeHost, repo: &ForgeRepo| ctx.forge(host, repo, 0).ok().map(|f| f.kind());
 
         // A GitLab-kind host gets the GitLab adapter, which never reaches
-        // `gh`, not even to create or merge.
+        // `gh`, not even to create or merge: a merge goes to `glab`.
         assert_eq!(kind(&lab, &gitlab_repo()), Some(ForgeKind::GitLab));
         let lacks = |capability| {
             Err(CreateError::Unsupported(Unsupported {
@@ -371,8 +376,9 @@ mod tests {
         let head = CommitId::parse(&"a".repeat(40)).unwrap();
         assert_eq!(
             ctx.merge_pull(&lab, &gitlab_repo(), 7, MergeMethod::Merge, &head),
-            lacks(Capability::Merge)
+            Ok(())
         );
+        assert_eq!(glab.calls().len(), 2);
 
         // A GitHub-kind host gets the GitHub adapter, never `glab`.
         let hub = ForgeHost::parse("github.com").unwrap();
@@ -398,7 +404,7 @@ mod tests {
         );
 
         assert!(gh.calls().is_empty());
-        assert!(glab.calls().is_empty());
+        assert_eq!(glab.calls().len(), 2);
     }
 
     #[test]

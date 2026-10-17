@@ -229,6 +229,29 @@ pub fn suggestion_info(kind: Option<ForgeKind>, above: u32) -> Option<String> {
     }
 }
 
+/// How `method` is named on a `kind` forge. GitLab's project fixes how a
+/// merge lands, so its plain merge is "merge", not a merge commit.
+/// GitHub's words while no kind is known yet, as [`words_or_default`].
+pub fn merge_label(kind: Option<ForgeKind>, method: MergeMethod) -> &'static str {
+    match (kind, method) {
+        (None | Some(ForgeKind::GitHub), _) => method.label(),
+        (Some(ForgeKind::GitLab), MergeMethod::Merge) => "merge",
+        (Some(ForgeKind::GitLab), MergeMethod::Squash) => "squash",
+        (Some(ForgeKind::GitLab), MergeMethod::Rebase) => "rebase",
+    }
+}
+
+/// The ref a `kind` forge keeps request `number`'s head under, to fetch
+/// when the forge will not serve the head commit by id: GitLab's
+/// `refs/merge-requests/<n>/head`. GitHub's heads are fetched by id alone,
+/// so it has none, and nor has a kind not known yet.
+pub fn head_ref(kind: Option<ForgeKind>, number: u64) -> Option<String> {
+    match kind {
+        None | Some(ForgeKind::GitHub) => None,
+        Some(ForgeKind::GitLab) => Some(format!("refs/merge-requests/{number}/head")),
+    }
+}
+
 /// The Branches panel's row about a `kind` CLI's `status`: what is wrong,
 /// and what to do, in that forge's own words.
 pub fn cli_text(kind: ForgeKind, status: CliStatus) -> (String, Option<String>) {
@@ -278,14 +301,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn github_supports_every_capability_and_gitlab_badges_review_and_discussion_writes() {
+    fn github_supports_every_capability_and_gitlab_all_but_creating_and_viewed_marks() {
         for capability in Capability::ALL {
             assert_eq!(supports(ForgeKind::GitHub, capability), Ok(()));
             let gitlab = supports(ForgeKind::GitLab, capability);
             match capability {
-                Capability::Badges | Capability::Review | Capability::DiscussionWrite => {
-                    assert_eq!(gitlab, Ok(()))
-                }
+                Capability::Badges
+                | Capability::Review
+                | Capability::DiscussionWrite
+                | Capability::Merge => assert_eq!(gitlab, Ok(())),
                 _ => assert_eq!(
                     gitlab,
                     Err(Unsupported {
@@ -379,6 +403,30 @@ mod tests {
         );
         // More than 101 lines.
         assert_eq!(suggestion_info(gitlab, 101), None);
+    }
+
+    #[test]
+    fn each_kind_names_its_merge_methods() {
+        use MergeMethod::{Merge, Rebase, Squash};
+        let gitlab = Some(ForgeKind::GitLab);
+        for kind in [None, Some(ForgeKind::GitHub)] {
+            for method in [Merge, Squash, Rebase] {
+                assert_eq!(merge_label(kind, method), method.label());
+            }
+        }
+        assert_eq!(merge_label(None, Merge), "merge commit");
+        assert_eq!(merge_label(gitlab, Merge), "merge");
+        assert_eq!(merge_label(gitlab, Squash), "squash");
+    }
+
+    #[test]
+    fn only_gitlab_has_a_head_ref_to_fall_back_on() {
+        assert_eq!(
+            head_ref(Some(ForgeKind::GitLab), 12).as_deref(),
+            Some("refs/merge-requests/12/head")
+        );
+        assert_eq!(head_ref(Some(ForgeKind::GitHub), 12), None);
+        assert_eq!(head_ref(None, 12), None);
     }
 
     #[test]
@@ -624,6 +672,7 @@ fn fixture() {}
                     "gitlab_review.rs",
                     "gitlab_discussion.rs",
                     "gitlab_submit.rs",
+                    "gitlab_merge.rs",
                     "github.rs",
                     "review.rs",
                 ],

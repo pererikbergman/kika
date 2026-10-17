@@ -8,14 +8,13 @@
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sha1::{Digest, Sha1};
 
 use super::anchor::GhSide;
 use super::discussion_write::{ReviewEvent, Written, review_ok};
 use super::github::Refusal;
 use super::gitlab::{Glab, GlabCall, RestMethod, RestPath};
 use super::gitlab_discussion::merge_request_id_ok;
-use super::pending::{PendingComment, RowPos};
+use super::pending::{PendingComment, RowPos, line_code};
 use super::review::{data_of, read_with};
 use super::{CreateError, ForgeStatus};
 
@@ -86,6 +85,12 @@ fn decimal(text: &str) -> Option<u64> {
         .flatten()
 }
 
+/// The numeric id in a project's global id, `gid://gitlab/Project/<n>`,
+/// as the REST paths take it.
+pub(crate) fn project_id(gid: &str) -> Option<u64> {
+    gid.strip_prefix("gid://gitlab/Project/").and_then(decimal)
+}
+
 /// A full commit id in hex, as git names one.
 fn sha_ok(sha: &str) -> bool {
     matches!(sha.len(), 40 | 64) && sha.bytes().all(|b| b.is_ascii_hexdigit())
@@ -103,8 +108,7 @@ fn read_target(body: &[u8]) -> Result<Target, ForgeStatus> {
         .project
         .and_then(|p| p.id)
         .as_deref()
-        .and_then(|id| id.strip_prefix("gid://gitlab/Project/"))
-        .and_then(decimal)
+        .and_then(project_id)
         .ok_or(failed)?;
     let shas = mr.diff_refs.ok_or(failed)?;
     let sha = |s: Option<String>| s.filter(|s| sha_ok(s)).ok_or(failed);
@@ -133,13 +137,6 @@ fn lines(pos: RowPos, side: GhSide) -> (Value, Value) {
         (false, GhSide::Right) => (Value::Null, json!(pos.new)),
         (false, GhSide::Left) => (json!(pos.old), Value::Null),
     }
-}
-
-/// GitLab's `line_code`: the hex SHA-1 of the path, then both counters.
-fn line_code(path: &str, pos: RowPos) -> String {
-    let hash = Sha1::digest(path.as_bytes());
-    let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
-    format!("{hex}_{}_{}", pos.old, pos.new)
 }
 
 /// `comment`'s place as a GitLab diff note's `position`; `None` when it
@@ -181,7 +178,8 @@ pub(crate) fn draft_position(comment: &PendingComment, refs: &DiffRefs) -> Optio
     Some(position)
 }
 
-fn refused(refusal: Refusal) -> CreateError {
+/// A read's refusal as a write's error.
+pub(crate) fn refused(refusal: Refusal) -> CreateError {
     match refusal {
         Refusal::Status(status) => CreateError::Status(status),
         Refusal::Limited { until } => CreateError::RateLimited { until },

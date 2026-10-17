@@ -16,7 +16,7 @@ use crate::effect::{Effect, Tag};
 use crate::intent::Scroll;
 use crate::keymap::{OP_RUNNING, Reason};
 use crate::model::{AppState, Context};
-use kika_forge::forge::Words;
+use kika_forge::forge::{Words, head_ref};
 use kika_forge::review::ViewedState;
 use kika_git::commit_files::{CommitFile, CommitId, CommitRange};
 use kika_git::diff::DiffRequest;
@@ -410,8 +410,14 @@ impl AppState {
         let Some(tag) = taken else {
             return vec![];
         };
+        let fallback = head_ref(self.review_forge_kind(), key.0);
         self.review.fetched_heads.push(key);
-        vec![Effect::FetchReviewCommits { tag, remote, oids }]
+        vec![Effect::FetchReviewCommits {
+            tag,
+            remote,
+            oids,
+            fallback,
+        }]
     }
 
     /// The fetch is the review's; questions it asks may be answered.
@@ -831,9 +837,18 @@ pub(crate) mod tests {
             result: missing(Some("upstream")),
         }));
         let fetch_tag = match effects.as_slice() {
-            [Effect::FetchReviewCommits { tag, remote, oids }] => {
+            [
+                Effect::FetchReviewCommits {
+                    tag,
+                    remote,
+                    oids,
+                    fallback,
+                },
+            ] => {
                 assert_eq!(*remote, RemoteName::from("upstream"));
                 assert_eq!(*oids, [head()]);
+                // GitHub serves the head by id alone.
+                assert_eq!(*fallback, None);
                 *tag
             }
             other => panic!("expected one fetch, got {other:?}"),

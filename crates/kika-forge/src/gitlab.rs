@@ -1,5 +1,5 @@
 //! Merge requests from GitLab, read through `glab api graphql`, and the
-//! few REST calls a review submit makes (`glab api <path>`). `glab`
+//! few REST calls a review submit and a merge make (`glab api <path>`). `glab`
 //! holds the login (its own config, or `GITLAB_TOKEN` in the environment
 //! it inherits), so Kika never sees a token: it passes none, stores none
 //! and draws none. `glab`'s stderr is only matched against fixed markers,
@@ -69,6 +69,7 @@ pub enum GlabCall {
 pub enum RestMethod {
     Get,
     Post,
+    Put,
     Delete,
 }
 
@@ -77,13 +78,14 @@ impl RestMethod {
         match self {
             RestMethod::Get => "GET",
             RestMethod::Post => "POST",
+            RestMethod::Put => "PUT",
             RestMethod::Delete => "DELETE",
         }
     }
 }
 
 /// Where a [`GlabCall::Rest`] goes: a merge request's draft notes, one
-/// of them, their bulk publish, or its approval. Built from numbers only,
+/// of them, their bulk publish, its approval, or its merge. Built from numbers only,
 /// so no name from the repository or the answer reaches argv.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestPath {
@@ -91,6 +93,7 @@ pub enum RestPath {
     DraftNote { project: u64, iid: u64, note: u64 },
     BulkPublish { project: u64, iid: u64 },
     Approve { project: u64, iid: u64 },
+    Merge { project: u64, iid: u64 },
 }
 
 impl RestPath {
@@ -106,6 +109,7 @@ impl RestPath {
                 format!("{}/draft_notes/bulk_publish", mr(project, iid))
             }
             RestPath::Approve { project, iid } => format!("{}/approve", mr(project, iid)),
+            RestPath::Merge { project, iid } => format!("{}/merge", mr(project, iid)),
         }
     }
 }
@@ -273,6 +277,18 @@ impl Glab<'_> {
         path: RestPath,
         body: Option<Vec<u8>>,
     ) -> Result<Vec<u8>, CreateError> {
+        self.rest_judged(method, path, body, classify_rest)
+    }
+
+    /// [`rest`](Self::rest) with the answer judged by `judge`, for a call
+    /// whose statuses mean more than success or a refusal.
+    pub(crate) fn rest_judged(
+        &self,
+        method: RestMethod,
+        path: RestPath,
+        body: Option<Vec<u8>>,
+        judge: fn(io::Result<GhOutput>, i64) -> Result<Vec<u8>, CreateError>,
+    ) -> Result<Vec<u8>, CreateError> {
         let cmd = GlabCommand {
             host: self.host.as_str().to_string(),
             kind: GlabCall::Rest { method, path, body },
@@ -283,7 +299,7 @@ impl Glab<'_> {
         logged(
             self.sink,
             cmd.display_line(),
-            || classify_rest(self.runner.run(&cmd), now),
+            || judge(self.runner.run(&cmd), now),
             |result| match result {
                 Ok(_) => CommandOutcome::Ok,
                 Err(CreateError::Status(ForgeStatus::Cli(CliStatus::NotInstalled))) => {
@@ -507,6 +523,27 @@ pub fn classify_rest(output: io::Result<GhOutput>, now: i64) -> Result<Vec<u8>, 
         // No status line: nothing says what was done.
         None if exit == Some(0) && body.is_empty() => Ok(body),
         None => Err(CreateError::Status(ForgeStatus::Failed)),
+    }
+}
+
+/// What a merge call came to: judged as [`classify`] judges any call,
+/// then only a 200 is an answer to read, and GitLab's refusals (405 or 406
+/// not mergeable now, 409 head moved, 422 invalid) keep its message,
+/// terminal-safe and cut short. Anything else is a failure.
+pub fn classify_merge(output: io::Result<GhOutput>, now: i64) -> Result<Vec<u8>, CreateError> {
+    let Screened { status, body, .. } = match screen(output, now) {
+        Ok(read) => read,
+        Err(Answer::Limited { until }) => return Err(CreateError::RateLimited { until }),
+        Err(Answer::Failed(status)) => return Err(CreateError::Status(status)),
+        Err(_) => return Err(CreateError::Status(ForgeStatus::Failed)),
+    };
+    match status {
+        Some(200) => Ok(body),
+        Some(405 | 406 | 409 | 422) => Err(refusal(&body).map_or(
+            CreateError::Status(ForgeStatus::Failed),
+            CreateError::Refused,
+        )),
+        _ => Err(CreateError::Status(ForgeStatus::Failed)),
     }
 }
 
@@ -957,6 +994,11 @@ mod tests {
             RestPath::Approve { project, iid }.render(),
             "projects/17/merge_requests/42/approve"
         );
+        assert_eq!(
+            RestPath::Merge { project, iid }.render(),
+            "projects/17/merge_requests/42/merge"
+        );
+        assert_eq!(RestMethod::Put.as_str(), "PUT");
         for cmd in &calls {
             let line = cmd.display_line();
             assert!(!line.contains("evil") && !line.contains("acme"), "{line}");
@@ -970,6 +1012,73 @@ mod tests {
             calls[1].display_line(),
             "glab api projects/17/merge_requests/42/draft_notes --method POST --include \
              --hostname gitlab.example.com --header 'Content-Type: application/json' --input -"
+        );
+    }
+
+    #[test]
+    fn a_merge_path_holds_decimal_ids_only() {
+        for (project, iid) in [(1, 1), (17, 12), (u64::MAX, u64::MAX)] {
+            let path = RestPath::Merge { project, iid }.render();
+            assert_eq!(
+                path,
+                format!("projects/{project}/merge_requests/{iid}/merge")
+            );
+            let ids = path
+                .strip_prefix("projects/")
+                .and_then(|p| p.strip_suffix("/merge"))
+                .unwrap();
+            let (p, i) = ids.split_once("/merge_requests/").unwrap();
+            assert!(
+                [p, i].iter().all(|n| n.bytes().all(|b| b.is_ascii_digit())),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_merge_answer_is_a_200_or_gitlabs_own_refusal() {
+        let merge = |stdout: &str| classify_merge(Ok(answer(stdout)), NOW);
+        assert_eq!(merge("HTTP/2.0 200 OK\r\n\r\n{}"), Ok(b"{}".to_vec()));
+        for code in [
+            "405 Method Not Allowed",
+            "406 Not Acceptable",
+            "409 Conflict",
+            "422 Unprocessable Entity",
+        ] {
+            assert_eq!(
+                merge(&format!(
+                    "HTTP/2.0 {code}\r\n\r\n{{\"message\":\"No \\u001b[31mmerge\"}}"
+                )),
+                Err(CreateError::Refused("No \u{fffd}[31mmerge".into())),
+                "{code}"
+            );
+        }
+        let failed = Err(CreateError::Status(ForgeStatus::Failed));
+        for other in [
+            "HTTP/2.0 201 Created\r\n\r\n{}",
+            "HTTP/2.0 500 Oops\r\n\r\n{\"message\":\"boom\"}",
+            "HTTP/2.0 405 Method Not Allowed\r\n\r\nnot json",
+            "{}",
+        ] {
+            assert_eq!(merge(other), failed, "{other}");
+        }
+        assert_eq!(
+            merge(UNAUTHORIZED_401),
+            Err(CreateError::Status(ForgeStatus::NotLoggedIn))
+        );
+        assert_eq!(
+            merge(RATE_LIMITED_429),
+            Err(CreateError::RateLimited { until: NOW + 1200 })
+        );
+        assert_eq!(
+            classify_merge(
+                Ok(failure(
+                    1,
+                    "dial tcp: lookup gitlab.example.com: no such host"
+                )),
+                NOW
+            ),
+            Err(CreateError::Status(ForgeStatus::Offline))
         );
     }
 
