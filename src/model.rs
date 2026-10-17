@@ -799,8 +799,9 @@ impl AppState {
             Some(Popup::Worktrees(_)) => return KeyScope::Worktrees,
             Some(Popup::Recent(_)) => return KeyScope::Recent,
             Some(Popup::PickList(_)) => return KeyScope::PickList,
-            // Ssh's yes/no kind is answered like any other question.
-            Some(Popup::Credential(prompt)) if prompt.confirm => return KeyScope::Confirm,
+            // Ssh's yes/no kind can trust a host key, so it has its own
+            // y-only scope.
+            Some(Popup::Credential(prompt)) if prompt.confirm => return KeyScope::SshConfirm,
             Some(Popup::Credential(_)) => return KeyScope::Credential,
             Some(Popup::CommandLog(_)) => return KeyScope::CommandLog,
         }

@@ -618,7 +618,7 @@ mod tests {
         let mut state = remote_ready();
         let (tag, _) = remote_of(&press_char(&mut state, 'f'));
         state.update(asked(tag, "Allow use of key?", true));
-        assert_eq!(state.key_focus(), KeyScope::Confirm);
+        assert_eq!(state.key_focus(), KeyScope::SshConfirm);
         assert_eq!(
             press_char(&mut state, 'y'),
             [Effect::AnswerCredential(Some(Secret::new("yes")))]

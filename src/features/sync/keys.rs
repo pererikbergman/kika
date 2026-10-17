@@ -1,8 +1,9 @@
 //! The sync feature's key bindings and their guards: `f`, `p` and `P` in
 //! the workspace fetch, pull and push, the credential question's own
-//! scope sends, cancels or quits, and the force-push question's own keys
-//! answer it. `CHUNKS` in `keymap.rs` places the three chunks, so their
-//! position there is behaviour.
+//! scope sends, cancels or quits, and ssh's yes/no question and the
+//! force-push question each have their own keys that answer it. `CHUNKS`
+//! in `keymap.rs` places the four chunks, so their position there is
+//! behaviour.
 
 use crate::confirm_question::Answer;
 use crate::features::sync::SyncIntent;
@@ -101,6 +102,45 @@ pub(crate) static SYNC_CREDENTIAL: &[Binding] = &[
     },
 ];
 
+// Chunk 42a: sync
+pub(crate) static SYNC_SSH_CONFIRM: &[Binding] = &[
+    // As with discarding, Enter is left unbound: accepting a host key is
+    // how a key gets trusted, so a stray Enter must not do it.
+    Binding {
+        id: "ssh_confirm.yes",
+        keys: Answer::YOnly.keys(),
+        scope: KeyScope::SshConfirm,
+        intent: AppIntent::ConfirmYes,
+        description: "Yes, accept",
+        label: "yes",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "ssh_confirm.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::SshConfirm,
+        intent: AppIntent::ConfirmNo,
+        description: "No, refuse",
+        label: "no",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "ssh_confirm.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::SshConfirm,
+        intent: AppIntent::Quit,
+        description: "Answer no and quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+];
+
 // Chunk 42b: sync
 pub(crate) static SYNC_FORCE_PUSH_CONFIRM: &[Binding] = &[
     // As with discarding, Enter is left unbound: a force push replaces
@@ -179,5 +219,39 @@ mod tests {
         assert_eq!(label("force_push_confirm.yes"), Some("force"));
         assert_eq!(label("force_push_confirm.no"), Some("cancel"));
         assert_eq!(label("force_push_confirm.quit"), Some("quit"));
+    }
+
+    #[test]
+    fn ssh_yes_or_no_has_no_enter_and_n_or_esc_answers_no() {
+        let scope = KeyScope::SshConfirm;
+        let state = AppState::new(Context::Workspace);
+        let resolve_in = |key| match resolve(registry(), &Keymap::default(), scope, &state, key) {
+            Resolution::Run(binding) => Some(binding.intent.clone()),
+            Resolution::Unbound => None,
+            other => panic!("{key:?}: {other:?}"),
+        };
+        assert_eq!(resolve_in(key(KeyCode::Enter, NONE)), None);
+        assert_eq!(resolve_in(plain('q')), None);
+        assert_eq!(resolve_in(plain('y')), Some(AppIntent::ConfirmYes));
+        assert_eq!(resolve_in(plain('n')), Some(AppIntent::ConfirmNo));
+        assert_eq!(
+            resolve_in(key(KeyCode::Esc, NONE)),
+            Some(AppIntent::ConfirmNo)
+        );
+        assert_eq!(
+            resolve_in(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(AppIntent::Quit)
+        );
+        assert_eq!(scope.parent(), None);
+        assert_eq!(scope.title(), "Ssh is asking");
+
+        let enter = key(KeyCode::Enter, NONE);
+        for b in registry().iter().filter(|b| b.scope == scope) {
+            assert!(!b.keys.iter().any(|k| k.matches(enter)), "{}", b.id);
+        }
+        let label = |id| registry().iter().find(|b| b.id == id).map(|b| b.label);
+        assert_eq!(label("ssh_confirm.yes"), Some("yes"));
+        assert_eq!(label("ssh_confirm.no"), Some("no"));
+        assert_eq!(label("ssh_confirm.quit"), Some("quit"));
     }
 }

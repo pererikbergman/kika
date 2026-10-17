@@ -310,6 +310,9 @@ pub enum KeyScope {
     Recent,
     /// Git or ssh asking for a username, password or passphrase.
     Credential,
+    /// Ssh's yes/no question, such as accepting a host key, on top of the
+    /// popup stack.
+    SshConfirm,
     /// The Commits panel showing `HEAD`'s reflog.
     Reflog,
     /// "Undo this?" or "Redo this?" on top of the popup stack.
@@ -382,6 +385,7 @@ impl KeyScope {
             | KeyScope::RemoveWorktree
             | KeyScope::Recent
             | KeyScope::Credential
+            | KeyScope::SshConfirm
             | KeyScope::Travel
             | KeyScope::Input
             | KeyScope::CommandLog
@@ -453,6 +457,7 @@ impl KeyScope {
             KeyScope::RemoveWorktree => "Remove worktree",
             KeyScope::Recent => "Recent repositories",
             KeyScope::Credential => "Git is asking",
+            KeyScope::SshConfirm => "Ssh is asking",
             KeyScope::Reflog => "Reflog",
             KeyScope::Travel => "Undo or redo",
             KeyScope::Input => "Filter or search",
@@ -573,6 +578,9 @@ pub const REPO_LOCKED: &[&str] = &[
     "credential.answer",
     "credential.cancel",
     "credential.quit",
+    "ssh_confirm.yes",
+    "ssh_confirm.no",
+    "ssh_confirm.quit",
     "files.mergetool",
     "conflict.mergetool",
     "conflict.ours",
@@ -2495,6 +2503,7 @@ static CHUNKS: &[&[Binding]] = &[
     commit::keys::COMMIT_KEYS,
     CORE_POPUPS,
     sync::keys::SYNC_CREDENTIAL,
+    sync::keys::SYNC_SSH_CONFIRM,
     sync::keys::SYNC_FORCE_PUSH_CONFIRM,
     CORE_ERROR,
     files::keys::FILES_DISCARD_CONFIRM,
@@ -2743,7 +2752,7 @@ mod tests {
     }
 
     #[test]
-    fn a_repository_layer_cannot_put_enter_back_on_the_abort_skip_or_force_push_question() {
+    fn a_repository_layer_cannot_put_enter_back_on_the_abort_skip_force_push_or_ssh_question() {
         for id in [
             "abort_confirm.yes",
             "abort_confirm.no",
@@ -2754,6 +2763,9 @@ mod tests {
             "force_push_confirm.yes",
             "force_push_confirm.no",
             "force_push_confirm.quit",
+            "ssh_confirm.yes",
+            "ssh_confirm.no",
+            "ssh_confirm.quit",
         ] {
             assert!(REPO_LOCKED.contains(&id), "{id}");
         }
@@ -2768,6 +2780,10 @@ mod tests {
         assert_eq!(
             build(&[("force_push_confirm.yes", &["enter"])], Trust::Repo).unwrap_err(),
             r#""force_push_confirm.yes" can only be changed in the global config file"#
+        );
+        assert_eq!(
+            build(&[("ssh_confirm.yes", &["enter"])], Trust::Repo).unwrap_err(),
+            r#""ssh_confirm.yes" can only be changed in the global config file"#
         );
         assert_eq!(
             build(&[("discard_confirm.yes", &["enter"])], Trust::Repo).unwrap_err(),
@@ -4783,6 +4799,7 @@ mod tests {
             KeyScope::RemoveWorktree => "remove_worktree",
             KeyScope::Recent => "recent",
             KeyScope::Credential => "credential",
+            KeyScope::SshConfirm => "ssh_confirm",
             KeyScope::Reflog => "reflog",
             KeyScope::Travel => "travel",
             KeyScope::Input => "input",
@@ -6073,6 +6090,9 @@ mod tests {
         "credential.answer",
         "credential.cancel",
         "credential.quit",
+        "ssh_confirm.yes",
+        "ssh_confirm.no",
+        "ssh_confirm.quit",
         "force_push_confirm.yes",
         "force_push_confirm.no",
         "force_push_confirm.quit",
