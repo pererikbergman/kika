@@ -1,12 +1,14 @@
-//! A merge request's discussion on GitLab, in one GraphQL call: the
-//! discussions on its diff become review threads, the rest its
-//! conversation. A GitLab position (old and new line numbers) is mapped
-//! to the side and line a thread has on GitHub, so anchoring works the
-//! same for both. Every string is made terminal-safe while it is parsed.
-//! The project path and iid travel as variables on stdin; argv is the
-//! fixed `glab api graphql` line.
+//! A merge request's discussion on GitLab, a GraphQL call per page of
+//! discussions, up to [`MAX_DISCUSSION_PAGES`]: the discussions on its
+//! diff become review threads, the rest its conversation. A GitLab
+//! position (old and new line numbers) is mapped to the side and line a
+//! thread has on GitHub, so anchoring works the same for both. Every string is made terminal-safe while it is parsed.
+//! The project path, iid and page cursor travel as variables on stdin;
+//! argv is the fixed `glab api graphql` line.
 
+use kika_git::commit_files::CommitId;
 use serde::Deserialize;
+use serde_json::json;
 
 use super::anchor::GhSide;
 use super::discussion::{
@@ -15,13 +17,15 @@ use super::discussion::{
 };
 use super::github::Refusal;
 use super::gitlab::{Glab, GlabCall};
-use super::gitlab_review::{DiffRefs, User, mr_request, username};
-use super::review::{MAX_PATH, Nodes, capped_body, data_of, full_oid, line, read_with};
+use super::gitlab_review::{DiffRefs, User, mr_request, project_path, username};
+use super::review::{MAX_PATH, Nodes, capped_body, cursor_ok, data_of, full_oid, line, read_with};
 use super::{ForgeRepo, ForgeStatus};
 
 impl Glab<'_> {
     /// The discussion of merge request `number` of `repo`; `None` when
-    /// GitLab has no such merge request.
+    /// GitLab has no such merge request. The discussions are read a page
+    /// at a time, up to [`MAX_DISCUSSION_PAGES`]; a failed page fails
+    /// the whole load, as the first one would.
     pub fn fetch_discussion(
         &self,
         repo: &ForgeRepo,
@@ -30,19 +34,75 @@ impl Glab<'_> {
         let kind = GlabCall::Graphql {
             body: mr_request(DISCUSSION_QUERY, repo, number),
         };
-        self.call(kind, |answer| read_with(answer, read_discussion))
+        let Some((head, page)) = self.call(kind, |answer| read_with(answer, read_first_page))?
+        else {
+            return Ok(None);
+        };
+        let mut found = Found::default();
+        let mut end = found.add(page, head.as_ref());
+        let mut sent: Vec<String> = Vec::new();
+        for _ in 1..MAX_DISCUSSION_PAGES {
+            let Some(cursor) = end.next_cursor(&sent) else {
+                break;
+            };
+            let kind = GlabCall::Graphql {
+                body: discussion_page_body(repo, number, &cursor),
+            };
+            sent.push(cursor);
+            let page = self.call(kind, |answer| read_with(answer, read_later_page))?;
+            end = found.add(Some(page), head.as_ref());
+        }
+        // Whatever stopped the paging, discussions GitLab still has were
+        // not read.
+        Ok(Some(found.into_discussion(head, end.more)))
     }
 }
 
-/// The discussion query: fixed text; the project path and iid are
-/// variables. `first:100` is [`MAX_THREADS`], `first:50`
-/// [`MAX_THREAD_COMMENTS`].
-const DISCUSSION_QUERY: &str = "query($path:ID!,$iid:String!){project(fullPath:$path)\
-{mergeRequest(iid:$iid){diffRefs{headSha startSha} \
-discussions(first:100){pageInfo{hasNextPage} nodes{id resolved \
+/// How many discussions one page asks for; the queries write it as
+/// `first:100`, GitLab's largest page.
+pub const DISCUSSIONS_PAGE: usize = 100;
+
+/// The most discussion pages one load reads, the first included, so a
+/// busy merge request costs a bounded number of `glab` calls (each
+/// under the call's timeout and output cap).
+pub const MAX_DISCUSSION_PAGES: usize = 10;
+
+/// What both discussion queries ask of a page, so the pages read alike:
+/// `first:50` is [`MAX_THREAD_COMMENTS`].
+macro_rules! discussion_page_fields {
+    () => {
+        "{pageInfo{hasNextPage endCursor} nodes{id resolved \
 notes(first:50){pageInfo{hasNextPage} nodes{body system createdAt author{username} \
 position{diffRefs{headSha startSha} filePath oldPath newPath oldLine newLine positionType \
-lineRange{start{oldLine newLine} end{oldLine newLine}}}}}}}}}}";
+lineRange{start{oldLine newLine} end{oldLine newLine}}}}}}}"
+    };
+}
+
+/// The first-page discussion query: fixed text; the project path and
+/// iid are variables. `first:100` is [`DISCUSSIONS_PAGE`].
+const DISCUSSION_QUERY: &str = concat!(
+    "query($path:ID!,$iid:String!){project(fullPath:$path)\
+{mergeRequest(iid:$iid){diffRefs{headSha startSha} discussions(first:100)",
+    discussion_page_fields!(),
+    "}}}"
+);
+
+/// A later page of discussions: the same fields after the cursor
+/// `$after`, without the head, which the first page gave.
+const DISCUSSION_PAGE_QUERY: &str = concat!(
+    "query($path:ID!,$iid:String!,$after:String!){project(fullPath:$path)\
+{mergeRequest(iid:$iid){discussions(first:100,after:$after)",
+    discussion_page_fields!(),
+    "}}}"
+);
+
+/// `{query, variables}` for a later page: the cursor travels as a
+/// variable on stdin, like the path and iid.
+fn discussion_page_body(repo: &ForgeRepo, iid: u64, after: &str) -> Vec<u8> {
+    let variables = json!({ "path": project_path(repo), "iid": iid.to_string(), "after": after });
+    serde_json::to_vec(&json!({ "query": DISCUSSION_PAGE_QUERY, "variables": variables }))
+        .unwrap_or_default()
+}
 
 /// Whether `id` is fit to keep as a GitLab global id:
 /// `gid://gitlab/<Type>/<id>`, the type ASCII letters and `::`, the id
@@ -108,6 +168,7 @@ impl<T> Page<T> {
 struct PageInfo {
     #[serde(default)]
     has_next_page: bool,
+    end_cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -205,59 +266,125 @@ pub(crate) fn thread_lines(position: &Position) -> ThreadLines {
     }
 }
 
-fn read_discussion(body: &[u8]) -> Result<Option<PrDiscussion>, ForgeStatus> {
+/// The head and the first page of discussions; `None` when GitLab has
+/// no such merge request.
+type FirstPage = Option<(Option<CommitId>, Option<Page<DiscussionNode>>)>;
+
+fn read_first_page(body: &[u8]) -> Result<FirstPage, ForgeStatus> {
     let data: DiscussionData = data_of(body)?;
     let project = data.project.ok_or(ForgeStatus::NoAccess)?;
     let Some(mr) = project.merge_request else {
         return Ok(None);
     };
     let head = mr.diff_refs.and_then(|r| full_oid(r.head_sha));
-    let (more, discussions) = match mr.discussions {
-        Some(page) => (page.more(), page.nodes.items().collect()),
-        None => (false, Vec::new()),
-    };
-    let mut threads = Vec::new();
-    let mut conversation = Vec::new();
-    for discussion in discussions {
-        let notes: Vec<NoteNode> = discussion
-            .notes
-            .map(|page| page.nodes.items().filter(|n| !n.system).collect())
-            .unwrap_or_default();
-        let Some(first) = notes.first() else {
-            continue;
+    Ok(Some((head, mr.discussions)))
+}
+
+/// A later page; a missing merge request or discussions is a failure,
+/// as the first page just named them.
+fn read_later_page(body: &[u8]) -> Result<Page<DiscussionNode>, ForgeStatus> {
+    let data: DiscussionData = data_of(body)?;
+    let project = data.project.ok_or(ForgeStatus::NoAccess)?;
+    project
+        .merge_request
+        .and_then(|mr| mr.discussions)
+        .ok_or(ForgeStatus::Failed)
+}
+
+/// Where one page of discussions left the connection.
+#[derive(Debug, Default)]
+struct PageEnd {
+    /// GitLab says more discussions follow.
+    more: bool,
+    cursor: Option<String>,
+    /// The page held at least one node.
+    held: bool,
+}
+
+impl PageEnd {
+    /// The cursor to ask the next page with, or `None` when there is no
+    /// more or the page gave no cursor fit to send (empty, odd, or one
+    /// already in `sent`).
+    fn next_cursor(&self, sent: &[String]) -> Option<String> {
+        let cursor = self.cursor.as_ref()?;
+        (self.more && self.held && cursor_ok(cursor) && !sent.contains(cursor))
+            .then(|| cursor.clone())
+    }
+}
+
+/// The threads and conversation read from the pages so far.
+#[derive(Default)]
+struct Found {
+    threads: Vec<ReviewThread>,
+    conversation: Vec<ConversationItem>,
+}
+
+impl Found {
+    /// Add one page's discussions; where the page ends comes back.
+    fn add(&mut self, page: Option<Page<DiscussionNode>>, head: Option<&CommitId>) -> PageEnd {
+        let Some(page) = page else {
+            return PageEnd::default();
         };
-        if first.position.is_some() {
-            threads.extend(thread_of(
-                discussion.id,
-                discussion.resolved,
-                notes,
-                head.as_ref(),
-            ));
+        let mut end = PageEnd {
+            more: page.more(),
+            cursor: page.page_info.and_then(|i| i.end_cursor),
+            held: false,
+        };
+        for discussion in page.nodes.items() {
+            end.held = true;
+            let notes: Vec<NoteNode> = discussion
+                .notes
+                .map(|page| page.nodes.items().filter(|n| !n.system).collect())
+                .unwrap_or_default();
+            let Some(first) = notes.first() else {
+                continue;
+            };
+            if first.position.is_some() {
+                self.threads
+                    .extend(thread_of(discussion.id, discussion.resolved, notes, head));
+            } else {
+                self.conversation
+                    .extend(notes.into_iter().map(|note| ConversationItem {
+                        author: username(note.author),
+                        created: line(note.created_at.as_deref().unwrap_or_default()),
+                        body: capped_body(note.body.as_deref().unwrap_or_default(), MAX_COMMENT),
+                        kind: ConversationKind::Comment,
+                    }));
+            }
+        }
+        end
+    }
+
+    /// The discussion, capped. `unread` says discussions were left
+    /// unread, so the threads count as cut: their total is then a lower
+    /// bound above what is kept.
+    fn into_discussion(self, head: Option<CommitId>, unread: bool) -> PrDiscussion {
+        let Found {
+            mut threads,
+            mut conversation,
+        } = self;
+        let found = threads.len() as u64;
+        threads.truncate(MAX_THREADS);
+        let threads_total = if unread {
+            found.max(threads.len() as u64 + 1)
         } else {
-            conversation.extend(notes.into_iter().map(|note| ConversationItem {
-                author: username(note.author),
-                created: line(note.created_at.as_deref().unwrap_or_default()),
-                body: capped_body(note.body.as_deref().unwrap_or_default(), MAX_COMMENT),
-                kind: ConversationKind::Comment,
-            }));
+            found
+        };
+        let conversation_total = conversation.len() as u64;
+        // RFC 3339 times in one zone sort as text; the sort is stable, so
+        // equal or odd times keep GitLab's order.
+        conversation.sort_by(|a, b| a.created.cmp(&b.created));
+        let conversation_capped = unread || conversation.len() > MAX_CONVERSATION;
+        conversation.truncate(MAX_CONVERSATION);
+        PrDiscussion {
+            head_oid: head,
+            threads,
+            threads_total,
+            conversation,
+            conversation_total,
+            conversation_capped,
         }
     }
-    let threads_total = threads.len() as u64;
-    threads.truncate(MAX_THREADS);
-    let conversation_total = conversation.len() as u64;
-    // RFC 3339 times in one zone sort as text; the sort is stable, so
-    // equal or odd times keep GitLab's order.
-    conversation.sort_by(|a, b| a.created.cmp(&b.created));
-    let conversation_capped = more || conversation.len() > MAX_CONVERSATION;
-    conversation.truncate(MAX_CONVERSATION);
-    Ok(Some(PrDiscussion {
-        head_oid: head,
-        threads,
-        threads_total,
-        conversation,
-        conversation_total,
-        conversation_capped,
-    }))
 }
 
 /// A diff discussion as a thread, placed by its first note; `None`
@@ -267,7 +394,7 @@ fn thread_of(
     id: Option<String>,
     resolved: bool,
     notes: Vec<NoteNode>,
-    head: Option<&kika_git::commit_files::CommitId>,
+    head: Option<&CommitId>,
 ) -> Option<ReviewThread> {
     let position = notes.first()?.position.as_ref()?;
     let path = [&position.new_path, &position.file_path, &position.old_path]
@@ -347,7 +474,6 @@ mod tests {
     use crate::gitlab::fixtures::{PROJECT_NULL, RATE_LIMITED_429, UNAUTHORIZED_401};
     use crate::gitlab::{FakeGlab, GlabCommand};
     use crate::url::ForgeKind;
-    use kika_git::commit_files::CommitId;
     use kika_git::patch::LineId;
     use kika_git::recording::CommandSink;
 
@@ -633,14 +759,46 @@ mod tests {
 
     /// The fixture with its discussions replaced by `nodes`.
     fn with_discussions(nodes: &[String], more: bool) -> String {
+        paged(nodes, more, None)
+    }
+
+    /// A page of `nodes` that says whether `more` follow and ends at
+    /// `cursor`. It has the fixture's head, so it can be the first page;
+    /// a later page reads only its discussions.
+    fn paged(nodes: &[String], more: bool, cursor: Option<&str>) -> String {
         let start = DISCUSSION.find("\"discussions\":").unwrap();
         let end = DISCUSSION.rfind("}}}}").unwrap();
+        let cursor = cursor.map_or(String::new(), |c| format!(",\"endCursor\":\"{c}\""));
         format!(
-            "{}\"discussions\":{{\"pageInfo\":{{\"hasNextPage\":{more}}},\"nodes\":[{}]}}{}",
+            "{}\"discussions\":{{\"pageInfo\":{{\"hasNextPage\":{more}{cursor}}},\
+             \"nodes\":[{}]}}{}",
             &DISCUSSION[..start],
             nodes.join(","),
             &DISCUSSION[end..]
         )
+    }
+
+    /// A later page, without the head only the first page asks for.
+    fn later(nodes: &[String], more: bool, cursor: Option<&str>) -> String {
+        let page = paged(nodes, more, cursor);
+        let start = page.find("\"diffRefs\":").unwrap();
+        let end = page.find("\"discussions\":").unwrap();
+        format!("{}{}", &page[..start], &page[end..])
+    }
+
+    /// A general comment: conversation, not a thread.
+    fn general_comment(i: usize) -> String {
+        format!(
+            "{{\"id\":\"gid://gitlab/Discussion/c{i}\",\"resolved\":false,\"notes\":\
+             {{\"nodes\":[{{\"body\":\"c{i}\",\"system\":false,\"createdAt\":\"t{i:03}\",\
+             \"author\":{{\"username\":\"u\"}},\"position\":null}}]}}}}"
+        )
+    }
+
+    /// The `i`th page, `n` from 1, of a merge request with more pages
+    /// than are read: one line thread each.
+    fn endless(n: usize) -> String {
+        later(&[diff_discussion(n, 1)], true, Some(&format!("c{n}")))
     }
 
     fn diff_discussion(i: usize, notes: usize) -> String {
@@ -733,6 +891,144 @@ mod tests {
         }
         assert_eq!(
             fetch(&FakeGlab::new().missing(), 42),
+            Err(Refusal::Status(ForgeStatus::Cli(
+                crate::cli::CliStatus::NotInstalled
+            )))
+        );
+    }
+
+    #[test]
+    fn line_threads_after_the_first_hundred_discussions_come_from_the_next_page() {
+        let comments: Vec<String> = (0..DISCUSSIONS_PAGE).map(general_comment).collect();
+        let threads = [
+            diff_discussion(0, 1),
+            diff_discussion(1, 2),
+            diff_discussion(2, 1).replace(&"1".repeat(40), &"3".repeat(40)),
+        ];
+        let runner = FakeGlab::new()
+            .reply(answer(&paged(&comments, true, Some("c1"))))
+            .reply(answer(&later(&threads, false, None)));
+        let d = fetch(&runner, 42).unwrap().unwrap();
+        assert_eq!(d.head_oid, CommitId::parse(&"1".repeat(40)));
+        let paths: Vec<&str> = d.threads.iter().map(|t| t.path.as_str()).collect();
+        assert_eq!(paths, ["f0", "f1", "f2"]);
+        assert_eq!(d.threads_total, d.threads.len() as u64);
+        // Placed against the first page's head: the third was written on
+        // another one.
+        assert_eq!(
+            d.threads
+                .iter()
+                .map(|t| (t.line, t.outdated))
+                .collect::<Vec<_>>(),
+            [(Some(1), false), (Some(2), false), (None, true)]
+        );
+        assert_eq!(d.threads[2].original_line, Some(3));
+        assert_eq!(d.threads[1].comments_total, 2);
+        assert_eq!(d.conversation.len(), DISCUSSIONS_PAGE);
+        assert!(!d.conversation_capped);
+
+        let [first, second] = runner.calls().try_into().unwrap();
+        for cmd in [&first, &second] {
+            assert_eq!(
+                cmd.display_line(),
+                "glab api graphql --include --hostname gitlab.example.com --input -"
+            );
+        }
+        let body = sent(&first);
+        assert_eq!(body["query"], DISCUSSION_QUERY);
+        assert!(DISCUSSION_QUERY.contains("pageInfo{hasNextPage endCursor}"));
+        assert_eq!(
+            body["variables"],
+            serde_json::json!({ "path": "acme/widgets", "iid": "42" })
+        );
+        let body = sent(&second);
+        assert_eq!(body["query"], DISCUSSION_PAGE_QUERY);
+        assert!(DISCUSSION_PAGE_QUERY.contains(&format!(
+            "discussions(first:{DISCUSSIONS_PAGE},after:$after){{pageInfo{{hasNextPage endCursor}}"
+        )));
+        assert!(!DISCUSSION_PAGE_QUERY.contains("diffRefs{headSha startSha} discussions"));
+        assert_eq!(
+            body["variables"],
+            serde_json::json!({ "path": "acme/widgets", "iid": "42", "after": "c1" })
+        );
+    }
+
+    #[test]
+    fn paging_stops_at_the_bound_and_the_threads_read_as_cut() {
+        let mut runner =
+            FakeGlab::new().reply(answer(&paged(&[diff_discussion(0, 1)], true, Some("c0"))));
+        for n in 1..MAX_DISCUSSION_PAGES + 2 {
+            runner = runner.reply(answer(&endless(n)));
+        }
+        let d = fetch(&runner, 42).unwrap().unwrap();
+        assert_eq!(runner.calls().len(), MAX_DISCUSSION_PAGES);
+        assert_eq!(d.threads.len(), MAX_DISCUSSION_PAGES);
+        assert!(d.threads_total > d.threads.len() as u64);
+        assert!(d.conversation_capped);
+    }
+
+    #[test]
+    fn more_threads_than_are_kept_over_pages_read_as_cut() {
+        let first: Vec<String> = (0..DISCUSSIONS_PAGE)
+            .map(|i| diff_discussion(i, 1))
+            .collect();
+        let runner = FakeGlab::new()
+            .reply(answer(&paged(&first, true, Some("c1"))))
+            .reply(answer(&later(&[diff_discussion(100, 1)], false, None)));
+        let d = fetch(&runner, 42).unwrap().unwrap();
+        assert_eq!(d.threads.len(), MAX_THREADS);
+        assert_eq!(d.threads_total, MAX_THREADS as u64 + 1);
+        assert!(!d.conversation_capped);
+    }
+
+    #[test]
+    fn a_page_with_more_but_no_cursor_fit_to_send_stops_and_reads_as_cut() {
+        let one = [diff_discussion(0, 1)];
+        let bad = "a\\tb";
+        for (name, pages) in [
+            ("no cursor", vec![paged(&one, true, None)]),
+            ("odd cursor", vec![paged(&one, true, Some(bad))]),
+            ("empty page", vec![paged(&[], true, Some("c1"))]),
+            (
+                "repeated cursor",
+                vec![paged(&one, true, Some("c1")), later(&one, true, Some("c1"))],
+            ),
+        ] {
+            let calls = pages.len();
+            let mut runner = FakeGlab::new();
+            for page in &pages {
+                runner = runner.reply(answer(page));
+            }
+            // One more, which must not be asked for.
+            runner = runner.reply(answer(&endless(9)));
+            let d = fetch(&runner, 42).unwrap().unwrap();
+            assert_eq!(runner.calls().len(), calls, "{name}");
+            assert!(d.threads_total > d.threads.len() as u64, "{name}");
+            assert!(d.conversation_capped, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_failed_later_page_fails_the_load_as_a_failed_first_page_does() {
+        let first = || answer(&paged(&[diff_discussion(0, 1)], true, Some("c1")));
+        for (fixture, want) in [
+            (PROJECT_NULL, Refusal::Status(ForgeStatus::NoAccess)),
+            (UNAUTHORIZED_401, Refusal::Status(ForgeStatus::NotLoggedIn)),
+            (
+                RATE_LIMITED_429,
+                Refusal::Limited {
+                    until: 1_700_001_200,
+                },
+            ),
+            // The merge request the first page named is gone.
+            (DISCUSSION_MISSING, Refusal::Status(ForgeStatus::Failed)),
+        ] {
+            let runner = FakeGlab::new().reply(first()).reply(answer(fixture));
+            assert_eq!(fetch(&runner, 42), Err(want));
+            assert_eq!(runner.calls().len(), 2);
+        }
+        assert_eq!(
+            fetch(&FakeGlab::new().reply(first()).missing(), 42),
             Err(Refusal::Status(ForgeStatus::Cli(
                 crate::cli::CliStatus::NotInstalled
             )))
