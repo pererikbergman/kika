@@ -36,6 +36,15 @@ pub const BREAK: GitVersion = GitVersion {
     patch: 0,
 };
 
+/// 2.29 brought `fetch --no-write-fetch-head`, the only way to keep
+/// `FETCH_HEAD` as it is when the fetch names what to fetch: the
+/// `fetch.writeFetchHEAD` config is ignored then.
+pub const NO_WRITE_FETCH_HEAD: GitVersion = GitVersion {
+    major: 2,
+    minor: 29,
+    patch: 0,
+};
+
 /// 2.38 brought `rebase --update-refs`, which moves branches stacked on
 /// rewritten commits along with them.
 pub const UPDATE_REFS: GitVersion = GitVersion {
