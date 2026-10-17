@@ -22,6 +22,7 @@ use kika_forge::forge::{Words, head_ref};
 use kika_git::branches::BranchName;
 use kika_git::commit_files::CommitId;
 use kika_git::repo_state::{Operation, resumable};
+use kika_git::version;
 
 fn no_head(words: &Words) -> String {
     format!(
@@ -347,6 +348,7 @@ impl AppState {
             remote,
             oids: vec![head],
             fallback,
+            no_write_fetch_head: self.git_has(version::NO_WRITE_FETCH_HEAD),
         }]
     }
 
@@ -745,16 +747,39 @@ mod tests {
                     remote,
                     oids,
                     fallback,
+                    no_write_fetch_head,
                 },
             ] => {
                 assert_eq!(*remote, RemoteName::from("origin"));
                 assert_eq!(oids, &[id(HEAD)]);
                 // GitHub serves the head by id alone.
                 assert_eq!(*fallback, None);
+                // An unknown git: no flag it may not have.
+                assert!(!no_write_fetch_head);
                 assert!(tag.user);
                 *tag
             }
             other => panic!("expected one fetch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_checkout_fetch_leaves_fetch_head_alone_only_where_git_can_be_told_to() {
+        use crate::test_support::version;
+        for (git, want) in [(version(29), true), (version(28), false), (None, false)] {
+            let mut state = asked(missing(BranchAt::Absent, Some("origin")));
+            state.git_version = git;
+            let effects = press(&mut state, KeyCode::Char('y'));
+            let [
+                Effect::FetchReviewCommits {
+                    no_write_fetch_head,
+                    ..
+                },
+            ] = effects.as_slice()
+            else {
+                panic!("{effects:?}");
+            };
+            assert_eq!(*no_write_fetch_head, want, "{git:?}");
         }
     }
 

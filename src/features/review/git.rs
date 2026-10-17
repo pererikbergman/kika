@@ -84,27 +84,44 @@ pub fn merge_base_command(base: &CommitId, head: &CommitId) -> GitCommand {
 }
 
 /// `git fetch` of `oids` alone from `remote`. With no destination, no ref
-/// moves; `fetch.writeFetchHEAD=false` keeps `FETCH_HEAD` as it is on git
-/// 2.29 and later, and older git ignores it (`--no-write-fetch-head`
-/// would fail there). No tags and no submodules: only the forge's host is
-/// reached. `--` ends the options, as git 2.15's fetch already allows.
-/// English and no optional locks, but not literal pathspecs: a fetch may gc
-/// and run the `pre-auto-gc` hook, which keeps the user's.
-pub fn fetch_commits_command(remote: &RemoteName, oids: &[CommitId]) -> GitCommand {
+/// moves. `FETCH_HEAD` is kept as it is by `--no-write-fetch-head`, passed
+/// when `no_write_fetch_head` (git 2.29 and later; older git has no such
+/// flag and would fail). `fetch.writeFetchHEAD=false` alone is not enough:
+/// git ignores it when the fetch names what to fetch, as this one does; it
+/// stays as it was, and harms nothing. No tags and no submodules: only the
+/// forge's host is reached. `--` ends the options, as git 2.15's fetch
+/// already allows. English and no optional locks, but not literal
+/// pathspecs: a fetch may gc and run the `pre-auto-gc` hook, which keeps
+/// the user's.
+pub fn fetch_commits_command(
+    remote: &RemoteName,
+    oids: &[CommitId],
+    no_write_fetch_head: bool,
+) -> GitCommand {
     let ids: Vec<&str> = oids.iter().map(CommitId::as_str).collect();
-    fetch_command(remote, &ids)
+    fetch_command(remote, &ids, no_write_fetch_head)
 }
 
 /// [`fetch_commits_command`] of the forge's head ref `head` instead of
 /// ids: the same line, and with no destination no local ref moves.
-pub fn fetch_head_ref_command(remote: &RemoteName, head: &str) -> GitCommand {
-    fetch_command(remote, &[head])
+pub fn fetch_head_ref_command(
+    remote: &RemoteName,
+    head: &str,
+    no_write_fetch_head: bool,
+) -> GitCommand {
+    fetch_command(remote, &[head], no_write_fetch_head)
 }
 
-fn fetch_command(remote: &RemoteName, what: &[&str]) -> GitCommand {
+fn fetch_command(remote: &RemoteName, what: &[&str], no_write_fetch_head: bool) -> GitCommand {
     let cmd = GitCommand::new("-c")
         .arg("fetch.writeFetchHEAD=false")
-        .arg("fetch")
+        .arg("fetch");
+    let cmd = if no_write_fetch_head {
+        cmd.arg("--no-write-fetch-head")
+    } else {
+        cmd
+    };
+    let cmd = cmd
         .arg("--quiet")
         .arg("--no-tags")
         .arg("--no-recurse-submodules")
@@ -149,12 +166,15 @@ pub fn missing_commits(
 /// caller to check again. A fallback that is not a merge request's head
 /// ref is ignored. A remote named like an option is refused, as for a tag
 /// push. Errors are safe to draw and hold no credentials; when both
-/// fetches fail, the first one's is kept.
+/// fetches fail, the first one's is kept. `no_write_fetch_head` is
+/// whether git is new enough for `--no-write-fetch-head`; see
+/// [`fetch_commits_command`].
 pub fn fetch_commits(
     runner: &dyn GitRunner,
     remote: &RemoteName,
     oids: &[CommitId],
     fallback: Option<&str>,
+    no_write_fetch_head: bool,
     askpass: Option<&AskpassEnv>,
 ) -> Result<(), String> {
     if remote.0.is_empty() || remote.0.starts_with(b"-") || oids.is_empty() {
@@ -167,9 +187,11 @@ pub fn fetch_commits(
             .map(drop)
             .map_err(|e| e.to_string())
     };
-    let first = fetch(fetch_commits_command(remote, oids));
+    let first = fetch(fetch_commits_command(remote, oids, no_write_fetch_head));
     match (first, fallback.filter(|head| head_ref_ok(head))) {
-        (Err(error), Some(head)) => fetch(fetch_head_ref_command(remote, head)).map_err(|_| error),
+        (Err(error), Some(head)) => {
+            fetch(fetch_head_ref_command(remote, head, no_write_fetch_head)).map_err(|_| error)
+        }
         (result, _) => result,
     }
 }
@@ -612,11 +634,30 @@ mod tests {
             args(&merge_base_command(&id("b0"), &id("a1"))),
             ["merge-base", "b0", "a1"]
         );
+        let ids = [id("a1"), id("b0")];
+        let origin = RemoteName::from("origin");
+        // Git 2.29 and later: the flag, before `--`.
+        let new = args(&fetch_commits_command(&origin, &ids, true));
         assert_eq!(
-            args(&fetch_commits_command(
-                &RemoteName::from("origin"),
-                &[id("a1"), id("b0")]
-            )),
+            new,
+            [
+                "-c",
+                "fetch.writeFetchHEAD=false",
+                "fetch",
+                "--no-write-fetch-head",
+                "--quiet",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "--",
+                "origin",
+                "a1",
+                "b0",
+            ]
+        );
+        // Older git has no such flag: the config alone.
+        let old = args(&fetch_commits_command(&origin, &ids, false));
+        assert_eq!(
+            old,
             [
                 "-c",
                 "fetch.writeFetchHEAD=false",
@@ -630,6 +671,10 @@ mod tests {
                 "b0",
             ]
         );
+        for argv in [&new, &old] {
+            let dashes = argv.iter().position(|a| a == "--").unwrap();
+            assert_eq!(argv[dashes + 1], "origin", "{argv:?}");
+        }
         let query = env_list(&[STANDARD_ENV.as_slice(), &[("GIT_NO_LAZY_FETCH", "1")]].concat());
         for cmd in [
             has_commit_command(&id("a1")),
@@ -638,14 +683,14 @@ mod tests {
             assert_eq!(cmd.env_profile(), Some(EnvProfile::Standard), "{cmd:?}");
             assert_eq!(cmd.process_env(), query, "{cmd:?}");
         }
-        let fetch = fetch_commits_command(&RemoteName::from("origin"), &[id("a1")]);
+        let fetch = fetch_commits_command(&RemoteName::from("origin"), &[id("a1")], true);
         assert_eq!(fetch.env_profile(), Some(EnvProfile::Locale));
         assert_eq!(
             fetch.process_env(),
             env_list(&[("LC_ALL", "C"), ("GIT_OPTIONAL_LOCKS", "0")])
         );
         assert_eq!(
-            fetch_commits_command(&RemoteName::from("o"), &[]).subcommand(),
+            fetch_commits_command(&RemoteName::from("o"), &[], false).subcommand(),
             "fetch"
         );
     }
@@ -694,6 +739,7 @@ mod tests {
                 &RemoteName::from("origin"),
                 &[id("a1")],
                 None,
+                false,
                 Some(&bridge)
             ),
             Ok(())
@@ -721,8 +767,15 @@ mod tests {
             ],
             fail("fatal: https://user:tok@github.com/a/b \x1b[2J refused\n"),
         );
-        let message =
-            fetch_commits(&fake, &RemoteName::from("origin"), &[id("a1")], None, None).unwrap_err();
+        let message = fetch_commits(
+            &fake,
+            &RemoteName::from("origin"),
+            &[id("a1")],
+            None,
+            false,
+            None,
+        )
+        .unwrap_err();
         assert!(!message.contains("tok"), "{message}");
         assert!(!message.contains('\x1b'), "{message}");
 
@@ -733,62 +786,74 @@ mod tests {
                 &RemoteName::from("--upload-pack=x"),
                 &[id("a1")],
                 Some("refs/merge-requests/1/head"),
+                false,
                 None
             )
             .is_err()
         );
-        assert!(fetch_commits(&fake, &RemoteName::from("origin"), &[], None, None).is_err());
+        assert!(fetch_commits(&fake, &RemoteName::from("origin"), &[], None, false, None).is_err());
         fake.assert_done();
     }
 
-    /// The fixed fetch line of `what` from `origin`.
-    fn fetch_argv(what: &str) -> Vec<&str> {
-        vec![
-            "-c",
-            "fetch.writeFetchHEAD=false",
-            "fetch",
-            "--quiet",
-            "--no-tags",
-            "--no-recurse-submodules",
-            "--",
-            "origin",
-            what,
+    /// The fixed fetch line of `what` from `origin`, with
+    /// `--no-write-fetch-head` when `no_write_fetch_head`.
+    fn fetch_argv(what: &str, no_write_fetch_head: bool) -> Vec<&str> {
+        let flag: &[&str] = if no_write_fetch_head {
+            &["--no-write-fetch-head"]
+        } else {
+            &[]
+        };
+        [
+            &["-c", "fetch.writeFetchHEAD=false", "fetch"][..],
+            flag,
+            &[
+                "--quiet",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "--",
+                "origin",
+                what,
+            ],
         ]
+        .concat()
     }
 
     const MR_HEAD: &str = "refs/merge-requests/12/head";
 
     #[test]
     fn a_failed_fetch_by_id_falls_back_on_the_merge_requests_head_ref() {
-        let fake = FakeRunner::new()
-            .expect(&fetch_argv("a1"), fail("fatal: not our ref a1\n"))
-            .expect(&fetch_argv(MR_HEAD), ok(b""));
-        let origin = RemoteName::from("origin");
-        assert_eq!(
-            fetch_commits(&fake, &origin, &[id("a1")], Some(MR_HEAD), None),
-            Ok(())
-        );
-        fake.assert_done();
-        // The same environment as the fetch by id, prompts and all.
-        let envs = fake.process_envs();
-        assert_eq!(envs.len(), 2);
-        assert_eq!(envs[0], envs[1]);
-        assert_eq!(
-            args(&fetch_head_ref_command(&origin, MR_HEAD)),
-            fetch_argv(MR_HEAD)
-        );
+        for flag in [true, false] {
+            let fake = FakeRunner::new()
+                .expect(&fetch_argv("a1", flag), fail("fatal: not our ref a1\n"))
+                .expect(&fetch_argv(MR_HEAD, flag), ok(b""));
+            let origin = RemoteName::from("origin");
+            assert_eq!(
+                fetch_commits(&fake, &origin, &[id("a1")], Some(MR_HEAD), flag, None),
+                Ok(())
+            );
+            fake.assert_done();
+            // The same environment as the fetch by id, prompts and all.
+            let envs = fake.process_envs();
+            assert_eq!(envs.len(), 2);
+            assert_eq!(envs[0], envs[1]);
+            assert_eq!(
+                args(&fetch_head_ref_command(&origin, MR_HEAD, flag)),
+                fetch_argv(MR_HEAD, flag)
+            );
+        }
     }
 
     #[test]
     fn when_both_fetches_fail_the_first_error_is_kept() {
         let fake = FakeRunner::new()
-            .expect(&fetch_argv("a1"), fail("fatal: first\n"))
-            .expect(&fetch_argv(MR_HEAD), fail("fatal: second\n"));
+            .expect(&fetch_argv("a1", false), fail("fatal: first\n"))
+            .expect(&fetch_argv(MR_HEAD, false), fail("fatal: second\n"));
         let message = fetch_commits(
             &fake,
             &RemoteName::from("origin"),
             &[id("a1")],
             Some(MR_HEAD),
+            false,
             None,
         )
         .unwrap_err();
@@ -809,13 +874,14 @@ mod tests {
             Some("--upload-pack=x"),
             Some("+refs/merge-requests/12/head"),
         ] {
-            let fake = FakeRunner::new().expect(&fetch_argv("a1"), fail("fatal: no\n"));
+            let fake = FakeRunner::new().expect(&fetch_argv("a1", false), fail("fatal: no\n"));
             assert!(
                 fetch_commits(
                     &fake,
                     &RemoteName::from("origin"),
                     &[id("a1")],
                     fallback,
+                    false,
                     None
                 )
                 .is_err(),
@@ -824,13 +890,14 @@ mod tests {
             fake.assert_done();
         }
         // A fetch by id that works needs no fallback.
-        let fake = FakeRunner::new().expect(&fetch_argv("a1"), ok(b""));
+        let fake = FakeRunner::new().expect(&fetch_argv("a1", false), ok(b""));
         assert_eq!(
             fetch_commits(
                 &fake,
                 &RemoteName::from("origin"),
                 &[id("a1")],
                 Some(MR_HEAD),
+                false,
                 None
             ),
             Ok(())
@@ -1186,6 +1253,11 @@ mod tests {
         use kika_git::fake::{TempDir, git};
 
         let tmp = TempDir::new("pr-objects");
+        // `--no-write-fetch-head` needs git 2.29; an older one cannot run this.
+        let found = kika_git::version::check(&CliRunner::isolated(tmp.path()));
+        if !matches!(found, Ok(Some(v)) if v >= kika_git::version::NO_WRITE_FETCH_HEAD) {
+            return;
+        }
         let remote = tmp.path().join("remote.git");
         let work = tmp.path().join("work");
         let clone = tmp.path().join("clone");
@@ -1224,6 +1296,7 @@ mod tests {
             &RemoteName::from("origin"),
             std::slice::from_ref(&head),
             None,
+            true,
             None,
         )
         .unwrap();
@@ -1232,6 +1305,10 @@ mod tests {
             git(&clone, &["for-each-ref"]),
             refs_before,
             "a ref was written"
+        );
+        assert!(
+            !clone.join(".git/FETCH_HEAD").exists(),
+            "FETCH_HEAD was written"
         );
 
         let (range, rows) = pr_files(&runner, &base, &head).unwrap();
