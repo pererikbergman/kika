@@ -37,6 +37,7 @@ const NOT_ALLOWED: &str = "No target repository is allowed by [forge.allow] in t
 const NOT_ASKED: &str =
     "The remote is on no forge host in the global config, or not in [forge.allow]";
 const NO_HOSTS: &str = "Name GitHub hosts under [forge] in the global config";
+const NO_GITLAB_ASK: &str = "List GitLab hosts under [forge] gitlab_ask in the global config";
 const REFRESHING: &str = "Pull requests are already being refreshed";
 
 /// A pull request being put together. Its parts are taken when each step
@@ -155,14 +156,20 @@ pub(crate) fn create_disabled(state: &AppState) -> Option<Reason> {
     state.pr_create.is_some().then_some(CREATING.into())
 }
 
-/// Why the badges cannot be asked for again now: no host opted in, the
-/// remote on none of them or left out by `[forge.allow]`, a call already running, or the host rate
-/// limited until a second still to come. Fixed text only, never the
-/// forge's.
+/// Why the badges cannot be asked for again now: no host opted in (naming
+/// GitLab's opt-in when only GitLab hosts are set up), the remote on none
+/// of them or left out by `[forge.allow]`, a call already running, or the
+/// host rate limited until a second still to come. Fixed text only, never
+/// the forge's.
 pub(crate) fn refresh_disabled(state: &AppState) -> Option<Reason> {
     let forge = &state.forge;
     if !forge.enabled() {
-        return Some(NO_HOSTS.into());
+        let text = if state.forge_gitlab_hosts.is_empty() {
+            NO_HOSTS
+        } else {
+            NO_GITLAB_ASK
+        };
+        return Some(text.into());
     }
     let Some(repo) = &forge.repo else {
         return Some(NOT_ASKED.into());
