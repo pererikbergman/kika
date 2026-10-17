@@ -12,12 +12,16 @@ use crate::layout::SidePanel;
 use crate::model::AppState;
 use crate::rows::{DIFF_MARK, clock, diff_mark_style};
 use crate::view::{
-    PanelLook, clip, elide_right, fit, list_title, no_matches, pad, range_row, scrolled,
+    PanelLook, clip, elide_left, elide_right, list_title, no_matches, pad, range_row, scrolled,
     scrolled_step_to, width_of,
 };
 use kika_forge::forge::{Words, cli_text, words};
 use kika_forge::{CiState, ForgeState, ForgeStatus, ForgeView, PrBadge, PrState};
 use kika_git::branches::{Branch, BranchName, LogRow, Track};
+
+/// Columns an upstream keeps before it is dropped from a branch row
+/// (`ori…`): anything shorter says nothing.
+const MIN_UPSTREAM: usize = 4;
 
 /// Columns given to a log row's author, so subjects line up.
 const LOG_AUTHOR: usize = 16;
@@ -225,9 +229,12 @@ fn tabs_title(shown: BranchesTab, look: &PanelLook) -> String {
 
 /// `* name  upstream ↑1 ↓2  #12 open ✓`: `*` marks the current branch,
 /// counts of zero are left out, a deleted upstream says `gone`, and the
-/// branch's pull request, in its forge's words, ends the row. The name
-/// loses its start first, so the upstream, counts and pull request stay
-/// in sight. A `spinner` frame takes the marker's place.
+/// branch's pull request, in its forge's words, ends the row. Where it
+/// does not fit, the upstream gives way to the pull request, then is
+/// shortened at its end and dropped, then the counts go, then the pull
+/// request: the name is the last to give way, at its start, since it
+/// says which branch the row is. A `spinner` frame takes the marker's
+/// place.
 fn branch_row(
     branch: &Branch,
     spinner: Option<&str>,
@@ -239,10 +246,12 @@ fn branch_row(
         None if branch.head => "* ".to_string(),
         None => "  ".to_string(),
     };
-    let track = match branch.track {
-        Track::None => String::new(),
-        Track::Gone => " gone".to_string(),
-        Track::Counts { ahead, behind } => {
+    // Counts and `gone` say how the branch stands against its upstream,
+    // so without one there are none.
+    let mut track = match (&branch.upstream, branch.track) {
+        (None, _) | (_, Track::None) => String::new(),
+        (Some(_), Track::Gone) => " gone".to_string(),
+        (Some(_), Track::Counts { ahead, behind }) => {
             let mut counts = String::new();
             if ahead > 0 {
                 counts.push_str(&format!(" ↑{ahead}"));
@@ -253,21 +262,44 @@ fn branch_row(
             counts
         }
     };
-    let mut suffix = match &branch.upstream {
-        Some(upstream) => format!("  {upstream}{track}"),
-        None => String::new(),
+    let mut upstream = branch.upstream.as_ref().map(ToString::to_string);
+    let badge = badge
+        .map(|(badge, words)| format!("  {}", badge_text(badge, words)))
+        .unwrap_or_default();
+    // Too narrow for both beside a name: the pull request stays.
+    if let Some(upstream_name) = &upstream
+        && !badge.is_empty()
+        && 2 + width_of(upstream_name) + width_of(&track) + width_of(&badge) + 3 > width
+    {
+        upstream = None;
+        track.clear();
+    }
+    let name = branch.name.display();
+    let row = |upstream: &str, track: &str, badge: &str| {
+        let row = format!("{marker}{name}{upstream}{track}{badge}");
+        (width_of(&row) <= width).then_some(row)
     };
-    if let Some((badge, words)) = badge {
-        let badge = format!("  {}", badge_text(badge, words));
-        // Too narrow for both beside a name: the pull request stays.
-        if width_of(&suffix) + width_of(&badge) + 3 > width {
-            suffix = badge;
-        } else {
-            suffix.push_str(&badge);
+    if let Some(upstream) = &upstream {
+        if let Some(full) = row(&format!("  {upstream}"), &track, &badge) {
+            return full;
+        }
+        // Shortened at its end, to what is left after the rest and the gap.
+        let rest = width_of(&format!("{marker}{name}{track}{badge}  "));
+        let room = width.saturating_sub(rest);
+        if room >= MIN_UPSTREAM {
+            let short = elide_right(upstream, room);
+            return format!("{marker}{name}  {short}{track}{badge}");
         }
     }
-    let name = fit(&branch.name.display(), &suffix, width.saturating_sub(2));
-    elide_right(&format!("{marker}{name}"), width)
+    if let Some(row) = row("", &track, &badge)
+        .or_else(|| row("", "", &badge))
+        .or_else(|| row("", "", ""))
+    {
+        return row;
+    }
+    // Only the name is left to give way, at its start.
+    let room = width.saturating_sub(width_of(&marker)).max(1);
+    elide_right(&format!("{marker}{}", elide_left(&name, room)), width)
 }
 
 /// `#12 open ✓` (`!12` on GitLab): the number after the forge's sign, the
@@ -548,20 +580,25 @@ mod tests {
     }
 
     #[test]
-    fn a_narrow_row_cuts_the_name_not_the_badge() {
+    fn a_narrow_row_drops_the_upstream_then_the_badge_before_the_name() {
+        let badge = pr(42, PrState::Open, Some(CiState::Failure));
+        let row = |name: &str, width| {
+            branch_row(
+                &branch(name, false, Some("origin/x"), Track::None),
+                None,
+                Some((&badge, words(ForgeKind::GitHub))),
+                width,
+            )
+        };
+        // The name and the badge fit whole; the upstream goes.
+        assert_eq!(row("feature/x", 26), "  feature/x  #42 open ✗");
+        // A name too long for anything beside it keeps the row to itself.
         let long = "feature/".repeat(10);
-        let row = branch_row(
-            &branch(&long, false, Some("origin/x"), Track::None),
-            None,
-            Some((
-                &pr(42, PrState::Open, Some(CiState::Failure)),
-                words(ForgeKind::GitHub),
-            )),
-            34,
-        );
-        assert!(row.ends_with("origin/x  #42 open ✗"), "{row:?}");
-        assert!(row.starts_with("  …"), "{row:?}");
-        assert_eq!(crate::view::width_of(&row), 34);
+        let cut = row(&long, 34);
+        assert!(cut.starts_with("  …"), "{cut:?}");
+        assert!(!cut.contains("#42"), "{cut:?}");
+        assert!(!cut.contains("origin"), "{cut:?}");
+        assert_eq!(crate::view::width_of(&cut), 34);
     }
 
     /// The forge line drawn at `width` x 24, borders trimmed off.
@@ -981,15 +1018,18 @@ mod tests {
             60,
         );
         assert_eq!(wide, "  topic  origin/topic  #12 open");
-        // A wide name gives way by columns, not bytes.
-        let cjk = branch_row(
-            &branch("日本語のブランチ名前", false, None, Track::None),
-            None,
-            Some((&pr(3, PrState::Merged, None), words(ForgeKind::GitHub))),
-            16,
-        );
-        assert!(cjk.ends_with("  #3 merged"), "{cjk:?}");
-        assert!(crate::view::width_of(&cjk) <= 16, "{cjk:?}");
+        // A wide name gives way by columns, not bytes, and only once the
+        // badge has gone.
+        let cjk = |width| {
+            branch_row(
+                &branch("日本語のブランチ名前", false, None, Track::None),
+                None,
+                Some((&pr(3, PrState::Merged, None), words(ForgeKind::GitHub))),
+                width,
+            )
+        };
+        assert_eq!(cjk(33), "  日本語のブランチ名前  #3 merged");
+        assert_eq!(cjk(16), "  …ブランチ名前");
     }
 
     #[test]
@@ -1068,7 +1108,7 @@ mod tests {
     }
 
     #[test]
-    fn a_long_name_gives_way_to_the_upstream_and_counts() {
+    fn a_long_name_drops_the_upstream_and_counts_before_it_is_cut() {
         let long = "feature/".repeat(10);
         let row = branch_row(
             &branch(
@@ -1084,9 +1124,68 @@ mod tests {
             None,
             30,
         );
-        assert!(row.ends_with("origin/x ↑3"), "{row:?}");
+        assert!(!row.contains("origin"), "{row:?}");
+        assert!(!row.contains('↑'), "{row:?}");
         assert!(row.starts_with("  …"), "{row:?}");
+        assert!(long.ends_with(&row["  …".len()..]), "{row:?}");
         assert_eq!(crate::view::width_of(&row), 30);
+    }
+
+    #[test]
+    fn the_upstream_then_the_counts_give_way_before_the_name() {
+        let main = branch(
+            "main",
+            true,
+            Some("origin/main"),
+            Track::Counts {
+                ahead: 3,
+                behind: 0,
+            },
+        );
+        let row = |width| branch_row(&main, None, None, width);
+        assert_eq!(row(22), "* main  origin/main ↑3");
+        assert_eq!(row(40), "* main  origin/main ↑3");
+        // The upstream is shortened at its end, down to four columns.
+        assert_eq!(row(18), "* main  origin… ↑3");
+        assert_eq!(row(15), "* main  ori… ↑3");
+        // Shorter says nothing: it goes, and the counts stay by the name.
+        assert_eq!(row(14), "* main ↑3");
+        assert_eq!(row(9), "* main ↑3");
+        assert_eq!(row(8), "* main");
+        assert_eq!(row(6), "* main");
+        // Only now does the name give way, at its start.
+        assert_eq!(row(5), "* …in");
+    }
+
+    #[test]
+    fn at_60_and_80_columns_the_branches_row_keeps_the_branch_name() {
+        let main = branch(
+            "main",
+            true,
+            Some("origin/main"),
+            Track::Counts {
+                ahead: 3,
+                behind: 0,
+            },
+        );
+        for expanded in [true, false] {
+            let mut state = focused(vec![main.clone()]);
+            if !expanded {
+                state.focus = Focus::Files;
+                state.expanded = SidePanel::Files;
+            }
+            for width in [60, 80] {
+                let rows = draw(&state, width, 40);
+                assert!(contains(&rows, "* main"), "{width}: {rows:#?}");
+                assert!(!contains(&rows, "* …"), "{width}: {rows:#?}");
+                for row in &rows {
+                    assert!(
+                        crate::view::width_of(row) <= usize::from(width),
+                        "{width}: {rows:#?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
