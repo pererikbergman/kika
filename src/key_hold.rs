@@ -80,23 +80,28 @@ impl AppState {
 
     /// The reload landed: replay the held keys in order on what it shows.
     /// A replayed key that starts another reload holds the rest for it.
-    /// One that opens a question, prompt or input drops the rest: they
-    /// were typed for the panels, and must never answer something the
-    /// user has not seen, such as a discard of another file.
+    ///
+    /// Each key replays only while keys still go to the panels. Anything
+    /// else on top (a question or prompt a replayed key opened, or one
+    /// that arrived while the keys waited, such as git asking for a
+    /// password) drops the rest: they were typed for the panels, and must
+    /// never answer something the user has not seen.
     pub(crate) fn release_keys(&mut self) -> Vec<Effect> {
         self.key_hold.seq = None;
         let mut effects = Vec::new();
-        while self.key_hold.seq.is_none()
-            && let Some(key) = self.key_hold.keys.pop_front()
-        {
+        while self.key_hold.seq.is_none() && self.key_hold.has_keys() {
+            if !self.keys_go_to_panels() {
+                self.drop_held_keys();
+                break;
+            }
+            let Some(key) = self.key_hold.keys.pop_front() else {
+                break;
+            };
             // A notice the reload set stays unless the key sets its own.
             let before = self.notice.clone();
             effects.extend(self.update(AppIntent::Key(key)));
             if self.notice.is_none() {
                 self.notice = before;
-            }
-            if self.key_hold.seq.is_none() && !self.keys_go_to_panels() {
-                self.drop_held_keys();
             }
         }
         effects
@@ -119,7 +124,9 @@ mod tests {
     use crate::features::custom_commands::{OutputMode, Panel, test_table};
     use crate::handoff::HandOff;
     use crate::keymap::Keymap;
+    use crate::layout::SidePanel;
     use crate::list_input::RANGE_FILES_CHANGED;
+    use crate::model::Focus;
     use crate::op::GitOp;
     use crate::popup::{ErrorPopup, Popup};
     use crate::test_support::*;
@@ -283,6 +290,60 @@ mod tests {
         assert_eq!(state.key_focus(), KeyScope::DiscardConfirm);
         assert_eq!(state.notice, Some(KEYS_DROPPED.into()));
         assert!(!state.key_hold.has_keys());
+    }
+
+    #[test]
+    fn held_keys_never_answer_a_question_that_arrived_while_they_waited() {
+        let mut state = remote_ready();
+        state.focus = Focus::Files;
+        state.expanded = SidePanel::Files;
+        let (push, _) = remote_of(&shift(&mut state, 'P'));
+        let tag = refresh_tag(&mut state);
+        press_char(&mut state, 'y');
+        assert!(state.key_hold.has_keys(), "held");
+
+        // Ssh asks about the host key before the status lands.
+        state.update(asked(push, "Are you sure (yes/no)?", true));
+        let effects = landed(&mut state, tag, vec![]);
+
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::AnswerCredential(_))),
+            "{effects:?}"
+        );
+        assert!(matches!(
+            state.popups.last(),
+            Some(Popup::Credential(prompt)) if prompt.confirm
+        ));
+        assert!(!state.key_hold.has_keys());
+        assert_eq!(state.notice, Some(KEYS_DROPPED.into()));
+    }
+
+    #[test]
+    fn held_keys_never_type_into_a_password_prompt() {
+        let mut state = remote_ready();
+        state.focus = Focus::Files;
+        state.expanded = SidePanel::Files;
+        let (push, _) = remote_of(&shift(&mut state, 'P'));
+        let tag = refresh_tag(&mut state);
+        press_char(&mut state, 'x');
+        press(&mut state, KeyCode::Enter);
+
+        state.update(asked(push, "Password for 'https://u@h':", false));
+        let effects = landed(&mut state, tag, vec![]);
+
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::AnswerCredential(_))),
+            "{effects:?}"
+        );
+        match state.popups.last() {
+            Some(Popup::Credential(prompt)) => assert!(prompt.input.line().text.is_empty()),
+            other => panic!("expected the password prompt, got {other:?}"),
+        }
+        assert_eq!(state.notice, Some(KEYS_DROPPED.into()));
     }
 
     #[test]
